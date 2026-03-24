@@ -172,6 +172,11 @@ def test_evaluate_regressions_accepts_metric_improvements() -> None:
     assert checks["runtime_overhead_pct"]["delta"] == -2.0
 
 
+def test_pct_overhead_preserves_signed_values() -> None:
+    assert benchmark_harness._pct_overhead(100.0, 98.0) == pytest.approx(-2.0)
+    assert benchmark_harness._pct_overhead(100.0, 103.5) == pytest.approx(3.5)
+
+
 def test_run_benchmark_harness_regression_mode_writes_comparison_report(
     tmp_path: Path,
 ) -> None:

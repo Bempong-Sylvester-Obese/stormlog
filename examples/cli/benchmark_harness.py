@@ -17,9 +17,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 REPORT_VERSION = "v0.3"
 DEFAULT_BUDGETS_PATH = REPO_ROOT / "docs" / "benchmarks" / "v0.2_budgets.json"
 DEFAULT_BASELINE_PATH = REPO_ROOT / "docs" / "benchmarks" / "v0.3_baseline.json"
-DEFAULT_TOLERANCES_PATH = (
-    REPO_ROOT / "docs" / "benchmarks" / "v0.3_tolerances.json"
-)
+DEFAULT_TOLERANCES_PATH = REPO_ROOT / "docs" / "benchmarks" / "v0.3_tolerances.json"
 DEFAULT_OUTPUT_PATH = REPO_ROOT / "artifacts" / "benchmarks" / "latest.json"
 DEFAULT_ARTIFACT_ROOT = REPO_ROOT / "artifacts" / "benchmarks" / "scenarios"
 DEFAULT_GATE_MODE = "budget"
@@ -146,7 +144,7 @@ def _run_scenario(
 def _pct_overhead(baseline: float, measured: float) -> float:
     if baseline <= 0:
         return 0.0 if measured <= 0 else float("inf")
-    return max(0.0, ((measured - baseline) / baseline) * 100.0)
+    return ((measured - baseline) / baseline) * 100.0
 
 
 def _metric_values_from_mapping(
@@ -472,9 +470,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         gate_mode=args.gate_mode,
         budgets_path=args.budgets if args.gate_mode == "budget" else None,
         baseline_path=args.baseline if args.gate_mode == "regression" else None,
-        tolerances_path=(
-            args.tolerances if args.gate_mode == "regression" else None
-        ),
+        tolerances_path=(args.tolerances if args.gate_mode == "regression" else None),
         artifact_root=args.artifact_root,
         output_path=args.output,
     )
@@ -484,7 +480,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         print(f"Runtime overhead: {report['metrics']['runtime_overhead_pct']:.2f}%")
         print(f"CPU overhead: {report['metrics']['cpu_overhead_pct']:.2f}%")
         print(f"Sampling impact: {report['metrics']['sampling_impact_pct']:.2f}%")
-        print(f"Artifact growth: {report['metrics']['artifact_growth_bytes']:.0f} bytes")
+        print(
+            f"Artifact growth: {report['metrics']['artifact_growth_bytes']:.0f} bytes"
+        )
         print(f"Budget status: {'PASS' if report['passed'] else 'FAIL'}")
     else:
         print(f"Regression baseline: {args.baseline}")
