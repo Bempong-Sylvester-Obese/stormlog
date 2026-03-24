@@ -1,0 +1,10 @@
+{
+  "version": "v0.3",
+  "description": "Allowed positive regression deltas for the v0.3 CI memory regression gate.",
+  "tolerances": {
+    "runtime_overhead_pct": 20.0,
+    "cpu_overhead_pct": 20.0,
+    "sampling_impact_pct": 15.0,
+    "artifact_growth_bytes": 512.0
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "version": "v0.3",
+  "description": "Baseline metrics for the v0.3 CI memory regression gate.",
+  "config": {
+    "iterations": 5000,
+    "allocation_kb": 512,
+    "default_interval": 0.1,
+    "lowfreq_interval": 0.5
+  },
+  "metrics": {
+    "runtime_overhead_pct": 0.0,
+    "cpu_overhead_pct": 0.0,
+    "sampling_impact_pct": 0.0,
+    "artifact_growth_bytes": 1386.0
+  }
+}
