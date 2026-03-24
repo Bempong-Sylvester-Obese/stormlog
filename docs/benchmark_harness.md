@@ -1,12 +1,16 @@
 [← Back to main docs](index.md)
 
-# Benchmark Harness (v0.2)
+# Benchmark Harness (v0.3)
 
 > **Source checkout only.** `python -m examples.cli.benchmark_harness` requires
 > the repository `examples/` package and `docs/benchmarks/`. It is not shipped
 > in the PyPI package.
 
-This benchmark harness measures current CPU tracker overhead and artifact growth with explicit pass/fail budgets.
+This benchmark harness measures CPU tracker overhead and artifact growth. In v0.3
+it supports two gate modes:
+
+- `budget`: compare current metrics to absolute max thresholds
+- `regression`: compare current metrics to a checked-in baseline plus allowed deltas
 
 ## Run the Harness
 
@@ -16,19 +20,34 @@ python -m examples.cli.benchmark_harness \
   --output artifacts/benchmarks/latest.json
 ```
 
+## Enforce Regression Gate
+
+```bash
+python -m examples.cli.benchmark_harness \
+  --check \
+  --gate-mode regression \
+  --iterations 5000 \
+  --baseline docs/benchmarks/v0.3_baseline.json \
+  --tolerances docs/benchmarks/v0.3_tolerances.json \
+  --output artifacts/benchmarks/latest.json
+```
+
+Use this mode for the v0.3 CI memory regression gate. The regression check uses
+`--iterations 5000` so the baseline signal is less noisy than the lighter v0.2
+budget check.
+
 ## Enforce Budgets
 
 ```bash
 python -m examples.cli.benchmark_harness \
   --check \
+  --gate-mode budget \
   --iterations 200 \
   --budgets docs/benchmarks/v0.2_budgets.json \
   --output artifacts/benchmarks/latest.json
 ```
 
-Use `--check` in local validation scripts to fail fast when budget regressions are introduced.
-The default iterations are tuned for stable local/CI signals; keep `--iterations 200`
-unless you are intentionally profiling harness variability.
+Use `--check` in budget mode when you want the older absolute-threshold policy.
 
 ## What It Measures
 
@@ -43,17 +62,28 @@ The current implementation uses `CPUMemoryTracker` and a deterministic CPU workl
 
 The JSON report includes:
 
+- `gate_mode`: which policy was evaluated (`budget` or `regression`).
 - `config`: benchmark configuration and paths.
-- `budgets`: loaded threshold values.
 - `scenarios`: per-scenario runtime, CPU time, event count, and artifact size.
 - `metrics`: computed deltas used for gating.
-- `budget_checks`: per-metric value/max/passed results.
+- `budget_checks`: per-metric value/max/passed results in budget mode.
+- `baseline`: checked-in baseline config and metrics in regression mode.
+- `tolerances`: allowed positive deltas in regression mode.
+- `regression_checks`: per-metric current/baseline/delta/allowed/passed results.
 - `passed`: overall gate status.
 
-## Versioned Budgets
+## Baseline And Tolerance Files
 
-The v0.2 thresholds live in:
+The v0.3 regression gate reads:
+
+- `docs/benchmarks/v0.3_baseline.json`
+- `docs/benchmarks/v0.3_tolerances.json`
+
+Update these files in versioned commits when the accepted performance envelope
+changes. Keep baseline updates explicit: run the harness with the same config as
+the CI job, inspect the new metrics, then commit the baseline or tolerance
+change separately from unrelated code.
+
+The older absolute thresholds still live in:
 
 `docs/benchmarks/v0.2_budgets.json`
-
-Update this file in versioned commits when budget policy changes.
