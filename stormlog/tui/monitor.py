@@ -240,9 +240,10 @@ class TrackerSession:
 
             metadata = dict(getattr(raw_event, "metadata", {}) or {})
             metadata.setdefault("backend", backend_name)
+            partial_fields = set(metadata.get("collector_partial_fields", []) or [])
 
             device_total = getattr(raw_event, "device_total", None)
-            if device_total is None:
+            if device_total is None and "device_total_bytes" not in partial_fields:
                 tracker_total = getattr(tracker, "total_memory", None)
                 device_total = int(tracker_total) if tracker_total is not None else None
 

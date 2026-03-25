@@ -970,11 +970,18 @@ class GPUMemoryProfilerTUI(App):
             return
 
         cleanup_count = cleanup_stats.get("cleanup_count", 0)
-        utilization = stats.get("memory_utilization_percent", 0.0)
+        utilization = stats.get("memory_utilization_percent")
         duration = stats.get("tracking_duration_seconds", 0.0)
+        collector_health = str(stats.get("collector_health_status", "healthy"))
+        telemetry_partial = bool(stats.get("telemetry_partial", False))
+        partial_fields = stats.get("collector_partial_fields", []) or []
+        collector_error = stats.get("collector_last_error")
+        retry_at = stats.get("collector_next_retry_epoch_s")
 
         table.add_row("Status", status_label)
         table.add_row("Device", device_label or "-")
+        table.add_row("Collector Health", collector_health)
+        table.add_row("Telemetry Partial", "Yes" if telemetry_partial else "No")
         table.add_row(
             "Current Allocated",
             self._format_bytes_metric(stats.get("current_memory_allocated")),
@@ -987,7 +994,14 @@ class GPUMemoryProfilerTUI(App):
             "Peak Memory",
             self._format_bytes_metric(stats.get("peak_memory")),
         )
-        table.add_row("Utilization", f"{utilization:.1f}%")
+        table.add_row(
+            "Utilization",
+            (
+                f"{float(utilization):.1f}%"
+                if isinstance(utilization, (int, float))
+                else "-"
+            ),
+        )
         table.add_row(
             "Alloc/sec",
             f"{stats.get('allocations_per_second', 0.0):.2f}",
@@ -996,6 +1010,18 @@ class GPUMemoryProfilerTUI(App):
         table.add_row("Total Events", str(stats.get("total_events", 0)))
         table.add_row("Duration (s)", f"{duration:.1f}")
         table.add_row("Cleanups", str(cleanup_count))
+        if partial_fields:
+            table.add_row(
+                "Partial Fields",
+                ", ".join(str(field) for field in partial_fields),
+            )
+        if collector_error:
+            table.add_row("Collector Error", str(collector_error))
+        if retry_at is not None:
+            table.add_row(
+                "Next Retry",
+                datetime.fromtimestamp(float(retry_at)).strftime("%H:%M:%S"),
+            )
 
     def _format_bytes_metric(self, value: Any) -> str:
         if value is None:
@@ -1035,6 +1061,8 @@ class GPUMemoryProfilerTUI(App):
             "warning": "yellow",
             "critical": "red",
             "error": "red",
+            "collector_degraded": "yellow",
+            "collector_recovered": "green",
             "cleanup": "cyan",
             "peak": "magenta",
         }.get(event_type, "green")
@@ -1055,13 +1083,36 @@ class GPUMemoryProfilerTUI(App):
     def _update_monitor_status(self) -> None:
         session = self.tracker_session
         cleanup_state = "enabled" if self.monitor_auto_cleanup else "disabled"
+        stats = self._last_monitor_stats or {}
+        collector_health = str(stats.get("collector_health_status", "healthy"))
+        telemetry_partial = bool(stats.get("telemetry_partial", False))
+        retry_at = stats.get("collector_next_retry_epoch_s")
+        collector_error = stats.get("collector_last_error")
 
         if session and session.is_active:
             device_label = session.get_device_label() or "current CUDA device"
-            message = (
-                f"Live tracking on **{device_label}**.\n"
-                f"Auto cleanup is {cleanup_state}."
-            )
+            if collector_health == "healthy":
+                message = (
+                    f"Live tracking on **{device_label}**.\n"
+                    f"Auto cleanup is {cleanup_state}."
+                )
+            elif collector_health == "degraded":
+                message = (
+                    f"Live tracking on **{device_label}** with **partial telemetry**.\n"
+                    f"Auto cleanup is {cleanup_state}."
+                )
+            else:
+                message = (
+                    f"Live tracking on **{device_label}** while the collector is **unhealthy**.\n"
+                    f"Telemetry samples are paused until recovery. Auto cleanup is {cleanup_state}."
+                )
+            if telemetry_partial and collector_error:
+                message += f"\nCollector detail: {collector_error}"
+            if retry_at is not None:
+                retry_text = datetime.fromtimestamp(float(retry_at)).strftime(
+                    "%H:%M:%S"
+                )
+                message += f"\nNext retry at **{retry_text}**."
         else:
             message = (
                 "Tracker idle. Start a session to stream GPU allocation events.\n"
