@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Union
 
 import torch
@@ -23,6 +23,24 @@ class DeviceMemorySample:
     device_id: int
 
 
+@dataclass(frozen=True)
+class DeviceMemorySampleResult:
+    """Device-memory sample plus diagnostics about partial/core collection failures."""
+
+    sample: Optional[DeviceMemorySample]
+    partial_fields: tuple[str, ...] = ()
+    errors: dict[str, str] = field(default_factory=dict)
+    core_error: Optional[str] = None
+
+    @property
+    def is_partial(self) -> bool:
+        return self.sample is not None and bool(self.partial_fields)
+
+    @property
+    def is_core_failure(self) -> bool:
+        return self.sample is None
+
+
 class DeviceMemoryCollector(ABC):
     """Backend-specific collector contract for device memory signals."""
 
@@ -37,6 +55,17 @@ class DeviceMemoryCollector(ABC):
     @abstractmethod
     def sample(self) -> DeviceMemorySample:
         """Collect a single normalized memory sample."""
+
+    def sample_with_diagnostics(self) -> DeviceMemorySampleResult:
+        """Collect a sample while preserving core-failure diagnostics."""
+        try:
+            return DeviceMemorySampleResult(sample=self.sample())
+        except Exception as exc:
+            return DeviceMemorySampleResult(
+                sample=None,
+                errors={"core_metrics": str(exc)},
+                core_error=str(exc),
+            )
 
     @abstractmethod
     def capabilities(self) -> Dict[str, Any]:
@@ -104,27 +133,69 @@ class CudaDeviceCollector(DeviceMemoryCollector):
         return bool(torch.cuda.is_available() and not _is_rocm_runtime())
 
     def sample(self) -> DeviceMemorySample:
+        result = self.sample_with_diagnostics()
+        if result.sample is None:
+            raise RuntimeError(result.core_error or "CUDA sample collection failed")
+        return result.sample
+
+    def sample_with_diagnostics(self) -> DeviceMemorySampleResult:
         device_index = (
             self.device.index
             if self.device.index is not None
             else torch.cuda.current_device()
         )
-        allocated = int(torch.cuda.memory_allocated(self.device))
-        reserved = int(torch.cuda.memory_reserved(self.device))
-        used = max(allocated, reserved)
-        total = int(torch.cuda.get_device_properties(self.device).total_memory)
-        free = max(total - used, 0)
-        stats = torch.cuda.memory_stats(self.device)
+        try:
+            allocated = int(torch.cuda.memory_allocated(self.device))
+            reserved = int(torch.cuda.memory_reserved(self.device))
+        except Exception as exc:
+            return DeviceMemorySampleResult(
+                sample=None,
+                errors={"core_metrics": str(exc)},
+                core_error=str(exc),
+            )
 
-        return DeviceMemorySample(
-            allocated_bytes=allocated,
-            reserved_bytes=reserved,
-            used_bytes=used,
-            free_bytes=free,
-            total_bytes=total,
-            active_bytes=int(stats.get("active_bytes.all.current", 0)),
-            inactive_bytes=int(stats.get("inactive_split_bytes.all.current", 0)),
-            device_id=device_index,
+        used = max(allocated, reserved)
+        total: Optional[int] = None
+        free: Optional[int] = None
+        active: Optional[int] = None
+        inactive: Optional[int] = None
+        partial_fields: list[str] = []
+        errors: dict[str, str] = {}
+
+        try:
+            total = int(torch.cuda.get_device_properties(self.device).total_memory)
+            free = max(total - used, 0)
+        except Exception as exc:
+            message = str(exc)
+            partial_fields.extend(["device_total_bytes", "device_free_bytes"])
+            errors["device_total_bytes"] = message
+            errors["device_free_bytes"] = message
+
+        try:
+            stats = torch.cuda.memory_stats(self.device)
+            active = int(stats.get("active_bytes.all.current", 0))
+            inactive = int(stats.get("inactive_split_bytes.all.current", 0))
+        except Exception as exc:
+            message = str(exc)
+            partial_fields.extend(
+                ["allocator_active_bytes", "allocator_inactive_bytes"]
+            )
+            errors["allocator_active_bytes"] = message
+            errors["allocator_inactive_bytes"] = message
+
+        return DeviceMemorySampleResult(
+            sample=DeviceMemorySample(
+                allocated_bytes=allocated,
+                reserved_bytes=reserved,
+                used_bytes=used,
+                free_bytes=free,
+                total_bytes=total,
+                active_bytes=active,
+                inactive_bytes=inactive,
+                device_id=device_index,
+            ),
+            partial_fields=tuple(dict.fromkeys(partial_fields)),
+            errors=errors,
         )
 
     def capabilities(self) -> Dict[str, Any]:
@@ -178,32 +249,55 @@ class MPSDeviceCollector(DeviceMemoryCollector):
         return _is_mps_available()
 
     def sample(self) -> DeviceMemorySample:
+        result = self.sample_with_diagnostics()
+        if result.sample is None:
+            raise RuntimeError(result.core_error or "MPS sample collection failed")
+        return result.sample
+
+    def sample_with_diagnostics(self) -> DeviceMemorySampleResult:
         import torch.mps as torch_mps
 
-        allocated = int(torch_mps.current_allocated_memory())
-        reserved = int(torch_mps.driver_allocated_memory())
+        try:
+            allocated = int(torch_mps.current_allocated_memory())
+            reserved = int(torch_mps.driver_allocated_memory())
+        except Exception as exc:
+            return DeviceMemorySampleResult(
+                sample=None,
+                errors={"core_metrics": str(exc)},
+                core_error=str(exc),
+            )
+
         used = max(allocated, reserved)
 
         total: Optional[int] = None
+        partial_fields: list[str] = []
+        errors: dict[str, str] = {}
         if hasattr(torch_mps, "recommended_max_memory"):
             try:
                 # MPS does not expose a strict physical-total API here; this is the
                 # best runtime approximation currently available from torch.
                 raw_total = int(torch_mps.recommended_max_memory())
                 total = raw_total if raw_total > 0 else None
-            except Exception:
-                total = None
+            except Exception as exc:
+                message = str(exc)
+                partial_fields.extend(["device_total_bytes", "device_free_bytes"])
+                errors["device_total_bytes"] = message
+                errors["device_free_bytes"] = message
         free = max(total - used, 0) if total is not None else None
 
-        return DeviceMemorySample(
-            allocated_bytes=allocated,
-            reserved_bytes=reserved,
-            used_bytes=used,
-            free_bytes=free,
-            total_bytes=total,
-            active_bytes=None,
-            inactive_bytes=None,
-            device_id=0,
+        return DeviceMemorySampleResult(
+            sample=DeviceMemorySample(
+                allocated_bytes=allocated,
+                reserved_bytes=reserved,
+                used_bytes=used,
+                free_bytes=free,
+                total_bytes=total,
+                active_bytes=None,
+                inactive_bytes=None,
+                device_id=0,
+            ),
+            partial_fields=tuple(dict.fromkeys(partial_fields)),
+            errors=errors,
         )
 
     def capabilities(self) -> Dict[str, Any]:
@@ -236,6 +330,7 @@ def build_device_memory_collector(
 __all__ = [
     "DeviceMemoryCollector",
     "DeviceMemorySample",
+    "DeviceMemorySampleResult",
     "CudaDeviceCollector",
     "ROCmDeviceCollector",
     "MPSDeviceCollector",
