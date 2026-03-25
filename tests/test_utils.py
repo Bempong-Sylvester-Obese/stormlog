@@ -1,5 +1,7 @@
+import json
 import os
 import platform
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -102,6 +104,138 @@ def test_get_system_info_detects_rocm_backend(monkeypatch: pytest.MonkeyPatch) -
     assert system_info["rocm_available"] is True
     assert system_info["rocm_version"] == "6.3.0"
     assert system_info["detected_backend"] == "rocm"
+
+
+def test_detect_gpu_hardware_windows_prefers_powershell_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gpumemprof_utils.platform, "system", lambda: "Windows")
+
+    def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        assert kwargs["shell"] is False
+        assert kwargs["timeout"] == 2
+        assert cmd[0] == "powershell"
+        return SimpleNamespace(
+            returncode=0,
+            stdout="\nAMD Radeon RX 7900 XTX\nMicrosoft Basic Render Driver\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(gpumemprof_utils.subprocess, "run", _fake_run)
+
+    hardware_info = gpumemprof_utils._detect_gpu_hardware()
+
+    assert hardware_info["hardware_gpu_detected"] is True
+    assert hardware_info["devices"] == [
+        {
+            "name": "AMD Radeon RX 7900 XTX",
+            "source": "powershell",
+            "vendor": "amd",
+        }
+    ]
+
+
+def test_detect_gpu_hardware_windows_falls_back_to_wmic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gpumemprof_utils.platform, "system", lambda: "Windows")
+
+    calls: list[list[str]] = []
+
+    def _fake_run(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append(list(cmd))
+        if cmd[0] == "powershell":
+            return SimpleNamespace(returncode=1, stdout="", stderr="boom")
+        return SimpleNamespace(
+            returncode=0, stdout="Name\nNVIDIA GeForce RTX 4090\n", stderr=""
+        )
+
+    monkeypatch.setattr(gpumemprof_utils.subprocess, "run", _fake_run)
+
+    hardware_info = gpumemprof_utils._detect_gpu_hardware()
+
+    assert [cmd[0] for cmd in calls] == ["powershell", "wmic"]
+    assert hardware_info["devices"][0]["vendor"] == "nvidia"
+    assert hardware_info["devices"][0]["source"] == "wmic"
+
+
+def test_detect_gpu_hardware_linux_parses_lspci(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gpumemprof_utils.platform, "system", lambda: "Linux")
+    monkeypatch.setattr(
+        gpumemprof_utils.subprocess,
+        "run",
+        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+            returncode=0,
+            stdout=(
+                "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]\n"
+                "04:00.0 Ethernet controller: Intel Corporation Ethernet Controller\n"
+            ),
+            stderr="",
+        ),
+    )
+
+    hardware_info = gpumemprof_utils._detect_gpu_hardware()
+
+    assert hardware_info["hardware_gpu_detected"] is True
+    assert hardware_info["devices"] == [
+        {
+            "name": "Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]",
+            "source": "lspci",
+            "vendor": "amd",
+        }
+    ]
+
+
+def test_detect_gpu_hardware_macos_parses_system_profiler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gpumemprof_utils.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(
+        gpumemprof_utils.subprocess,
+        "run",
+        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "SPDisplaysDataType": [
+                        {
+                            "_name": "Apple M2",
+                            "spdisplays_vendor": "Apple",
+                        }
+                    ]
+                }
+            ),
+            stderr="",
+        ),
+    )
+
+    hardware_info = gpumemprof_utils._detect_gpu_hardware()
+
+    assert hardware_info["hardware_gpu_detected"] is True
+    assert hardware_info["devices"] == [
+        {
+            "name": "Apple M2",
+            "source": "system_profiler",
+            "vendor": "apple",
+        }
+    ]
+
+
+def test_detect_gpu_hardware_returns_empty_on_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gpumemprof_utils.platform, "system", lambda: "Linux")
+
+    def _boom(cmd, **kwargs):  # type: ignore[no-untyped-def]
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs["timeout"])
+
+    monkeypatch.setattr(gpumemprof_utils.subprocess, "run", _boom)
+
+    hardware_info = gpumemprof_utils._detect_gpu_hardware()
+
+    assert hardware_info == {"hardware_gpu_detected": False, "devices": []}
 
 
 def _build_dummy_tf(runtime_gpu_count: int, build_info: dict[str, object]) -> object:
