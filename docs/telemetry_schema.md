@@ -69,6 +69,26 @@ Tracker exports may include backend capability hints under `metadata`:
 - `supports_device_free`
 - `sampling_source`
 
+## Collector health metadata
+
+Always-on tracker exports now annotate collector degradation in `metadata`:
+
+- `collector_health_status` (`healthy`, `degraded`, `unhealthy`)
+- `telemetry_partial` (`bool`)
+- `collector_partial_fields` (`list[str]`)
+- `collector_last_error` (`string | null`)
+- `collector_consecutive_failures` (`integer`)
+- `collector_next_retry_epoch_s` (`float | null`)
+
+Tracker exports may also emit these collector lifecycle events:
+
+- `collector_degraded`
+- `collector_recovered`
+
+When the collector cannot produce core metrics, Stormlog pauses sample emission
+until the next retry window and records the degraded state instead of exporting
+synthetic zero-valued samples.
+
 ## Legacy v1 to v2 conversion defaults
 
 Conversion is permissive by default in `stormlog.telemetry.telemetry_event_from_record`.

@@ -59,6 +59,14 @@ gpumemprof track --warning-threshold 75 --critical-threshold 90 --output alerts.
 gpumemprof track --job-id train-42 --rank 1 --local-rank 1 --world-size 8 --output rank1.json --format json
 ```
 
+For long-running tracking sessions, Stormlog now degrades gracefully when a
+collector becomes unhealthy:
+
+- the tracked workload keeps running
+- exported telemetry includes `collector_degraded` / `collector_recovered` events
+- per-event metadata marks partial or unhealthy collector state
+- retries use bounded exponential backoff instead of crashing the tracker loop
+
 Optional OOM flight-recorder support:
 
 ```bash
@@ -125,6 +133,10 @@ tfmemprof track --interval 0.5 --threshold 4096 --device /CPU:0 --output tf_trac
 tfmemprof track --interval 0.5 --threshold 4096 --output tf_track.json
 tfmemprof track --interval 0.5 --threshold 4096 --job-id train-42 --rank 3 --local-rank 1 --world-size 8 --output tf_rank3.json
 ```
+
+`tfmemprof track` follows the same degraded-mode rules as the PyTorch tracker:
+collector failures pause new sample emission, status events remain visible in the
+artifact stream, and normal sampling resumes automatically after recovery.
 
 ### Analyze TensorFlow results
 
