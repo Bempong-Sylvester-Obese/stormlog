@@ -25,6 +25,12 @@ except ImportError:
     TF_AVAILABLE = False
     tf = None
 
+from stormlog.collector_health import (
+    COLLECTOR_HEALTH_HEALTHY,
+    COLLECTOR_HEALTH_UNHEALTHY,
+    CollectorHealthState,
+    collector_retry_delay_seconds,
+)
 from stormlog.telemetry import (
     resolve_distributed_identity,
     telemetry_event_from_record,
@@ -110,6 +116,11 @@ class MemoryTracker:
         # Thread synchronization
         self._lock = threading.Lock()
         self._stop_event = threading.Event()
+        self._collector_health = CollectorHealthState()
+        self._last_successful_memory_mb: Optional[float] = None
+        self._collector_retry_backoff_initial_s = 1.0
+        self._collector_retry_backoff_factor = 2.0
+        self._collector_retry_backoff_cap_s = 30.0
 
         # Alert callbacks
         self.alert_callbacks: List[Callable[[Dict[str, Any]], None]] = []
@@ -146,7 +157,10 @@ class MemoryTracker:
             "memory_mb": memory_mb,
             "device_id": self._device_id(),
             "context": context,
-            "metadata": metadata or {},
+            "metadata": {
+                **dict(metadata or {}),
+                **self._collector_health.to_dict(),
+            },
             "collector": "stormlog.tensorflow.memory_tracker",
             "sampling_interval_ms": sampling_interval_ms,
             "pid": os.getpid(),
@@ -177,57 +191,165 @@ class MemoryTracker:
 
     def _get_current_memory(self) -> float:
         """Get current memory usage in MB."""
-        try:
-            if "/GPU:" in self.device:
-                # Extract GPU index from device string
-                gpu_id = int(self.device.split(":")[1]) if ":" in self.device else 0
-                memory_info = tf.config.experimental.get_memory_info(f"/GPU:{gpu_id}")
-                current_bytes = memory_info.get("current", 0)
-                if isinstance(current_bytes, (int, float)):
-                    return float(current_bytes) / (1024 * 1024)
-                return 0.0
-            else:
-                # CPU memory tracking
-                import psutil
+        if "/GPU:" in self.device:
+            # Extract GPU index from device string
+            gpu_id = int(self.device.split(":")[1]) if ":" in self.device else 0
+            memory_info = tf.config.experimental.get_memory_info(f"/GPU:{gpu_id}")
+            current_bytes = memory_info.get("current", 0)
+            if isinstance(current_bytes, (int, float)):
+                return float(current_bytes) / (1024 * 1024)
+            raise RuntimeError("TensorFlow memory info returned a non-numeric value")
 
-                process = psutil.Process()
-                return float(process.memory_info().rss) / (1024 * 1024)
-        except Exception as e:
-            if self.enable_logging:
-                logging.warning(f"Could not get memory usage: {e}")
-            return 0.0
+        # CPU memory tracking
+        import psutil
+
+        process = psutil.Process()
+        return float(process.memory_info().rss) / (1024 * 1024)
+
+    def _set_collector_health(
+        self,
+        *,
+        status: str,
+        telemetry_partial: bool,
+        last_error: Optional[str] = None,
+        consecutive_failures: int = 0,
+        next_retry_epoch_s: Optional[float] = None,
+    ) -> None:
+        self._collector_health = CollectorHealthState(
+            status=status,
+            telemetry_partial=telemetry_partial,
+            last_error=last_error,
+            consecutive_failures=consecutive_failures,
+            next_retry_epoch_s=next_retry_epoch_s,
+        )
+
+    def _retry_collection_due(self, now: float) -> bool:
+        retry_at = self._collector_health.next_retry_epoch_s
+        return retry_at is None or now >= retry_at
+
+    def _status_memory_value(self) -> float:
+        return float(self._last_successful_memory_mb or 0.0)
+
+    def _append_event(
+        self,
+        *,
+        timestamp: float,
+        memory_mb: float,
+        event_type: str,
+        context: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        with self._lock:
+            self.events.append(
+                self._build_telemetry_event_record(
+                    timestamp=timestamp,
+                    memory_mb=memory_mb,
+                    event_type=event_type,
+                    context=context,
+                    metadata=metadata,
+                )
+            )
+
+    def _transition_to_failure(self, timestamp: float, exc: BaseException) -> None:
+        previous_health = self._collector_health
+        consecutive_failures = previous_health.consecutive_failures + 1
+        retry_delay_s = collector_retry_delay_seconds(
+            consecutive_failures,
+            initial_delay_s=self._collector_retry_backoff_initial_s,
+            factor=self._collector_retry_backoff_factor,
+            max_delay_s=self._collector_retry_backoff_cap_s,
+        )
+        next_retry_epoch_s = timestamp + retry_delay_s if retry_delay_s > 0 else None
+        error_message = str(exc)
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_UNHEALTHY,
+            telemetry_partial=True,
+            last_error=error_message,
+            consecutive_failures=consecutive_failures,
+            next_retry_epoch_s=next_retry_epoch_s,
+        )
+        if previous_health.status == COLLECTOR_HEALTH_HEALTHY:
+            self._append_event(
+                timestamp=timestamp,
+                memory_mb=self._status_memory_value(),
+                event_type="collector_degraded",
+                context="Collector unavailable; telemetry paused until recovery.",
+                metadata={
+                    "collector_transition": "degraded",
+                    "collector_degraded_from": previous_health.status,
+                    "collector_degradation_reason": error_message,
+                    "collector_retry_delay_s": retry_delay_s,
+                },
+            )
+        if self.enable_logging:
+            logging.warning("Could not get memory usage: %s", error_message)
+
+    def _transition_to_success(self, timestamp: float) -> None:
+        previous_health = self._collector_health
+        previous_error = previous_health.last_error
+        previous_failures = previous_health.consecutive_failures
+        if previous_health.status != COLLECTOR_HEALTH_HEALTHY:
+            self._set_collector_health(
+                status=COLLECTOR_HEALTH_HEALTHY,
+                telemetry_partial=False,
+            )
+            self._append_event(
+                timestamp=timestamp,
+                memory_mb=self._status_memory_value(),
+                event_type="collector_recovered",
+                context="Collector recovered; full telemetry sampling resumed.",
+                metadata={
+                    "collector_transition": "recovered",
+                    "collector_recovered_from": previous_health.status,
+                    "collector_previous_error": previous_error,
+                    "collector_previous_failure_count": previous_failures,
+                },
+            )
+            return
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
+
+    def _run_tracking_iteration(self) -> None:
+        """Collect one tracking sample or advance degraded-mode state."""
+        current_time = time.time()
+        if not self._retry_collection_due(current_time):
+            return
+
+        try:
+            current_memory = self._get_current_memory()
+        except Exception as exc:
+            self._transition_to_failure(current_time, exc)
+            return
+
+        self._last_successful_memory_mb = current_memory
+        self._transition_to_success(current_time)
+
+        with self._lock:
+            self.memory_usage.append(current_memory)
+            self.timestamps.append(current_time)
+            self.events.append(
+                self._build_telemetry_event_record(
+                    timestamp=current_time,
+                    memory_mb=current_memory,
+                    event_type="sample",
+                )
+            )
+
+        if self.alert_threshold_mb and current_memory > self.alert_threshold_mb:
+            self._trigger_alert(current_memory, current_time)
 
     def _tracking_loop(self) -> None:
         """Main tracking loop running in background thread."""
         while not self._stop_event.is_set():
             try:
-                # Sample memory
-                current_memory = self._get_current_memory()
-                current_time = time.time()
-
-                with self._lock:
-                    self.memory_usage.append(current_memory)
-                    self.timestamps.append(current_time)
-
-                    self.events.append(
-                        self._build_telemetry_event_record(
-                            timestamp=current_time,
-                            memory_mb=current_memory,
-                            event_type="sample",
-                        )
-                    )
-
-                # Check for alerts
-                if self.alert_threshold_mb and current_memory > self.alert_threshold_mb:
-                    self._trigger_alert(current_memory, current_time)
-
-                # Wait for next sample
+                self._run_tracking_iteration()
                 self._stop_event.wait(self.sampling_interval)
-
             except Exception as e:
                 if self.enable_logging:
                     logging.error(f"Error in tracking loop: {e}")
-                break
+                self._stop_event.wait(self.sampling_interval)
 
     def _trigger_alert(self, memory_mb: float, timestamp: float) -> None:
         """Trigger memory usage alert."""
@@ -273,6 +395,11 @@ class MemoryTracker:
             self.timestamps.clear()
             self.events.clear()
             self.alerts.clear()
+        self._last_successful_memory_mb = None
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
 
         # Start tracking thread
         self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
@@ -310,7 +437,7 @@ class MemoryTracker:
     def _create_tracking_result(self) -> TrackingResult:
         """Create tracking result from collected data."""
         with self._lock:
-            if not self.memory_usage:
+            if not self.memory_usage and not self.events and not self.alerts:
                 return self._create_empty_result()
 
             start_time = self.timestamps[0] if self.timestamps else time.time()
@@ -349,7 +476,35 @@ class MemoryTracker:
 
     def get_current_memory(self) -> float:
         """Get current memory usage."""
-        return self._get_current_memory()
+        try:
+            return self._get_current_memory()
+        except Exception:
+            return float(self._last_successful_memory_mb or 0.0)
+
+    def get_statistics(self) -> dict[str, Any]:
+        """Return current tracker health and latest successful memory sample."""
+        with self._lock:
+            total_events = len(self.events)
+            peak_memory = max(self.memory_usage) if self.memory_usage else 0.0
+            tracking_start = self.timestamps[0] if self.timestamps else None
+
+        tracking_duration = (
+            time.time() - tracking_start
+            if isinstance(tracking_start, (int, float))
+            else 0.0
+        )
+        current_memory_mb = (
+            self._last_successful_memory_mb
+            if self._collector_health.status == COLLECTOR_HEALTH_HEALTHY
+            else None
+        )
+        return {
+            "current_memory_mb": current_memory_mb,
+            "peak_memory_mb": peak_memory,
+            "total_events": total_events,
+            "tracking_duration_seconds": tracking_duration,
+            **self._collector_health.to_dict(),
+        }
 
     def set_alert_threshold(self, threshold_mb: float) -> None:
         """Update alert threshold."""
