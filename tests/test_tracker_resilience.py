@@ -1,0 +1,271 @@
+from __future__ import annotations
+
+from collections import deque
+from pathlib import Path
+
+import pytest
+
+import stormlog.tracker as tracker_mod
+from stormlog.collector_health import (
+    COLLECTOR_HEALTH_DEGRADED,
+    COLLECTOR_HEALTH_HEALTHY,
+    COLLECTOR_HEALTH_UNHEALTHY,
+)
+from stormlog.device_collectors import DeviceMemorySample, DeviceMemorySampleResult
+
+
+def _sample(
+    *,
+    allocated: int,
+    reserved: int,
+    used: int | None = None,
+    total: int | None = 4096,
+    free: int | None = None,
+    active: int | None = 512,
+    inactive: int | None = 256,
+) -> DeviceMemorySample:
+    resolved_used = max(allocated, reserved) if used is None else used
+    resolved_free = (
+        total - resolved_used if free is None and total is not None else free
+    )
+    return DeviceMemorySample(
+        allocated_bytes=allocated,
+        reserved_bytes=reserved,
+        used_bytes=resolved_used,
+        free_bytes=resolved_free,
+        total_bytes=total,
+        active_bytes=active,
+        inactive_bytes=inactive,
+        device_id=0,
+    )
+
+
+class _SequencedCollector:
+    def __init__(self, results: list[DeviceMemorySampleResult]) -> None:
+        self._results = deque(results)
+        self._last = results[-1]
+
+    def name(self) -> str:
+        return "cuda"
+
+    def is_available(self) -> bool:
+        return True
+
+    def capabilities(self) -> dict[str, object]:
+        return {
+            "backend": "cuda",
+            "supports_device_total": True,
+            "supports_device_free": True,
+            "sampling_source": "test.collector",
+            "telemetry_collector": "stormlog.cuda_tracker",
+        }
+
+    def sample(self) -> DeviceMemorySample:
+        result = self.sample_with_diagnostics()
+        if result.sample is None:
+            raise RuntimeError(result.core_error or "collector unavailable")
+        return result.sample
+
+    def sample_with_diagnostics(self) -> DeviceMemorySampleResult:
+        if self._results:
+            self._last = self._results.popleft()
+        return self._last
+
+
+def _build_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+    collector: _SequencedCollector,
+) -> tracker_mod.MemoryTracker:
+    monkeypatch.setattr(
+        tracker_mod.MemoryTracker,
+        "_setup_device",
+        lambda self, _device: tracker_mod.torch.device("cuda:0"),
+    )
+    monkeypatch.setattr(
+        tracker_mod,
+        "build_device_memory_collector",
+        lambda _device: collector,
+    )
+    monkeypatch.setattr(
+        tracker_mod,
+        "get_gpu_info",
+        lambda _device: {"total_memory": 4096},
+    )
+    return tracker_mod.MemoryTracker(sampling_interval=0.01, enable_alerts=False)
+
+
+def test_memory_tracker_recovers_after_transient_collector_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [
+            DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256)),
+            DeviceMemorySampleResult(
+                sample=None,
+                errors={"core_metrics": "collector unavailable"},
+                core_error="collector unavailable",
+            ),
+            DeviceMemorySampleResult(sample=_sample(allocated=256, reserved=256)),
+        ]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    current_time = {"value": 10.0}
+    monkeypatch.setattr(tracker_mod.time, "time", lambda: current_time["value"])
+
+    last_allocated = tracker._run_tracking_iteration(0)
+    assert last_allocated == 0
+    assert tracker.get_events()[-1].event_type == "collector_degraded"
+    assert tracker.get_statistics()["collector_health_status"] == (
+        COLLECTOR_HEALTH_UNHEALTHY
+    )
+    assert tracker.get_statistics()["collector_next_retry_epoch_s"] == pytest.approx(
+        11.0
+    )
+
+    current_time["value"] = 10.5
+    skipped_allocated = tracker._run_tracking_iteration(last_allocated)
+    assert skipped_allocated == last_allocated
+    assert [event.event_type for event in tracker.get_events()].count(
+        "collector_degraded"
+    ) == 1
+
+    current_time["value"] = 11.1
+    recovered_allocated = tracker._run_tracking_iteration(last_allocated)
+    assert recovered_allocated == 256
+    event_types = [event.event_type for event in tracker.get_events()]
+    assert event_types.count("collector_degraded") == 1
+    assert "collector_recovered" in event_types
+    assert tracker.get_statistics()["collector_health_status"] == (
+        COLLECTOR_HEALTH_HEALTHY
+    )
+    assert tracker.get_statistics()["telemetry_partial"] is False
+
+
+def test_memory_tracker_keeps_retrying_during_persistent_collector_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    failure = DeviceMemorySampleResult(
+        sample=None,
+        errors={"core_metrics": "collector unavailable"},
+        core_error="collector unavailable",
+    )
+    collector = _SequencedCollector(
+        [
+            DeviceMemorySampleResult(sample=_sample(allocated=64, reserved=64)),
+            failure,
+            failure,
+            failure,
+        ]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    tracker._collector_retry_backoff_initial_s = 0.1
+    tracker._collector_retry_backoff_cap_s = 0.4
+    current_time = {"value": 20.0}
+    monkeypatch.setattr(tracker_mod.time, "time", lambda: current_time["value"])
+
+    last_allocated = tracker._run_tracking_iteration(64)
+    assert last_allocated == 64
+
+    current_time["value"] = 20.11
+    tracker._run_tracking_iteration(last_allocated)
+    current_time["value"] = 20.32
+    tracker._run_tracking_iteration(last_allocated)
+
+    stats = tracker.get_statistics()
+    assert stats["collector_health_status"] == COLLECTOR_HEALTH_UNHEALTHY
+    assert stats["telemetry_partial"] is True
+    assert stats["collector_consecutive_failures"] == 3
+    assert stats["collector_next_retry_epoch_s"] == pytest.approx(20.72)
+    assert [event.event_type for event in tracker.get_events()] == [
+        "collector_degraded"
+    ]
+
+
+def test_memory_tracker_emits_partial_sample_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    partial = DeviceMemorySampleResult(
+        sample=_sample(
+            allocated=128,
+            reserved=128,
+            total=None,
+            free=None,
+            active=None,
+            inactive=None,
+        ),
+        partial_fields=(
+            "device_total_bytes",
+            "device_free_bytes",
+            "allocator_active_bytes",
+            "allocator_inactive_bytes",
+        ),
+        errors={
+            "device_total_bytes": "total unavailable",
+            "allocator_active_bytes": "stats unavailable",
+        },
+    )
+    collector = _SequencedCollector(
+        [
+            DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=128)),
+            partial,
+        ]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    tracker.stats["peak_memory"] = 128
+    current_time = {"value": 30.0}
+    monkeypatch.setattr(tracker_mod.time, "time", lambda: current_time["value"])
+
+    last_allocated = tracker._run_tracking_iteration(128)
+
+    assert last_allocated == 128
+    events = tracker.get_events()
+    assert [event.event_type for event in events] == ["collector_degraded", "sample"]
+    assert events[-1].metadata is not None
+    assert events[-1].metadata["collector_health_status"] == COLLECTOR_HEALTH_DEGRADED
+    assert events[-1].metadata["telemetry_partial"] is True
+    assert events[-1].metadata["collector_partial_fields"] == [
+        "device_total_bytes",
+        "device_free_bytes",
+        "allocator_active_bytes",
+        "allocator_inactive_bytes",
+    ]
+    assert tracker.get_statistics()["collector_health_status"] == (
+        COLLECTOR_HEALTH_DEGRADED
+    )
+
+
+def test_memory_tracker_export_preserves_health_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    partial = DeviceMemorySampleResult(
+        sample=_sample(
+            allocated=256,
+            reserved=256,
+            total=None,
+            free=None,
+            active=None,
+            inactive=None,
+        ),
+        partial_fields=("device_total_bytes", "device_free_bytes"),
+        errors={"device_total_bytes": "total unavailable"},
+    )
+    collector = _SequencedCollector(
+        [
+            DeviceMemorySampleResult(sample=_sample(allocated=256, reserved=256)),
+            partial,
+        ]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    tracker.stats["peak_memory"] = 256
+    current_time = {"value": 40.0}
+    monkeypatch.setattr(tracker_mod.time, "time", lambda: current_time["value"])
+
+    tracker._run_tracking_iteration(256)
+    output_path = tmp_path / "tracker.json"
+    tracker.export_events(str(output_path), format="json")
+    payload = output_path.read_text(encoding="utf-8")
+
+    assert "collector_health_status" in payload
+    assert "collector_degraded" in payload
+    assert "device_total_bytes" in payload
