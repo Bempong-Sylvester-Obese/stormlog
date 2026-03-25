@@ -22,30 +22,26 @@ try:
     MemoryTracker: Any = _MemoryTracker
     MemoryWatchdog: Any = _MemoryWatchdog
     TrackingEvent: Any = _TrackingEvent
-except ImportError as e:
-    raise ImportError(
-        "stormlog.tracker is required for TrackerSession. "
-        "Ensure stormlog is properly installed."
-    ) from e
+except ImportError as exc:
+    logger.debug("GPU tracker imports unavailable: %s", exc)
+    MemoryTracker = None
+    MemoryWatchdog = None
+    TrackingEvent = None
 
 try:
     from stormlog.cpu_profiler import CPUMemoryTracker as _CPUMemoryTracker
 
     CPUMemoryTracker: Any = _CPUMemoryTracker
-except ImportError as e:
-    raise ImportError(
-        "CPUMemoryTracker is required for TrackerSession. "
-        "Ensure stormlog is properly installed."
-    ) from e
+except ImportError as exc:
+    logger.debug("CPU tracker imports unavailable: %s", exc)
+    CPUMemoryTracker = None
 
 try:
     import torch as _torch
 
     torch: Any = _torch
-except ImportError as e:
-    raise ImportError(
-        "torch is required for TrackerSession. Install it with: pip install torch"
-    ) from e
+except ImportError:
+    torch = None
 
 
 class TrackerUnavailableError(RuntimeError):
@@ -112,10 +108,19 @@ class TrackerSession:
         backend = "gpu"
 
         # Try GPU tracker first, fall back to CPU tracker if initialization fails
-        try:
-            tracker = MemoryTracker(**tracker_kwargs)
-        except Exception as exc:
-            logger.debug("GPU MemoryTracker init failed, falling back to CPU: %s", exc)
+        if MemoryTracker is not None and torch is not None:
+            try:
+                tracker = MemoryTracker(**tracker_kwargs)
+            except Exception as exc:
+                logger.debug(
+                    "GPU MemoryTracker init failed, falling back to CPU: %s", exc
+                )
+        elif MemoryTracker is None:
+            logger.debug("GPU MemoryTracker import unavailable, falling back to CPU.")
+        else:
+            logger.debug("torch is unavailable, falling back to CPU tracking.")
+
+        if tracker is None and CPUMemoryTracker is not None:
             backend = "cpu"
             tracker = CPUMemoryTracker(
                 sampling_interval=tracker_kwargs["sampling_interval"],

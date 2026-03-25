@@ -86,11 +86,9 @@ from .workloads import (
 try:
     import torch as _torch
 
-    torch: Any = _torch
-except ImportError as e:
-    raise ImportError(
-        "torch is required for the TUI application. Install it with: pip install torch"
-    ) from e
+    torch: Optional[Any] = _torch
+except ImportError:
+    torch = None
 
 try:
     import tensorflow as _tf
@@ -114,21 +112,15 @@ try:
     from stormlog import GPUMemoryProfiler as _GPUMemoryProfiler
 
     GPUMemoryProfiler: Optional[Any] = _GPUMemoryProfiler
-except ImportError as e:
-    raise ImportError(
-        "GPUMemoryProfiler is required for the TUI application. "
-        "Ensure stormlog is properly installed."
-    ) from e
+except ImportError:
+    GPUMemoryProfiler = None
 
 try:
     from stormlog.cpu_profiler import CPUMemoryProfiler as _CPUMemoryProfiler
 
     CPUMemoryProfiler: Optional[Any] = _CPUMemoryProfiler
-except ImportError as e:
-    raise ImportError(
-        "CPUMemoryProfiler is required for the TUI application. "
-        "Ensure stormlog is properly installed."
-    ) from e
+except ImportError:
+    CPUMemoryProfiler = None
 
 try:
     from stormlog.tensorflow.profiler import TFMemoryProfiler as _TFMemoryProfiler
