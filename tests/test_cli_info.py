@@ -65,12 +65,19 @@ def test_gpumemprof_info_reports_cpu_fallback_when_mps_unavailable(
             "detected_backend": "cpu",
         },
     )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_detect_gpu_hardware",
+        lambda: {"hardware_gpu_detected": False, "devices": []},
+    )
     _patch_cpu_process(monkeypatch)
 
     gpumemprof_cli.cmd_info(SimpleNamespace(device=None, detailed=False))  # type: ignore[arg-type, unused-ignore]
     output = capsys.readouterr().out
 
     assert "Detected Backend: cpu" in output
+    assert "GPU Hardware Detected: No" in output
+    assert "GPU Available to PyTorch Runtime: No" in output
     assert "MPS Available: False" in output
     assert "CUDA is not available. Falling back to CPU-only profiling." in output
 
@@ -106,6 +113,11 @@ def test_gpumemprof_info_keeps_cuda_output_when_available(
             "reserved_memory": 0,
             "multiprocessor_count": 1,
         },
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_detect_gpu_hardware",
+        lambda: (_ for _ in ()).throw(AssertionError("hardware probe should not run")),
     )
 
     gpumemprof_cli.cmd_info(SimpleNamespace(device=None, detailed=False))  # type: ignore[arg-type, unused-ignore]
@@ -156,6 +168,78 @@ def test_gpumemprof_info_reports_rocm_backend_details(
 
     assert "Detected Backend: rocm" in output
     assert "ROCm Version: 6.3.0" in output
+
+
+def test_gpumemprof_info_reports_hardware_when_runtime_unavailable(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "get_system_info",
+        lambda: {
+            "platform": "Windows",
+            "python_version": "3.10",
+            "cuda_available": False,
+            "mps_built": False,
+            "mps_available": False,
+            "detected_backend": "cpu",
+        },
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_detect_gpu_hardware",
+        lambda: {
+            "hardware_gpu_detected": True,
+            "devices": [
+                {
+                    "name": "AMD Radeon RX 7900 XTX",
+                    "vendor": "amd",
+                    "source": "powershell",
+                }
+            ],
+        },
+    )
+    _patch_cpu_process(monkeypatch)
+
+    gpumemprof_cli.cmd_info(SimpleNamespace(device=None, detailed=False))  # type: ignore[arg-type, unused-ignore]
+    output = capsys.readouterr().out
+
+    assert "GPU Hardware Detected: Yes" in output
+    assert "AMD Radeon RX 7900 XTX" in output
+    assert "GPU Available to PyTorch Runtime: No" in output
+    assert "AMD ROCm-backed PyTorch on Linux" in output
+    assert "Falling back to CPU-only profiling." not in output
+
+
+def test_gpumemprof_info_ignores_device_without_supported_runtime(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "get_system_info",
+        lambda: {
+            "platform": "Windows",
+            "python_version": "3.10",
+            "cuda_available": False,
+            "mps_built": False,
+            "mps_available": False,
+            "detected_backend": "cpu",
+        },
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_detect_gpu_hardware",
+        lambda: {"hardware_gpu_detected": False, "devices": []},
+    )
+    _patch_cpu_process(monkeypatch)
+
+    gpumemprof_cli.cmd_info(SimpleNamespace(device=2, detailed=False))  # type: ignore[arg-type, unused-ignore]
+    output = capsys.readouterr().out
+
+    assert (
+        "Ignoring --device because no supported PyTorch GPU runtime is active."
+        in output
+    )
 
 
 def test_tfmemprof_info_reports_backend_diagnostics_for_apple(
