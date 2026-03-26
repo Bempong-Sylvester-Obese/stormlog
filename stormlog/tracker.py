@@ -1,5 +1,6 @@
 """Real-time memory tracking and monitoring."""
 
+import json
 import logging
 import os
 import socket
@@ -8,10 +9,18 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 
+from .cuda_native_debug import (
+    DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
+    capture_cuda_snapshot_artifacts,
+    cuda_memory_history_supported,
+    start_cuda_memory_history,
+    stop_cuda_memory_history,
+)
 from .device_collectors import (
     DeviceMemorySample,
     _resolve_device,
@@ -71,6 +80,8 @@ class MemoryTracker:
         oom_buffer_size: Optional[int] = None,
         oom_max_dumps: int = 5,
         oom_max_total_mb: int = 256,
+        enable_native_cuda_history: bool = False,
+        native_history_max_entries: int = DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
         job_id: Optional[str] = None,
         rank: Optional[int] = None,
         local_rank: Optional[int] = None,
@@ -94,6 +105,8 @@ class MemoryTracker:
             raise ValueError("sampling_interval must be > 0")
         if max_events <= 0:
             raise ValueError("max_events must be >= 1")
+        if native_history_max_entries <= 0:
+            raise ValueError("native_history_max_entries must be >= 1")
 
         self.device = self._setup_device(device)
         self.collector = build_device_memory_collector(self.device)
@@ -102,6 +115,8 @@ class MemoryTracker:
         self.sampling_interval = sampling_interval
         self.max_events = max_events
         self.enable_alerts = enable_alerts
+        self.enable_native_cuda_history = enable_native_cuda_history
+        self.native_history_max_entries = native_history_max_entries
         self.last_oom_dump_path: Optional[str] = None
         self.distributed_identity = resolve_distributed_identity(
             job_id=job_id,
@@ -433,6 +448,7 @@ class MemoryTracker:
         exc: BaseException,
         context: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        native_history_recorded: bool = False,
     ) -> Optional[str]:
         """Capture OOM diagnostics for recognized OOM exceptions."""
         classification = classify_oom_exception(exc)
@@ -485,8 +501,52 @@ class MemoryTracker:
             logger.debug("OOM flight recorder dump failed: %s", dump_exc)
             return None
 
+        if dump_path and native_history_recorded and self.backend == "cuda":
+            MemoryTracker._capture_native_history_dump(self, Path(dump_path))
+
         self.last_oom_dump_path = dump_path
         return dump_path
+
+    def _capture_native_history_dump(self, bundle_dir: Path) -> None:
+        """Add CUDA allocator snapshot artifacts into an OOM dump bundle."""
+        try:
+            files_written = capture_cuda_snapshot_artifacts(
+                bundle_dir,
+                device=self.device,
+                history_recorded=True,
+            )
+        except Exception as exc:
+            logger.debug("CUDA native history dump failed: %s", exc)
+            return
+
+        manifest_path = bundle_dir / "manifest.json"
+        metadata_path = bundle_dir / "metadata.json"
+
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest_files = list(manifest.get("files", []))
+            for name in files_written:
+                if name not in manifest_files:
+                    manifest_files.append(name)
+            manifest["files"] = manifest_files
+            manifest["native_history_enabled"] = True
+            manifest["native_history_files"] = files_written
+            manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.debug("Could not update OOM manifest with native history: %s", exc)
+
+        try:
+            metadata_payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+            custom_metadata = dict(metadata_payload.get("custom_metadata", {}))
+            custom_metadata["native_history_enabled"] = True
+            custom_metadata["native_history_files"] = files_written
+            metadata_payload["custom_metadata"] = custom_metadata
+            metadata_path.write_text(
+                json.dumps(metadata_payload, indent=2),
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.debug("Could not update OOM metadata with native history: %s", exc)
 
     @contextmanager
     def capture_oom(
@@ -495,13 +555,41 @@ class MemoryTracker:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Any:
         """Capture OOM diagnostic bundle if a tracked block raises OOM."""
+        native_history_recorded = False
+        if (
+            self.enable_native_cuda_history
+            and self.backend == "cuda"
+            and cuda_memory_history_supported()
+        ):
+            try:
+                start_cuda_memory_history(
+                    device=self.device,
+                    trace_alloc_max_entries=self.native_history_max_entries,
+                )
+                native_history_recorded = True
+            except Exception as exc:
+                logger.debug("Could not start CUDA native history recording: %s", exc)
         try:
             yield
         except Exception as exc:
-            dump_path = self.handle_exception(exc, context=context, metadata=metadata)
+            dump_path = self.handle_exception(
+                exc,
+                context=context,
+                metadata=metadata,
+                native_history_recorded=native_history_recorded,
+            )
             if dump_path:
                 logger.error("OOM flight recorder dump saved to: %s", dump_path)
             raise
+        finally:
+            if native_history_recorded:
+                try:
+                    stop_cuda_memory_history(device=self.device)
+                except Exception as exc:
+                    logger.debug(
+                        "Could not stop CUDA native history recording: %s",
+                        exc,
+                    )
 
     def add_alert_callback(self, callback: Callable[[TrackingEvent], None]) -> None:
         """Add a callback function to be called on alerts."""
