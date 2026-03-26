@@ -448,7 +448,6 @@ class MemoryTracker:
         exc: BaseException,
         context: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
-        native_history_recorded: bool = False,
     ) -> Optional[str]:
         """Capture OOM diagnostics for recognized OOM exceptions."""
         classification = classify_oom_exception(exc)
@@ -500,9 +499,6 @@ class MemoryTracker:
         except Exception as dump_exc:
             logger.debug("OOM flight recorder dump failed: %s", dump_exc)
             return None
-
-        if dump_path and native_history_recorded and self.backend == "cuda":
-            MemoryTracker._capture_native_history_dump(self, Path(dump_path))
 
         self.last_oom_dump_path = dump_path
         return dump_path
@@ -572,12 +568,9 @@ class MemoryTracker:
         try:
             yield
         except Exception as exc:
-            dump_path = self.handle_exception(
-                exc,
-                context=context,
-                metadata=metadata,
-                native_history_recorded=native_history_recorded,
-            )
+            dump_path = self.handle_exception(exc, context=context, metadata=metadata)
+            if dump_path and native_history_recorded and self.backend == "cuda":
+                MemoryTracker._capture_native_history_dump(self, Path(dump_path))
             if dump_path:
                 logger.error("OOM flight recorder dump saved to: %s", dump_path)
             raise
