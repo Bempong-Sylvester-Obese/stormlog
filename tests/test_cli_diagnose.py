@@ -1,6 +1,7 @@
 """Tests for the Stormlog diagnose command."""
 
 import json
+from contextlib import contextmanager
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -439,3 +440,89 @@ def test_diagnose_same_second_creates_unique_artifact_dirs(
     assert subdirs[0].startswith("stormlog-diagnose-20260215-120000")
     assert subdirs[1].startswith("stormlog-diagnose-20260215-120000")
     assert subdirs[0] != subdirs[1]
+
+
+def test_diagnose_native_history_writes_snapshot_artifacts_for_cuda(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_diagnose_env(monkeypatch, cuda_available=True, risk_detected=False)
+    _patch_timeline_capture(monkeypatch)
+
+    history_calls: dict[str, object] = {}
+
+    @contextmanager
+    def _fake_native_history(
+        device: object = None,
+        trace_alloc_max_entries: int = 0,
+    ) -> object:
+        history_calls["device"] = device
+        history_calls["trace_alloc_max_entries"] = trace_alloc_max_entries
+        yield
+
+    def _fake_capture(
+        artifact_dir: Path,
+        *,
+        device: object = None,
+        history_recorded: bool,
+    ) -> list[str]:
+        history_calls["capture_device"] = device
+        history_calls["history_recorded"] = history_recorded
+        snapshot_path = artifact_dir / "cuda_allocator_snapshot.pickle"
+        snapshot_path.write_text("snapshot", encoding="utf-8")
+        metadata_path = artifact_dir / "cuda_native_debug_metadata.json"
+        metadata_path.write_text("{}", encoding="utf-8")
+        return [snapshot_path.name, metadata_path.name]
+
+    monkeypatch.setattr(diagnose_module, "detect_torch_runtime_backend", lambda: "cuda")
+    monkeypatch.setattr(diagnose_module, "cuda_memory_history_supported", lambda: True)
+    monkeypatch.setattr(diagnose_module, "cuda_memory_history", _fake_native_history)
+    monkeypatch.setattr(
+        diagnose_module,
+        "capture_cuda_snapshot_artifacts",
+        _fake_capture,
+    )
+
+    args = SimpleNamespace(
+        output=str(tmp_path),
+        device=0,
+        duration=0,
+        interval=0.5,
+        native_history=True,
+        native_history_max_entries=77,
+    )
+
+    exit_code = gpumemprof_cli.cmd_diagnose(args)  # type: ignore[arg-type, unused-ignore]
+
+    assert exit_code == 0
+    artifact_dir = next(tmp_path.iterdir())
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["native_history_enabled"] is True
+    assert "cuda_allocator_snapshot.pickle" in manifest["files"]
+    assert "cuda_native_debug_metadata.json" in manifest["files"]
+    assert history_calls["device"] == 0
+    assert history_calls["trace_alloc_max_entries"] == 77
+    assert history_calls["capture_device"] == 0
+    assert history_calls["history_recorded"] is True
+
+
+def test_diagnose_native_history_rejects_non_cuda_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _patch_diagnose_env(monkeypatch, cuda_available=False)
+    monkeypatch.setattr(diagnose_module, "detect_torch_runtime_backend", lambda: "mps")
+
+    args = SimpleNamespace(
+        output=None,
+        device=None,
+        duration=0,
+        interval=0.5,
+        native_history=True,
+        native_history_max_entries=1000,
+    )
+
+    exit_code = gpumemprof_cli.cmd_diagnose(args)  # type: ignore[arg-type, unused-ignore]
+
+    assert exit_code == 1
+    err = capsys.readouterr().err
+    assert "only for CUDA runtimes" in err

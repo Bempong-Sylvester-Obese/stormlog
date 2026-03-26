@@ -326,6 +326,17 @@ Examples:
         default=0.5,
         help="Sampling interval for timeline (default: 0.5)",
     )
+    diagnose_parser.add_argument(
+        "--native-history",
+        action="store_true",
+        help="Capture CUDA allocator history and snapshot artifacts for debugging",
+    )
+    diagnose_parser.add_argument(
+        "--native-history-max-entries",
+        type=int,
+        default=100000,
+        help="Maximum CUDA allocator history entries to retain (default: 100000)",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -964,6 +975,9 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     if args.interval <= 0:
         print("Error: --interval must be > 0", file=sys.stderr)
         return 1
+    if getattr(args, "native_history_max_entries", 100000) <= 0:
+        print("Error: --native-history-max-entries must be > 0", file=sys.stderr)
+        return 1
 
     command_line = " ".join(sys.argv)
     (run_diagnose,) = _import_runtime_symbols(
@@ -976,8 +990,15 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             duration=args.duration,
             interval=args.interval,
             command_line=command_line,
+            native_history=getattr(args, "native_history", False),
+            native_history_max_entries=getattr(
+                args,
+                "native_history_max_entries",
+                100000,
+            ),
         )
-    except OSError:
+    except (OSError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     # Structured stdout summary
