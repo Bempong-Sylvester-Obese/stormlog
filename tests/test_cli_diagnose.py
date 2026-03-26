@@ -1,7 +1,7 @@
 """Tests for the Stormlog diagnose command."""
 
-from contextlib import contextmanager
 import json
+from contextlib import contextmanager
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
