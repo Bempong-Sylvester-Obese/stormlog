@@ -44,6 +44,13 @@ gpumemprof info
 gpumemprof info --device 0 --detailed
 ```
 
+`gpumemprof info` still reports the active PyTorch runtime first. When no
+supported PyTorch GPU runtime is active, it now falls back to a best-effort host
+GPU hardware probe so the command can show detected device names separately from
+runtime availability. Supported PyTorch GPU runtimes remain NVIDIA CUDA, AMD
+ROCm-backed PyTorch on Linux, and Apple MPS. In that unsupported-runtime mode,
+`--device` is ignored because it only applies to an active PyTorch GPU runtime.
+
 ### Capture a bounded monitoring window
 
 ```bash
@@ -92,9 +99,17 @@ gpumemprof analyze track.json --visualization --plot-dir plots
 ```bash
 gpumemprof diagnose --duration 5 --interval 0.5 --output ./diag_bundle
 gpumemprof diagnose --duration 0 --output ./diag_bundle_quick
+gpumemprof diagnose --native-history --duration 0 --output ./diag_bundle_native
 ```
 
 Use `--duration 0` when you want a fast artifact bundle without a new tracking window.
+
+`--native-history` is a CUDA-only debug mode. It records allocator history for
+the current `gpumemprof diagnose` process, then writes native snapshot artifacts
+such as `cuda_allocator_snapshot.pickle`,
+`cuda_allocator_state_history.html`, and tensor-attribution JSON alongside the
+normal diagnose bundle files. On MPS, ROCm, or CPU-only runtimes, the command
+fails explicitly instead of pretending support.
 
 ## `tfmemprof`
 

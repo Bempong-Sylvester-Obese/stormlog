@@ -13,7 +13,13 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
-from .utils import format_bytes, get_gpu_info, get_system_info, memory_summary
+from .utils import (
+    _detect_gpu_hardware,
+    format_bytes,
+    get_gpu_info,
+    get_system_info,
+    memory_summary,
+)
 
 try:
     import torch as _torch
@@ -320,6 +326,17 @@ Examples:
         default=0.5,
         help="Sampling interval for timeline (default: 0.5)",
     )
+    diagnose_parser.add_argument(
+        "--native-history",
+        action="store_true",
+        help="Capture CUDA allocator history and snapshot artifacts for debugging",
+    )
+    diagnose_parser.add_argument(
+        "--native-history-max-entries",
+        type=int,
+        default=100000,
+        help="Maximum CUDA allocator history entries to retain (default: 100000)",
+    )
 
     # Parse arguments
     args = parser.parse_args()
@@ -360,15 +377,59 @@ def cmd_info(args: argparse.Namespace) -> None:
     print(f"CUDA Available: {system_info.get('cuda_available', False)}")
     print(f"Detected Backend: {detected_backend}")
 
-    if not system_info.get("cuda_available", False):
+    if detected_backend == "mps":
         print(f"MPS Built: {system_info.get('mps_built', False)}")
         print(f"MPS Available: {system_info.get('mps_available', False)}")
         if system_info.get("mps_available", False):
             print(
                 "CUDA is not available. MPS backend is available for supported PyTorch workloads."
             )
+        process = psutil.Process()
+        with process.oneshot():
+            mem = process.memory_info()
+        print(f"Process RSS: {format_bytes(mem.rss)}")
+        print(f"Process VMS: {format_bytes(mem.vms)}")
+        print(
+            f"CPU Count: {psutil.cpu_count(logical=False)} physical / {psutil.cpu_count()} logical"
+        )
+        return
+
+    if not system_info.get("cuda_available", False):
+        print(f"MPS Built: {system_info.get('mps_built', False)}")
+        print(f"MPS Available: {system_info.get('mps_available', False)}")
+        hardware_info = _detect_gpu_hardware()
+        devices = hardware_info.get("devices", [])
+
+        print(
+            "GPU Hardware Detected: "
+            f"{'Yes' if hardware_info.get('hardware_gpu_detected', False) else 'No'}"
+        )
+        if args.device is not None:
+            print(
+                "Ignoring --device because no supported PyTorch GPU runtime is active."
+            )
+
+        if devices:
+            print("Detected GPU Hardware:")
+            for device in devices:
+                print(f"  {device.get('name', 'Unknown')}")
+        print("GPU Available to PyTorch Runtime: No")
+
+        if devices:
+            print(
+                "Supported PyTorch GPU runtimes: NVIDIA CUDA, AMD ROCm-backed "
+                "PyTorch on Linux, Apple MPS."
+            )
+            if args.detailed:
+                print("\nHardware Probe Details:")
+                print("-" * 30)
+                for index, device in enumerate(devices):
+                    print(f"  Device {index}: {device.get('name', 'Unknown')}")
+                    print(f"    Vendor: {device.get('vendor', 'unknown')}")
+                    print(f"    Source: {device.get('source', 'unknown')}")
         else:
             print("CUDA is not available. Falling back to CPU-only profiling.")
+
         process = psutil.Process()
         with process.oneshot():
             mem = process.memory_info()
@@ -937,6 +998,9 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     if args.interval <= 0:
         print("Error: --interval must be > 0", file=sys.stderr)
         return 1
+    if getattr(args, "native_history_max_entries", 100000) <= 0:
+        print("Error: --native-history-max-entries must be > 0", file=sys.stderr)
+        return 1
 
     command_line = " ".join(sys.argv)
     (run_diagnose,) = _import_runtime_symbols(
@@ -949,8 +1013,15 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             duration=args.duration,
             interval=args.interval,
             command_line=command_line,
+            native_history=getattr(args, "native_history", False),
+            native_history_max_entries=getattr(
+                args,
+                "native_history_max_entries",
+                100000,
+            ),
         )
-    except OSError:
+    except (OSError, RuntimeError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     # Structured stdout summary
