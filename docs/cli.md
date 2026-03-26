@@ -44,6 +44,13 @@ gpumemprof info
 gpumemprof info --device 0 --detailed
 ```
 
+`gpumemprof info` still reports the active PyTorch runtime first. When no
+supported PyTorch GPU runtime is active, it now falls back to a best-effort host
+GPU hardware probe so the command can show detected device names separately from
+runtime availability. Supported PyTorch GPU runtimes remain NVIDIA CUDA, AMD
+ROCm-backed PyTorch on Linux, and Apple MPS. In that unsupported-runtime mode,
+`--device` is ignored because it only applies to an active PyTorch GPU runtime.
+
 ### Capture a bounded monitoring window
 
 ```bash

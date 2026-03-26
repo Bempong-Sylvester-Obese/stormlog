@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -25,6 +26,17 @@ _TORCH_INSTALL_GUIDANCE = (
     "PyTorch is required for this feature. Install with "
     "`pip install 'stormlog[torch]'` "
     "or follow https://pytorch.org/get-started/locally/."
+)
+_GPU_HARDWARE_PROBE_TIMEOUT_SECONDS = 2
+_SOFTWARE_ADAPTER_TOKENS = (
+    "basic render",
+    "basic display",
+    "llvmpipe",
+    "software rasterizer",
+    "software renderer",
+    "virtualbox",
+    "vmware svga",
+    "virtio gpu",
 )
 
 
@@ -188,6 +200,191 @@ def _get_nvidia_smi_info(device_id: int) -> Dict[str, Any]:
         logger.debug("nvidia-smi query failed: %s", exc)
 
     return {}
+
+
+def _normalize_gpu_vendor(device_name: str) -> str:
+    normalized = device_name.lower()
+    if any(
+        token in normalized
+        for token in ("advanced micro devices", "[amd/ati]", "amd", "radeon")
+    ):
+        return "amd"
+    if "nvidia" in normalized or "geforce" in normalized or "quadro" in normalized:
+        return "nvidia"
+    if "apple" in normalized:
+        return "apple"
+    if "intel" in normalized:
+        return "intel"
+    return "unknown"
+
+
+def _is_software_adapter(device_name: str) -> bool:
+    normalized = device_name.lower()
+    return any(token in normalized for token in _SOFTWARE_ADAPTER_TOKENS)
+
+
+def _normalize_hardware_devices(
+    devices: List[Dict[str, str]],
+) -> List[Dict[str, str]]:
+    normalized_devices: List[Dict[str, str]] = []
+
+    for device in devices:
+        name = str(device.get("name", "")).strip()
+        if not name or _is_software_adapter(name):
+            continue
+
+        normalized_devices.append(
+            {
+                "name": name,
+                "vendor": str(device.get("vendor") or _normalize_gpu_vendor(name)),
+                "source": str(device.get("source") or "unknown"),
+            }
+        )
+
+    return normalized_devices
+
+
+def _run_hardware_probe(command: List[str]) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            timeout=_GPU_HARDWARE_PROBE_TIMEOUT_SECONDS,
+            shell=False,
+        )
+    except Exception as exc:
+        logger.debug("GPU hardware probe failed for %s: %s", command[0], exc)
+        return ""
+
+    if result.returncode != 0:
+        logger.debug(
+            "GPU hardware probe returned %s for %s: %s",
+            result.returncode,
+            command[0],
+            result.stderr.strip(),
+        )
+        return ""
+
+    return result.stdout.strip()
+
+
+def _parse_line_based_gpu_names(output: str, source: str) -> List[Dict[str, str]]:
+    devices: List[Dict[str, str]] = []
+    for line in output.splitlines():
+        name = line.strip()
+        if not name or name.lower() == "name":
+            continue
+        devices.append(
+            {
+                "name": name,
+                "vendor": _normalize_gpu_vendor(name),
+                "source": source,
+            }
+        )
+    return _normalize_hardware_devices(devices)
+
+
+def _detect_windows_gpu_hardware() -> List[Dict[str, str]]:
+    powershell_output = _run_hardware_probe(
+        [
+            "powershell",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Get-CimInstance Win32_VideoController | ForEach-Object { $_.Name }",
+        ]
+    )
+    if powershell_output:
+        return _parse_line_based_gpu_names(powershell_output, source="powershell")
+
+    wmic_output = _run_hardware_probe(
+        [
+            "wmic",
+            "path",
+            "win32_VideoController",
+            "get",
+            "Name",
+        ]
+    )
+    return _parse_line_based_gpu_names(wmic_output, source="wmic")
+
+
+def _detect_linux_gpu_hardware() -> List[Dict[str, str]]:
+    lspci_output = _run_hardware_probe(["lspci"])
+    devices: List[Dict[str, str]] = []
+
+    for line in lspci_output.splitlines():
+        normalized = line.lower()
+        if not any(
+            token in normalized
+            for token in (
+                "vga compatible controller",
+                "3d controller",
+                "display controller",
+            )
+        ):
+            continue
+        if ": " not in line:
+            continue
+        name = line.split(": ", 1)[1].strip()
+        devices.append(
+            {
+                "name": name,
+                "vendor": _normalize_gpu_vendor(name),
+                "source": "lspci",
+            }
+        )
+
+    return _normalize_hardware_devices(devices)
+
+
+def _detect_macos_gpu_hardware() -> List[Dict[str, str]]:
+    profiler_output = _run_hardware_probe(
+        ["system_profiler", "SPDisplaysDataType", "-json"]
+    )
+    if not profiler_output:
+        return []
+
+    try:
+        payload = json.loads(profiler_output)
+    except json.JSONDecodeError as exc:
+        logger.debug("system_profiler JSON parse failed: %s", exc)
+        return []
+
+    devices: List[Dict[str, str]] = []
+    for entry in payload.get("SPDisplaysDataType", []):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("sppci_model") or entry.get("_name") or "").strip()
+        if not name:
+            continue
+        devices.append(
+            {
+                "name": name,
+                "vendor": _normalize_gpu_vendor(name),
+                "source": "system_profiler",
+            }
+        )
+
+    return _normalize_hardware_devices(devices)
+
+
+def _detect_gpu_hardware() -> Dict[str, Any]:
+    system_name = platform.system()
+    if system_name == "Windows":
+        devices = _detect_windows_gpu_hardware()
+    elif system_name == "Linux":
+        devices = _detect_linux_gpu_hardware()
+    elif system_name == "Darwin":
+        devices = _detect_macos_gpu_hardware()
+    else:
+        devices = []
+
+    return {
+        "hardware_gpu_detected": bool(devices),
+        "devices": devices,
+    }
 
 
 def _detect_platform_info() -> Dict[str, str]:

@@ -13,7 +13,13 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
-from .utils import format_bytes, get_gpu_info, get_system_info, memory_summary
+from .utils import (
+    _detect_gpu_hardware,
+    format_bytes,
+    get_gpu_info,
+    get_system_info,
+    memory_summary,
+)
 
 try:
     import torch as _torch
@@ -360,15 +366,59 @@ def cmd_info(args: argparse.Namespace) -> None:
     print(f"CUDA Available: {system_info.get('cuda_available', False)}")
     print(f"Detected Backend: {detected_backend}")
 
-    if not system_info.get("cuda_available", False):
+    if detected_backend == "mps":
         print(f"MPS Built: {system_info.get('mps_built', False)}")
         print(f"MPS Available: {system_info.get('mps_available', False)}")
         if system_info.get("mps_available", False):
             print(
                 "CUDA is not available. MPS backend is available for supported PyTorch workloads."
             )
+        process = psutil.Process()
+        with process.oneshot():
+            mem = process.memory_info()
+        print(f"Process RSS: {format_bytes(mem.rss)}")
+        print(f"Process VMS: {format_bytes(mem.vms)}")
+        print(
+            f"CPU Count: {psutil.cpu_count(logical=False)} physical / {psutil.cpu_count()} logical"
+        )
+        return
+
+    if not system_info.get("cuda_available", False):
+        print(f"MPS Built: {system_info.get('mps_built', False)}")
+        print(f"MPS Available: {system_info.get('mps_available', False)}")
+        hardware_info = _detect_gpu_hardware()
+        devices = hardware_info.get("devices", [])
+
+        print(
+            "GPU Hardware Detected: "
+            f"{'Yes' if hardware_info.get('hardware_gpu_detected', False) else 'No'}"
+        )
+        if args.device is not None:
+            print(
+                "Ignoring --device because no supported PyTorch GPU runtime is active."
+            )
+
+        if devices:
+            print("Detected GPU Hardware:")
+            for device in devices:
+                print(f"  {device.get('name', 'Unknown')}")
+        print("GPU Available to PyTorch Runtime: No")
+
+        if devices:
+            print(
+                "Supported PyTorch GPU runtimes: NVIDIA CUDA, AMD ROCm-backed "
+                "PyTorch on Linux, Apple MPS."
+            )
+            if args.detailed:
+                print("\nHardware Probe Details:")
+                print("-" * 30)
+                for index, device in enumerate(devices):
+                    print(f"  Device {index}: {device.get('name', 'Unknown')}")
+                    print(f"    Vendor: {device.get('vendor', 'unknown')}")
+                    print(f"    Source: {device.get('source', 'unknown')}")
         else:
             print("CUDA is not available. Falling back to CPU-only profiling.")
+
         process = psutil.Process()
         with process.oneshot():
             mem = process.memory_info()
