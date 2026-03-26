@@ -135,6 +135,37 @@ def test_detect_gpu_hardware_windows_prefers_powershell_output(
     ]
 
 
+def test_detect_gpu_hardware_preserves_identical_device_names(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(gpumemprof_utils.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(
+        gpumemprof_utils.subprocess,
+        "run",
+        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+            returncode=0,
+            stdout="\nNVIDIA GeForce RTX 4090\nNVIDIA GeForce RTX 4090\n",
+            stderr="",
+        ),
+    )
+
+    hardware_info = gpumemprof_utils._detect_gpu_hardware()
+
+    assert hardware_info["hardware_gpu_detected"] is True
+    assert hardware_info["devices"] == [
+        {
+            "name": "NVIDIA GeForce RTX 4090",
+            "source": "powershell",
+            "vendor": "nvidia",
+        },
+        {
+            "name": "NVIDIA GeForce RTX 4090",
+            "source": "powershell",
+            "vendor": "nvidia",
+        },
+    ]
+
+
 def test_detect_gpu_hardware_windows_falls_back_to_wmic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

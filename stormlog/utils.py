@@ -227,17 +227,11 @@ def _normalize_hardware_devices(
     devices: List[Dict[str, str]],
 ) -> List[Dict[str, str]]:
     normalized_devices: List[Dict[str, str]] = []
-    seen_names: set[str] = set()
 
     for device in devices:
         name = str(device.get("name", "")).strip()
         if not name or _is_software_adapter(name):
             continue
-
-        seen_key = name.lower()
-        if seen_key in seen_names:
-            continue
-        seen_names.add(seen_key)
 
         normalized_devices.append(
             {

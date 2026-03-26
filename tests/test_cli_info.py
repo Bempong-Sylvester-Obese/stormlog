@@ -242,6 +242,50 @@ def test_gpumemprof_info_ignores_device_without_supported_runtime(
     )
 
 
+def test_gpumemprof_info_detailed_preserves_identical_hardware_entries(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "get_system_info",
+        lambda: {
+            "platform": "Windows",
+            "python_version": "3.10",
+            "cuda_available": False,
+            "mps_built": False,
+            "mps_available": False,
+            "detected_backend": "cpu",
+        },
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_detect_gpu_hardware",
+        lambda: {
+            "hardware_gpu_detected": True,
+            "devices": [
+                {
+                    "name": "NVIDIA GeForce RTX 4090",
+                    "vendor": "nvidia",
+                    "source": "powershell",
+                },
+                {
+                    "name": "NVIDIA GeForce RTX 4090",
+                    "vendor": "nvidia",
+                    "source": "powershell",
+                },
+            ],
+        },
+    )
+    _patch_cpu_process(monkeypatch)
+
+    gpumemprof_cli.cmd_info(SimpleNamespace(device=None, detailed=True))  # type: ignore[arg-type, unused-ignore]
+    output = capsys.readouterr().out
+
+    assert output.count("NVIDIA GeForce RTX 4090") == 4
+    assert "Device 0: NVIDIA GeForce RTX 4090" in output
+    assert "Device 1: NVIDIA GeForce RTX 4090" in output
+
+
 def test_tfmemprof_info_reports_backend_diagnostics_for_apple(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
