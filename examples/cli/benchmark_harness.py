@@ -163,7 +163,7 @@ def _normalize_comparison_config(
     raw_config: Mapping[str, Any],
     *,
     label: str,
-) -> Dict[str, float]:
+) -> Dict[str, float | int]:
     missing_keys = [key for key in _BASELINE_CONFIG_KEYS if key not in raw_config]
     if missing_keys:
         missing = ", ".join(sorted(missing_keys))

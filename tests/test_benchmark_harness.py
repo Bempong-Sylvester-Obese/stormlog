@@ -177,6 +177,23 @@ def test_pct_overhead_preserves_signed_values() -> None:
     assert benchmark_harness._pct_overhead(100.0, 103.5) == pytest.approx(3.5)
 
 
+def test_normalize_comparison_config_preserves_integral_fields() -> None:
+    config = benchmark_harness._normalize_comparison_config(
+        {
+            "iterations": 10,
+            "allocation_kb": 64,
+            "default_interval": 0.05,
+            "lowfreq_interval": 0.2,
+        },
+        label="Baseline file",
+    )
+
+    assert config["iterations"] == 10
+    assert config["allocation_kb"] == 64
+    assert isinstance(config["iterations"], int)
+    assert isinstance(config["allocation_kb"], int)
+
+
 def test_run_benchmark_harness_regression_mode_writes_comparison_report(
     tmp_path: Path,
 ) -> None:
