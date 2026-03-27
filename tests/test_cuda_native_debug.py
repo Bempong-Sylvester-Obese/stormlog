@@ -83,6 +83,46 @@ def test_build_snapshot_allocation_attribution_matches_storage_pointers() -> Non
     assert summary["attributed_allocations"][0]["segment_address"] == hex(4096)
 
 
+def test_build_snapshot_allocation_attribution_uses_block_fallback_without_history() -> (
+    None
+):
+    snapshot = {
+        "segments": [
+            {
+                "address": 4096,
+                "stream": 7,
+                "blocks": [
+                    {
+                        "address": 12288,
+                        "size": 64,
+                        "history": [],
+                    }
+                ],
+            }
+        ],
+        "device_traces": [],
+    }
+    tensor_index = {
+        "device_index": 0,
+        "storage_pointer_count": 1,
+        "attributed_storage_pointers": [
+            {
+                "storage_ptr": hex(12288),
+                "storage_ptr_int": 12288,
+                "names": ["model.linear.bias"],
+                "tensors": [{"shape": [8], "dtype": "torch.float32"}],
+            }
+        ],
+    }
+
+    summary = native_debug.build_snapshot_allocation_attribution(snapshot, tensor_index)
+
+    assert summary["attributed_allocation_count"] == 1
+    assert summary["attributed_allocations"][0]["storage_ptr"] == hex(12288)
+    assert summary["attributed_allocations"][0]["size_bytes"] == 64
+    assert summary["attributed_allocations"][0]["names"] == ["model.linear.bias"]
+
+
 def test_write_cuda_snapshot_artifacts_writes_expected_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -250,15 +250,31 @@ def build_snapshot_allocation_attribution(
     for segment in snapshot_dict.get("segments", []):
         segment_address = int(segment.get("address", 0) or 0)
         for block in segment.get("blocks", []):
-            for history_entry in block.get("history", []):
-                addr = int(history_entry.get("addr", 0) or 0)
+            history_entries = list(block.get("history", []))
+            if history_entries:
+                candidate_allocations = [
+                    (
+                        int(history_entry.get("addr", 0) or 0),
+                        int(history_entry.get("real_size", 0) or 0),
+                    )
+                    for history_entry in history_entries
+                ]
+            else:
+                candidate_allocations = [
+                    (
+                        int(block.get("address", 0) or 0),
+                        int(block.get("size", 0) or 0),
+                    )
+                ]
+
+            for addr, size_bytes in candidate_allocations:
                 tensor_entry = pointer_map.get(addr)
                 if tensor_entry is None:
                     continue
                 allocations[addr] = {
                     "storage_ptr": hex(addr),
                     "storage_ptr_int": addr,
-                    "size_bytes": int(history_entry.get("real_size", 0) or 0),
+                    "size_bytes": size_bytes,
                     "segment_address": hex(segment_address),
                     "stream": segment.get("stream"),
                     "names": list(tensor_entry.get("names", [])),
