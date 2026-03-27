@@ -1,3 +1,5 @@
+import inspect
+
 import pytest
 
 from stormlog.cpu_profiler import CPUMemoryProfiler, CPUMemoryTracker
@@ -28,3 +30,12 @@ def test_gpu_tracker_rejects_non_positive_sampling_interval() -> None:
 def test_gpu_tracker_rejects_non_positive_max_events() -> None:
     with pytest.raises(ValueError, match="max_events must be >= 1"):
         MemoryTracker(max_events=0)
+
+
+def test_gpu_tracker_appends_native_history_options_after_identity() -> None:
+    parameters = list(inspect.signature(MemoryTracker.__init__).parameters)
+
+    assert parameters[-2:] == [
+        "enable_native_cuda_history",
+        "native_history_max_entries",
+    ]

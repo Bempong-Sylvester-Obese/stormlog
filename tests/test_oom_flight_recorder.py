@@ -31,6 +31,7 @@ class _TrackerHarness:
         enabled: bool = True,
         buffer_size: int = 8,
         enable_native_cuda_history: bool = False,
+        max_total_mb: int = 32,
     ) -> None:
         self.device = 0
         self.backend = "cuda"
@@ -52,7 +53,7 @@ class _TrackerHarness:
                 dump_dir=str(dump_dir),
                 buffer_size=buffer_size,
                 max_dumps=5,
-                max_total_mb=32,
+                max_total_mb=max_total_mb,
             )
         )
 
@@ -339,3 +340,79 @@ def test_capture_oom_with_native_history_adds_snapshot_files(
         ("history_recorded", True),
         ("stop", 0),
     ]
+
+
+def test_capture_oom_skips_native_history_when_oom_recorder_disabled(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    harness = _TrackerHarness(
+        tmp_path / "oom_dumps",
+        enabled=False,
+        enable_native_cuda_history=True,
+    )
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr("stormlog.tracker.cuda_memory_history_supported", lambda: True)
+    monkeypatch.setattr(
+        "stormlog.tracker.start_cuda_memory_history",
+        lambda **kwargs: calls.append(("start", kwargs.get("device"))),
+    )
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        with harness.capture_oom(context="capture-oom"):
+            raise RuntimeError("CUDA out of memory in context")
+
+    assert calls == []
+    assert harness.last_oom_dump_path is None
+
+
+def test_capture_oom_reapplies_retention_after_native_history_writes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    harness = _TrackerHarness(
+        tmp_path / "oom_dumps",
+        enable_native_cuda_history=True,
+        max_total_mb=1,
+    )
+
+    monkeypatch.setattr("stormlog.tracker.cuda_memory_history_supported", lambda: True)
+    monkeypatch.setattr(
+        "stormlog.tracker.start_cuda_memory_history",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        "stormlog.tracker.stop_cuda_memory_history",
+        lambda **kwargs: None,
+    )
+
+    def _fake_capture(
+        bundle_dir: Path,
+        *,
+        device: object = None,
+        history_recorded: bool,
+    ) -> list[str]:
+        _ = (device, history_recorded)
+        snapshot = bundle_dir / "cuda_allocator_snapshot.pickle"
+        snapshot.write_text("x" * 1_200_000, encoding="utf-8")
+        metadata = bundle_dir / "cuda_native_debug_metadata.json"
+        metadata.write_text("{}", encoding="utf-8")
+        return [snapshot.name, metadata.name]
+
+    monkeypatch.setattr(
+        "stormlog.tracker.capture_cuda_snapshot_artifacts",
+        _fake_capture,
+    )
+
+    with pytest.raises(RuntimeError, match="out of memory"):
+        with harness.capture_oom(context="capture-oom"):
+            raise RuntimeError("CUDA out of memory in context")
+
+    bundles = list((tmp_path / "oom_dumps").glob("oom_dump_*"))
+    total_size = 0
+    for bundle in bundles:
+        for file_path in bundle.rglob("*"):
+            if file_path.is_file():
+                total_size += file_path.stat().st_size
+
+    assert total_size <= 1 * 1024 * 1024
+    assert harness.last_oom_dump_path is None

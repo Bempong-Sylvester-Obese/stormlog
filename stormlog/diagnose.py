@@ -259,6 +259,8 @@ def run_diagnose(
     exit_code: 0 = success no risk, 1 = failure, 2 = success with memory risk.
     """
     if native_history:
+        if native_history_max_entries <= 0:
+            raise ValueError("native_history_max_entries must be >= 1")
         _validate_native_history_request()
 
     try:

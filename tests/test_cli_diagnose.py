@@ -526,3 +526,16 @@ def test_diagnose_native_history_rejects_non_cuda_runtime(
     assert exit_code == 1
     err = capsys.readouterr().err
     assert "only for CUDA runtimes" in err
+
+
+def test_run_diagnose_rejects_non_positive_native_history_max_entries() -> None:
+    with pytest.raises(ValueError, match="native_history_max_entries must be >= 1"):
+        diagnose_module.run_diagnose(
+            output=None,
+            device=0,
+            duration=0,
+            interval=0.5,
+            command_line="gpumemprof diagnose --native-history",
+            native_history=True,
+            native_history_max_entries=0,
+        )

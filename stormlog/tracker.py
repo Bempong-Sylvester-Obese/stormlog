@@ -80,12 +80,12 @@ class MemoryTracker:
         oom_buffer_size: Optional[int] = None,
         oom_max_dumps: int = 5,
         oom_max_total_mb: int = 256,
-        enable_native_cuda_history: bool = False,
-        native_history_max_entries: int = DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
         job_id: Optional[str] = None,
         rank: Optional[int] = None,
         local_rank: Optional[int] = None,
         world_size: Optional[int] = None,
+        enable_native_cuda_history: bool = False,
+        native_history_max_entries: int = DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
     ):
         """
         Initialize the memory tracker.
@@ -544,6 +544,14 @@ class MemoryTracker:
         except Exception as exc:
             logger.debug("Could not update OOM metadata with native history: %s", exc)
 
+        try:
+            root = Path(self._oom_flight_recorder.config.dump_dir)
+            self._oom_flight_recorder._prune_retention(root)
+        except Exception as exc:
+            logger.debug(
+                "Could not reapply OOM retention after native history: %s", exc
+            )
+
     @contextmanager
     def capture_oom(
         self,
@@ -554,6 +562,7 @@ class MemoryTracker:
         native_history_recorded = False
         if (
             self.enable_native_cuda_history
+            and self._oom_flight_recorder.config.enabled
             and self.backend == "cuda"
             and cuda_memory_history_supported()
         ):
@@ -571,6 +580,9 @@ class MemoryTracker:
             dump_path = self.handle_exception(exc, context=context, metadata=metadata)
             if dump_path and native_history_recorded and self.backend == "cuda":
                 MemoryTracker._capture_native_history_dump(self, Path(dump_path))
+                if not Path(dump_path).exists():
+                    self.last_oom_dump_path = None
+                    dump_path = None
             if dump_path:
                 logger.error("OOM flight recorder dump saved to: %s", dump_path)
             raise
