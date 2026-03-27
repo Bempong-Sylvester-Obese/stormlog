@@ -7,6 +7,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from .cuda_native_debug import (
+    DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
+    capture_cuda_snapshot_artifacts,
+    cuda_memory_history,
+    cuda_memory_history_supported,
+)
 from .device_collectors import (
     build_device_memory_collector,
     detect_torch_runtime_backend,
@@ -226,18 +232,37 @@ def build_diagnostic_summary(
     return summary, risk_detected
 
 
+def _validate_native_history_request() -> None:
+    runtime_backend = detect_torch_runtime_backend()
+    if runtime_backend != "cuda":
+        raise RuntimeError(
+            "Native memory history is currently supported only for CUDA runtimes."
+        )
+    if not cuda_memory_history_supported():
+        raise RuntimeError(
+            "Native CUDA memory history is unavailable in this PyTorch runtime."
+        )
+
+
 def run_diagnose(
     output: Optional[str],
     device: Optional[int],
     duration: float,
     interval: float,
     command_line: str,
+    native_history: bool = False,
+    native_history_max_entries: int = DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
 ) -> Tuple[Path, int]:
     """
     Build the full diagnostic bundle and write all artifact files.
     Returns (artifact_dir, exit_code).
     exit_code: 0 = success no risk, 1 = failure, 2 = success with memory risk.
     """
+    if native_history:
+        if native_history_max_entries <= 0:
+            raise ValueError("native_history_max_entries must be >= 1")
+        _validate_native_history_request()
+
     try:
         artifact_dir = _create_artifact_dir(output, "stormlog-diagnose")
     except OSError as e:
@@ -258,7 +283,21 @@ def run_diagnose(
         files_written.append("environment.json")
 
         # 2. Timeline (optional)
-        timeline = run_timeline_capture(device, duration, interval)
+        if native_history:
+            with cuda_memory_history(
+                device=device,
+                trace_alloc_max_entries=native_history_max_entries,
+            ):
+                timeline = run_timeline_capture(device, duration, interval)
+                files_written.extend(
+                    capture_cuda_snapshot_artifacts(
+                        artifact_dir,
+                        device=device,
+                        history_recorded=True,
+                    )
+                )
+        else:
+            timeline = run_timeline_capture(device, duration, interval)
         timeline_path = artifact_dir / "telemetry_timeline.json"
         with open(timeline_path, "w") as f:
             json.dump(timeline, f, indent=2, default=_default_str)
@@ -279,6 +318,7 @@ def run_diagnose(
             "version": MANIFEST_VERSION,
             "created_iso": datetime.utcnow().isoformat() + "Z",
             "command_line": command_line,
+            "native_history_enabled": native_history,
             "files": files_written,
             "exit_code": exit_code,
             "risk_detected": risk_detected,
@@ -296,6 +336,7 @@ def run_diagnose(
             "version": MANIFEST_VERSION,
             "created_iso": datetime.utcnow().isoformat() + "Z",
             "command_line": command_line,
+            "native_history_enabled": native_history,
             "files": files_written,
             "exit_code": 1,
             "risk_detected": False,

@@ -1,0 +1,16 @@
+{
+  "version": "v0.3",
+  "description": "Baseline metrics for the v0.3 CI memory regression gate, captured from GitHub Actions ubuntu-24.04 with Python 3.10.",
+  "config": {
+    "iterations": 5000,
+    "allocation_kb": 512,
+    "default_interval": 0.1,
+    "lowfreq_interval": 0.5
+  },
+  "metrics": {
+    "runtime_overhead_pct": -1.7466960528930633,
+    "cpu_overhead_pct": -1.7174929312173535,
+    "sampling_impact_pct": 0.735909411096989,
+    "artifact_growth_bytes": 2726.0
+  }
+}

@@ -2,9 +2,9 @@ name: CI
 
 on:
     push:
-        branches: [main, develop]
+        branches: [main, develop, release/dev]
     pull_request:
-        branches: [main, release/v0.2-readiness]
+        branches: [main, release/v0.2-readiness, release/dev]
     schedule:
         - cron: "0 3 * * *"
 
@@ -25,12 +25,12 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python ${{ matrix.python-version }}
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: ${{ matrix.python-version }}
 
             - name: Cache pip dependencies
-              uses: actions/cache@v3
+              uses: actions/cache@v5
               with:
                   path: ~/.cache/pip
                   key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
@@ -74,12 +74,12 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.11"
 
             - name: Cache pip dependencies
-              uses: actions/cache@v3
+              uses: actions/cache@v5
               with:
                   path: ~/.cache/pip
                   key: ${{ runner.os }}-pip-tui-pr-${{ hashFiles('pyproject.toml') }}
@@ -105,12 +105,12 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.11"
 
             - name: Cache pip dependencies
-              uses: actions/cache@v3
+              uses: actions/cache@v5
               with:
                   path: ~/.cache/pip
                   key: ${{ runner.os }}-pip-tui-pty-${{ hashFiles('pyproject.toml') }}
@@ -139,7 +139,7 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python ${{ matrix.python-version }}
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: ${{ matrix.python-version }}
 
@@ -174,12 +174,12 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.11"
 
             - name: Cache pip dependencies
-              uses: actions/cache@v3
+              uses: actions/cache@v5
               with:
                   path: ~/.cache/pip
                   key: ${{ runner.os }}-pip-docs-${{ hashFiles('pyproject.toml', 'docs/requirements-rtd.txt') }}
@@ -205,7 +205,7 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.10"
 
@@ -228,6 +228,50 @@ jobs:
                   name: dist
                   path: dist/
 
+    memory-regression-gate:
+        if: github.event_name != 'schedule'
+        runs-on: ubuntu-24.04
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v6
+              with:
+                  python-version: "3.10"
+
+            - name: Cache pip dependencies
+              uses: actions/cache@v5
+              with:
+                  path: ~/.cache/pip
+                  key: ${{ runner.os }}-pip-benchmark-regression-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: |
+                      ${{ runner.os }}-pip-benchmark-regression-
+
+            - name: Install benchmark regression dependencies
+              run: |
+                  python3 -m pip install --upgrade pip
+                  pip install -e . --no-deps
+                  pip install -r requirements-ci-base.txt
+
+            - name: Run memory regression gate
+              run: |
+                  python3 -m examples.cli.benchmark_harness \
+                    --check \
+                    --gate-mode regression \
+                    --iterations 5000 \
+                    --baseline docs/benchmarks/v0.3_baseline.json \
+                    --tolerances docs/benchmarks/v0.3_tolerances.json \
+                    --output artifacts/benchmarks/ci_regression.json \
+                    --artifact-root artifacts/benchmarks/ci_scenarios
+
+            - name: Upload benchmark regression artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: benchmark-regression-artifacts
+                  path: artifacts/benchmarks/
+
     artifact-cli-smoke:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
@@ -235,7 +279,7 @@ jobs:
 
         steps:
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.10"
 
@@ -287,7 +331,7 @@ jobs:
             - uses: actions/checkout@v4
 
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@v6
               with:
                   python-version: "3.10"
 

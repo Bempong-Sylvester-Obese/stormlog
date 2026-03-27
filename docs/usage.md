@@ -178,6 +178,24 @@ print(f"Peak memory: {stats.get('peak_memory', 0) / (1024**3):.2f} GB")
 print(f"Events: {stats.get('total_events', 0)}")
 ```
 
+For CUDA-only OOM debugging, enable native allocator-history capture and wrap
+the risky block with `capture_oom()`:
+
+```python
+from stormlog import MemoryTracker
+
+tracker = MemoryTracker(
+    enable_oom_flight_recorder=True,
+    enable_native_cuda_history=True,
+)
+
+with tracker.capture_oom(context="train-step"):
+    run_training_step()
+```
+
+If that block raises a CUDA OOM, the OOM dump bundle is extended with native
+snapshot artifacts and pointer-attribution summaries.
+
 ### CPU tracker
 
 ```python
