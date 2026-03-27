@@ -68,8 +68,18 @@ def test_ci_wires_memory_regression_gate_job() -> None:
     end = content.index("artifact-cli-smoke:", start)
     job_block = content[start:end]
 
+    assert "runs-on: ubuntu-24.04" in job_block
     assert "--gate-mode regression" in job_block
     assert "docs/benchmarks/v0.3_baseline.json" in job_block
     assert "docs/benchmarks/v0.3_tolerances.json" in job_block
     assert "--iterations 5000" in job_block
     assert "actions/upload-artifact@v4" in job_block
+
+
+def test_ci_uses_supported_python_and_cache_actions() -> None:
+    content = _ci_workflow_content()
+
+    assert "actions/setup-python@v4" not in content
+    assert "actions/cache@v3" not in content
+    assert "actions/setup-python@v6" in content
+    assert "actions/cache@v5" in content
