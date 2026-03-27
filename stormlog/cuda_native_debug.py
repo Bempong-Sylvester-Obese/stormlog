@@ -173,12 +173,15 @@ def _collect_module_name_index(device_index: int) -> dict[int, set[str]]:
 
 def build_cuda_tensor_attribution_index(
     device: Optional[Union[int, torch.device]] = None,
+    *,
+    skip_gc: bool = False,
 ) -> dict[str, Any]:
     """Build a best-effort index from CUDA storage pointers to live tensors."""
     _require_cuda_history_support()
     device_index = _resolve_device_index(device)
 
-    gc.collect()
+    if not skip_gc:
+        gc.collect()
     pointer_to_names = _collect_module_name_index(device_index)
     pointer_to_tensors: dict[int, list[dict[str, Any]]] = defaultdict(list)
 
@@ -370,8 +373,9 @@ def capture_cuda_snapshot_artifacts(
 ) -> list[str]:
     """Capture the current CUDA allocator snapshot and write debug artifacts."""
     _require_cuda_history_support()
+    gc.collect()
     snapshot = torch.cuda.memory._snapshot(device=device)
-    tensor_index = build_cuda_tensor_attribution_index(device=device)
+    tensor_index = build_cuda_tensor_attribution_index(device=device, skip_gc=True)
     return write_cuda_snapshot_artifacts(
         output_dir,
         snapshot,

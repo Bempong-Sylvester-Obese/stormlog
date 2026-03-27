@@ -128,3 +128,64 @@ def test_write_cuda_snapshot_artifacts_writes_expected_files(
     assert (tmp_path / native_debug.TRACE_HTML_FILENAME).read_text(
         encoding="utf-8"
     ) == "<html>allocator-state-history</html>"
+
+
+def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[str, object]] = []
+
+    monkeypatch.setattr(native_debug, "_require_cuda_history_support", lambda: None)
+    monkeypatch.setattr(
+        native_debug.gc,
+        "collect",
+        lambda: calls.append(("gc.collect", None)),
+    )
+    monkeypatch.setattr(
+        native_debug,
+        "torch",
+        SimpleNamespace(
+            cuda=SimpleNamespace(
+                memory=SimpleNamespace(
+                    _snapshot=lambda device=None: calls.append(("snapshot", device))
+                    or {"segments": [], "device_traces": []}
+                )
+            )
+        ),
+    )
+
+    def _fake_build_tensor_index(
+        device: object = None,
+        *,
+        skip_gc: bool = False,
+    ) -> dict[str, object]:
+        calls.append(("tensor_index", (device, skip_gc)))
+        return {
+            "device_index": 0,
+            "storage_pointer_count": 0,
+            "attributed_storage_pointers": [],
+        }
+
+    monkeypatch.setattr(
+        native_debug,
+        "build_cuda_tensor_attribution_index",
+        _fake_build_tensor_index,
+    )
+    monkeypatch.setattr(
+        native_debug,
+        "write_cuda_snapshot_artifacts",
+        lambda *args, **kwargs: ["cuda_allocator_snapshot.pickle"],
+    )
+
+    files_written = native_debug.capture_cuda_snapshot_artifacts(
+        tmp_path,
+        device=0,
+        history_recorded=True,
+    )
+
+    assert files_written == ["cuda_allocator_snapshot.pickle"]
+    assert calls == [
+        ("gc.collect", None),
+        ("snapshot", 0),
+        ("tensor_index", (0, True)),
+    ]
