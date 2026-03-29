@@ -72,6 +72,18 @@ class _SequencedCollector:
         return self._last
 
 
+class _NoOpThread:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        _ = args
+        self.daemon = bool(kwargs.get("daemon", False))
+
+    def start(self) -> None:
+        return None
+
+    def join(self, timeout: float | None = None) -> None:
+        _ = timeout
+
+
 def _build_tracker(
     monkeypatch: pytest.MonkeyPatch,
     collector: _SequencedCollector,
@@ -269,3 +281,61 @@ def test_memory_tracker_export_preserves_health_metadata(
     assert "collector_health_status" in payload
     assert "collector_degraded" in payload
     assert "device_total_bytes" in payload
+
+
+def test_memory_tracker_start_tracking_resets_collector_session_state(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    monkeypatch.setattr(tracker_mod.threading, "Thread", _NoOpThread)
+    tracker._set_collector_health(
+        status=COLLECTOR_HEALTH_UNHEALTHY,
+        telemetry_partial=True,
+        last_error="collector unavailable",
+        consecutive_failures=3,
+        next_retry_epoch_s=42.0,
+    )
+    tracker._last_observed_sample = _sample(allocated=512, reserved=768)
+    tracker.stats["last_memory_check"] = 99.0
+
+    tracker.start_tracking()
+
+    stats = tracker.get_statistics()
+    assert stats["collector_health_status"] == COLLECTOR_HEALTH_HEALTHY
+    assert stats["collector_last_error"] is None
+    assert stats["collector_consecutive_failures"] == 0
+    assert stats["collector_next_retry_epoch_s"] is None
+    assert stats["current_memory_allocated"] is None
+    assert tracker.stats["last_memory_check"] == 0
+    assert tracker.get_events()[-1].event_type == "start"
+    assert tracker.get_events()[-1].memory_allocated == 0
+
+
+def test_memory_tracker_hides_stale_current_stats_when_unhealthy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [
+            DeviceMemorySampleResult(sample=_sample(allocated=256, reserved=512)),
+            DeviceMemorySampleResult(
+                sample=None,
+                errors={"core_metrics": "collector unavailable"},
+                core_error="collector unavailable",
+            ),
+        ]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    current_time = {"value": 10.0}
+    monkeypatch.setattr(tracker_mod.time, "time", lambda: current_time["value"])
+
+    tracker._run_tracking_iteration(0)
+    stats = tracker.get_statistics()
+
+    assert tracker._last_observed_sample is not None
+    assert stats["collector_health_status"] == COLLECTOR_HEALTH_UNHEALTHY
+    assert stats["current_memory_allocated"] is None
+    assert stats["current_memory_reserved"] is None
+    assert stats["memory_utilization_percent"] is None

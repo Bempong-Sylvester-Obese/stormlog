@@ -226,3 +226,62 @@ def test_cmd_track_reports_collector_health_in_output(
     assert "Health: unhealthy" in output
     assert "Collector health: unhealthy" in output
     assert "Last collector error: collector unavailable" in output
+
+
+def test_cmd_monitor_handles_unavailable_current_memory_for_mps(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    current_time = {"value": 0.0}
+
+    class _FakeTracker:
+        def __init__(self, **kwargs: object) -> None:
+            self.started = False
+            self.stopped = False
+            _ = kwargs
+
+        def start_tracking(self) -> None:
+            self.started = True
+
+        def stop_tracking(self) -> None:
+            self.stopped = True
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_allocated": None,
+                "peak_memory": 0,
+            }
+
+        def get_events(self) -> list[object]:
+            return []
+
+        def export_events(self, output: str, fmt: str) -> None:
+            _ = (output, fmt)
+
+    monkeypatch.setattr(
+        gpumemprof_cli, "get_system_info", lambda: {"detected_backend": "mps"}
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_import_runtime_symbols",
+        lambda module, names, command: (_FakeTracker,),
+    )
+    monkeypatch.setattr(gpumemprof_cli.time, "time", lambda: current_time["value"])
+
+    def _sleep(_: float) -> None:
+        current_time["value"] += 1.1
+
+    monkeypatch.setattr(gpumemprof_cli.time, "sleep", _sleep)
+
+    gpumemprof_cli.cmd_monitor(
+        Namespace(
+            device=None,
+            duration=1.0,
+            interval=0.25,
+            output=None,
+            format="json",
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "Current Memory: -" in output

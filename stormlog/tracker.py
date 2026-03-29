@@ -199,6 +199,15 @@ class MemoryTracker:
             )
         self.total_memory = int(total_memory)
 
+    def _reset_collector_session_state(self) -> None:
+        """Reset per-session collector state before a fresh tracking run."""
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
+        self._last_observed_sample = None
+        self.stats["last_memory_check"] = 0
+
     @property
     def oom_buffer_size(self) -> int:
         """Resolved OOM ring-buffer size."""
@@ -475,6 +484,7 @@ class MemoryTracker:
         if self.is_tracking:
             return
 
+        self._reset_collector_session_state()
         self.is_tracking = True
         self._stop_event.clear()
         self.stats["tracking_start_time"] = time.time()
@@ -879,7 +889,11 @@ class MemoryTracker:
         """Get comprehensive tracking statistics."""
         current_stats = self.stats.copy()
         recent_events = [e for e in self.events if e.timestamp > time.time() - 3600]
-        sample = self._last_observed_sample
+        sample = (
+            self._last_observed_sample
+            if self._collector_health.status != COLLECTOR_HEALTH_UNHEALTHY
+            else None
+        )
 
         current_stats.update(
             {

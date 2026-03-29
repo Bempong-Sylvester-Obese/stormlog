@@ -28,6 +28,18 @@ def _wait_until_events(
     return bool(tracker.events)
 
 
+class _NoOpThread:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        _ = args
+        self.daemon = bool(kwargs.get("daemon", False))
+
+    def start(self) -> None:
+        return None
+
+    def join(self, timeout: float | None = None) -> None:
+        _ = timeout
+
+
 def test_tf_tracker_emits_v2_event_records(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
 
@@ -259,3 +271,39 @@ def test_tf_tracker_persistent_failure_preserves_status_events_without_samples(
         COLLECTOR_HEALTH_UNHEALTHY
     )
     assert tracker.get_statistics()["collector_consecutive_failures"] == 3
+
+
+def test_tf_tracker_uses_session_wall_clock_for_failure_only_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    current_time = {"value": 100.0}
+    monkeypatch.setattr(tf_tracker.time, "time", lambda: current_time["value"])
+    monkeypatch.setattr(tf_tracker.threading, "Thread", _NoOpThread)
+
+    def _fail() -> float:
+        raise RuntimeError("memory probe failed")
+
+    monkeypatch.setattr(tracker, "_get_current_memory", _fail)
+
+    tracker.start_tracking()
+    current_time["value"] = 101.5
+    tracker._run_tracking_iteration()
+
+    stats = tracker.get_statistics()
+    assert stats["tracking_duration_seconds"] == pytest.approx(1.5)
+
+    current_time["value"] = 103.0
+    result = tracker.stop_tracking()
+
+    assert result.start_time == pytest.approx(100.0)
+    assert result.end_time == pytest.approx(103.0)
+    assert result.duration == pytest.approx(3.0)
+    assert result.memory_usage == []
+    assert [event["event_type"] for event in result.events] == ["collector_degraded"]

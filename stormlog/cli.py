@@ -531,20 +531,22 @@ def cmd_monitor(args: argparse.Namespace) -> None:
                     current_mem = torch_module.cuda.memory_allocated(
                         profiler.device
                     ) / (1024**3)
-                    unit = "GB"
+                    current_mem_text = f"{current_mem:.2f} GB"
                 elif tracker is not None:
                     stats = tracker.get_statistics()
-                    current_mem = stats.get("current_memory_allocated", 0) / (1024**3)
-                    unit = "GB"
+                    current_allocated = stats.get("current_memory_allocated")
+                    current_mem_text = (
+                        f"{float(current_allocated) / (1024**3):.2f} GB"
+                        if isinstance(current_allocated, (int, float))
+                        else "-"
+                    )
                 else:
                     current_mem = (
                         profiler._take_snapshot().rss / (1024**2) if profiler else 0.0
                     )
-                    unit = "MB"
+                    current_mem_text = f"{current_mem:.2f} MB"
                 elapsed = time.time() - start_time
-                print(
-                    f"Elapsed: {elapsed:.1f}s, Current Memory: {current_mem:.2f} {unit}"
-                )
+                print(f"Elapsed: {elapsed:.1f}s, Current Memory: {current_mem_text}")
             time.sleep(1)
 
     except KeyboardInterrupt:

@@ -118,6 +118,8 @@ class MemoryTracker:
         self._stop_event = threading.Event()
         self._collector_health = CollectorHealthState()
         self._last_successful_memory_mb: Optional[float] = None
+        self._session_start_time: Optional[float] = None
+        self._session_end_time: Optional[float] = None
         self._collector_retry_backoff_initial_s = 1.0
         self._collector_retry_backoff_factor = 2.0
         self._collector_retry_backoff_cap_s = 30.0
@@ -386,6 +388,8 @@ class MemoryTracker:
                 logging.warning("Tracking already started")
             return
 
+        self._session_start_time = time.time()
+        self._session_end_time = None
         self.tracking = True
         self._stop_event.clear()
 
@@ -424,6 +428,7 @@ class MemoryTracker:
         if self.tracking_thread:
             self.tracking_thread.join(timeout=5.0)
 
+        self._session_end_time = time.time()
         # Create result
         result = self._create_tracking_result()
 
@@ -440,12 +445,16 @@ class MemoryTracker:
             if not self.memory_usage and not self.events and not self.alerts:
                 return self._create_empty_result()
 
-            start_time = self.timestamps[0] if self.timestamps else time.time()
-            end_time = self.timestamps[-1] if self.timestamps else time.time()
+            session_start = self._session_start_time
+            session_end = self._session_end_time
+            if session_start is None:
+                session_start = self.timestamps[0] if self.timestamps else time.time()
+            if session_end is None:
+                session_end = self.timestamps[-1] if self.timestamps else time.time()
 
             return TrackingResult(
-                start_time=start_time,
-                end_time=end_time,
+                start_time=session_start,
+                end_time=session_end,
                 memory_usage=self.memory_usage.copy(),
                 timestamps=self.timestamps.copy(),
                 events=self.events.copy(),
@@ -462,9 +471,11 @@ class MemoryTracker:
     def _create_empty_result(self) -> TrackingResult:
         """Create empty tracking result."""
         current_time = time.time()
+        start_time = self._session_start_time or current_time
+        end_time = self._session_end_time or start_time
         return TrackingResult(
-            start_time=current_time,
-            end_time=current_time,
+            start_time=start_time,
+            end_time=end_time,
             memory_usage=[],
             timestamps=[],
             events=[],
@@ -486,10 +497,11 @@ class MemoryTracker:
         with self._lock:
             total_events = len(self.events)
             peak_memory = max(self.memory_usage) if self.memory_usage else 0.0
-            tracking_start = self.timestamps[0] if self.timestamps else None
+            tracking_start = self._session_start_time
+            tracking_end = self._session_end_time
 
         tracking_duration = (
-            time.time() - tracking_start
+            (tracking_end or time.time()) - tracking_start
             if isinstance(tracking_start, (int, float))
             else 0.0
         )
