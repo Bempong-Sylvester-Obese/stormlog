@@ -85,6 +85,41 @@ class _NoOpThread:
         _ = timeout
 
 
+class _SequencedStopEvent:
+    def __init__(self, waits: list[bool]) -> None:
+        self._waits = deque(waits)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        _ = timeout
+        if self._waits:
+            return self._waits.popleft()
+        return True
+
+    def set(self) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+
+class _FailingFlushSink:
+    def __init__(self) -> None:
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def append(self, record: dict[str, object]) -> None:
+        _ = record
+        return None
+
+    def flush(self, *, force: bool = False) -> None:
+        _ = force
+        self.flush_calls += 1
+        raise OSError("disk full")
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 def _build_tracker(
     monkeypatch: pytest.MonkeyPatch,
     collector: _SequencedCollector,
@@ -318,6 +353,33 @@ def test_memory_tracker_streams_events_to_append_only_sink(
     assert payload["collector"] == "stormlog.cuda_tracker"
     assert payload["event_type"] == "allocation"
     assert payload["allocator_allocated_bytes"] == 128
+
+
+def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    sink = _FailingFlushSink()
+    tracker._telemetry_sink = sink
+    tracker._stop_event = _SequencedStopEvent([False, False, True])
+    iteration_inputs: list[int] = []
+
+    def _run_iteration(last_allocated: int) -> int:
+        iteration_inputs.append(last_allocated)
+        return last_allocated + 1
+
+    monkeypatch.setattr(tracker, "_run_tracking_iteration", _run_iteration)
+    monkeypatch.setattr(tracker_mod.time, "sleep", lambda _: None)
+
+    tracker._tracking_loop()
+
+    assert iteration_inputs == [0, 1]
+    assert sink.flush_calls == 1
+    assert sink.close_calls == 1
+    assert tracker._telemetry_sink is None
 
 
 def test_memory_tracker_start_tracking_resets_collector_session_state(
