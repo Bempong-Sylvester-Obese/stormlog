@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -84,6 +85,30 @@ def test_append_only_sink_prunes_oldest_closed_segments(tmp_path: Path) -> None:
     filenames = [segment["filename"] for segment in manifest["segments"]]
     assert filenames == ["segment-000002.jsonl", "segment-000003.jsonl"]
     assert not (tmp_path / "segment-000001.jsonl").exists()
+
+
+def test_append_only_sink_flushes_without_new_events(tmp_path: Path) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=10,
+            flush_every_seconds=0.05,
+        )
+    )
+
+    try:
+        sink.append({"seq": 1})
+
+        segment_path = tmp_path / "segment-000001.jsonl"
+        deadline = time.monotonic() + 1.0
+        while time.monotonic() < deadline:
+            if segment_path.exists() and _segment_records(segment_path) == [{"seq": 1}]:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("append-only sink did not flush buffered records in time")
+    finally:
+        sink.close()
 
 
 def test_telemetry_sink_config_rejects_total_retention_below_rollover() -> None:

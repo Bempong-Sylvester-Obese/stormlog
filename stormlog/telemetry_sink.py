@@ -68,12 +68,15 @@ class AppendOnlyTelemetrySink:
         self._buffered_event_count = 0
         self._handle: TextIO | None = None
         self._lock = threading.Lock()
+        self._flush_stop_event = threading.Event()
+        self._flush_thread: threading.Thread | None = None
         self._last_flush_monotonic = time.monotonic()
         self._closed = False
         self._load_existing_state()
 
     def append(self, record: Mapping[str, Any]) -> None:
         with self._lock:
+            self._ensure_flush_thread_locked()
             self._closed = False
             self._buffer.append(json.dumps(dict(record), sort_keys=True) + "\n")
             self._buffered_event_count += 1
@@ -94,6 +97,7 @@ class AppendOnlyTelemetrySink:
                 current.closed = True
                 self._write_manifest_locked()
             self._closed = True
+        self._stop_flush_thread()
 
     def _flush_locked(self, force: bool) -> None:
         if not self._buffer:
@@ -161,6 +165,30 @@ class AppendOnlyTelemetrySink:
         if current.closed:
             return None
         return current
+
+    def _ensure_flush_thread_locked(self) -> None:
+        if self._flush_thread is not None and self._flush_thread.is_alive():
+            return
+        self._flush_stop_event = threading.Event()
+        self._flush_thread = threading.Thread(
+            target=self._run_flush_loop,
+            name="stormlog-telemetry-sink-flush",
+            daemon=True,
+        )
+        self._flush_thread.start()
+
+    def _stop_flush_thread(self) -> None:
+        thread = self._flush_thread
+        if thread is None:
+            return
+        self._flush_stop_event.set()
+        thread.join(timeout=self.config.flush_every_seconds + 1.0)
+        self._flush_thread = None
+
+    def _run_flush_loop(self) -> None:
+        while not self._flush_stop_event.wait(timeout=self.config.flush_every_seconds):
+            with self._lock:
+                self._flush_locked(force=False)
 
     def _ensure_current_segment_locked(self) -> _SegmentState:
         current = self._current_segment()
