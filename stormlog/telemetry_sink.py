@@ -237,6 +237,48 @@ class AppendOnlyTelemetrySink:
             return sum(1 for line in handle if line.strip())
 
 
+def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
+    """Resolve append-only sink inputs to ordered JSONL segment paths."""
+    resolved_path = Path(path)
+    if resolved_path.is_file():
+        if resolved_path.suffix == SEGMENT_SUFFIX:
+            return [resolved_path]
+        if resolved_path.name == MANIFEST_FILENAME:
+            return _segment_paths_from_manifest(resolved_path)
+        return []
+
+    if not resolved_path.is_dir():
+        return []
+
+    manifest_path = resolved_path / MANIFEST_FILENAME
+    manifest_segments = _segment_paths_from_manifest(manifest_path)
+    if manifest_segments:
+        return manifest_segments
+    return sorted(resolved_path.glob(f"{SEGMENT_PREFIX}*{SEGMENT_SUFFIX}"))
+
+
+def _segment_paths_from_manifest(manifest_path: Path) -> list[Path]:
+    if not manifest_path.exists():
+        return []
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    root_dir = manifest_path.parent
+    segments = []
+    for segment in payload.get("segments", []):
+        if not isinstance(segment, dict):
+            continue
+        filename = segment.get("filename")
+        if isinstance(filename, str):
+            candidate = root_dir / filename
+            if candidate.exists():
+                segments.append(candidate)
+    return segments
+
+
 __all__ = [
     "AppendOnlyTelemetrySink",
     "MANIFEST_FILENAME",
@@ -244,4 +286,5 @@ __all__ = [
     "SEGMENT_SUFFIX",
     "SINK_SCHEMA_VERSION",
     "TelemetrySinkConfig",
+    "resolve_telemetry_sink_segment_paths",
 ]

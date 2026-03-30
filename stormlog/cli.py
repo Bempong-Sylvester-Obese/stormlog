@@ -859,6 +859,14 @@ def _json_default(value: Any) -> Any:
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
+def _input_artifact_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return int(path.stat().st_size)
+    if path.is_dir():
+        return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+    return 0
+
+
 def _build_analyze_summary(
     input_file: str, file_size_bytes: int, report: dict[str, Any]
 ) -> str:
@@ -959,30 +967,44 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print(f"Error: Input file '{input_file}' not found")
         return 1
 
-    try:
-        with input_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception as e:
-        print(f"Error loading input file: {e}")
-        return 1
-
     (load_telemetry_events,) = _import_runtime_symbols(
         ".telemetry", ("load_telemetry_events",), "The analyze command"
     )
 
     events: list[Any] | None = None
     telemetry_note: str | None = None
+    data: Any = None
     try:
         events = load_telemetry_events(input_path, permissive_legacy=True)
     except ValueError as exc:
+        if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        try:
+            with input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            print(f"Error loading input file: {error}")
+            return 1
         if not _json_payload_looks_like_telemetry(data):
             telemetry_note = "JSON payload does not contain telemetry events"
         else:
             print(f"Error parsing telemetry events: {exc}")
             return 1
     except Exception as exc:
-        print(f"Error parsing telemetry events: {exc}")
-        return 1
+        if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        try:
+            with input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            print(f"Error loading input file: {error}")
+            return 1
+        if _json_payload_looks_like_telemetry(data):
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        telemetry_note = "JSON payload does not contain telemetry events"
 
     if events is not None:
         (MemoryAnalyzer,) = _import_runtime_symbols(
@@ -1005,7 +1027,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     summary_text = _build_analyze_summary(
         input_file=input_file,
-        file_size_bytes=input_path.stat().st_size,
+        file_size_bytes=_input_artifact_size_bytes(input_path),
         report=report,
     )
     print(summary_text)
