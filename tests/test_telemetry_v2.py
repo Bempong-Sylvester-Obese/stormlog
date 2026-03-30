@@ -412,6 +412,61 @@ def test_load_telemetry_events_reads_unlisted_sink_segments(tmp_path: Path) -> N
     assert events[1].timestamp_ns == second["timestamp_ns"]
 
 
+def test_append_only_sink_truncates_partial_segment_tail_on_resume(
+    tmp_path: Path,
+) -> None:
+    sink_dir = tmp_path / "sink"
+    sink_dir.mkdir()
+
+    first = telemetry_event_to_dict(_make_valid_event())
+    second = telemetry_event_to_dict(_make_valid_event())
+    second["timestamp_ns"] = first["timestamp_ns"] + 1
+
+    first_payload = json.dumps(first) + "\n"
+    partial_payload = '{"schema_version": 2, "timestamp_ns":'
+    segment_path = sink_dir / "segment-000001.jsonl"
+    segment_path.write_text(
+        first_payload + partial_payload,
+        encoding="utf-8",
+    )
+    (sink_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.append_only_telemetry_sink",
+                "segments": [
+                    {
+                        "filename": segment_path.name,
+                        "event_count": 1,
+                        "size_bytes": len(
+                            (first_payload + partial_payload).encode("utf-8")
+                        ),
+                        "closed": False,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=sink_dir,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append(second)
+    sink.close()
+
+    events = load_telemetry_events(sink_dir)
+
+    assert len(events) == 2
+    assert events[0].timestamp_ns == first["timestamp_ns"]
+    assert events[1].timestamp_ns == second["timestamp_ns"]
+
+
 def test_load_telemetry_events_ignores_truncated_jsonl_tail(tmp_path: Path) -> None:
     record = telemetry_event_to_dict(_make_valid_event())
     segment = tmp_path / "segment-000001.jsonl"

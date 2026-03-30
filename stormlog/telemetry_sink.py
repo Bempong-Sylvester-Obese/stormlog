@@ -180,6 +180,7 @@ class AppendOnlyTelemetrySink:
     def _ensure_handle_locked(self, current: _SegmentState) -> TextIO:
         if self._handle is None:
             segment_path = self.root_dir / current.filename
+            self._recover_segment_tail_locked(segment_path, current)
             self._handle = segment_path.open("a", encoding="utf-8")
         return self._handle
 
@@ -235,6 +236,25 @@ class AppendOnlyTelemetrySink:
     def _count_records(path: Path) -> int:
         with path.open("r", encoding="utf-8") as handle:
             return sum(1 for line in handle if line.strip())
+
+    def _recover_segment_tail_locked(
+        self,
+        segment_path: Path,
+        current: _SegmentState,
+    ) -> None:
+        if not segment_path.exists():
+            current.event_count = 0
+            current.size_bytes = 0
+            return
+
+        payload = segment_path.read_bytes()
+        if payload and not payload.endswith(b"\n"):
+            last_newline = payload.rfind(b"\n")
+            payload = payload[: last_newline + 1] if last_newline >= 0 else b""
+            segment_path.write_bytes(payload)
+
+        current.size_bytes = len(payload)
+        current.event_count = self._count_records(segment_path)
 
 
 def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
