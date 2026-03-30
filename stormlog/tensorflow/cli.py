@@ -246,8 +246,19 @@ def cmd_track(args: argparse.Namespace) -> int:
             time.sleep(5.0)  # Check every 5 seconds
 
             # Show periodic updates
-            current_memory = tracker.get_current_memory()
-            print(f"Current memory: {current_memory:.1f} MB")
+            stats = tracker.get_statistics()
+            current_memory = stats.get("current_memory_mb")
+            collector_health = str(stats.get("collector_health_status", "healthy"))
+            if isinstance(current_memory, (int, float)):
+                status_line = f"Current memory: {float(current_memory):.1f} MB"
+            else:
+                status_line = "Current memory: unavailable"
+            status_line += f" | Health: {collector_health}"
+            retry_at = stats.get("collector_next_retry_epoch_s")
+            if isinstance(retry_at, (int, float)):
+                retry_in = max(float(retry_at) - time.time(), 0.0)
+                status_line += f" | Retry In: {retry_in:.1f}s"
+            print(status_line)
 
     except KeyboardInterrupt:
         print("\nStopping tracking...")
@@ -277,7 +288,15 @@ def cmd_track(args: argparse.Namespace) -> int:
 
             print(f"Results saved to {args.output}")
 
+        final_stats = tracker.get_statistics()
         print(f"\nTracking completed. Peak memory: {results.peak_memory:.1f} MB")
+        if "collector_health_status" in final_stats:
+            print(
+                "Collector health: "
+                f"{final_stats.get('collector_health_status', 'healthy')}"
+            )
+        if final_stats.get("collector_last_error"):
+            print(f"Last collector error: {final_stats.get('collector_last_error')}")
 
     return 0
 

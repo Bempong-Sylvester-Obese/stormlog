@@ -6,11 +6,13 @@ import json
 import time
 from argparse import Namespace
 from pathlib import Path
+from typing import Iterator
 
 import pytest
 
 import stormlog.tensorflow.cli as tf_cli
 import stormlog.tensorflow.tracker as tf_tracker
+from stormlog.collector_health import COLLECTOR_HEALTH_UNHEALTHY
 from stormlog.telemetry import validate_telemetry_record
 
 
@@ -26,6 +28,18 @@ def _wait_until_events(
     return bool(tracker.events)
 
 
+class _NoOpThread:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        _ = args
+        self.daemon = bool(kwargs.get("daemon", False))
+
+    def start(self) -> None:
+        return None
+
+    def join(self, timeout: float | None = None) -> None:
+        _ = timeout
+
+
 def test_tf_tracker_emits_v2_event_records(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
 
@@ -38,7 +52,7 @@ def test_tf_tracker_emits_v2_event_records(monkeypatch: pytest.MonkeyPatch) -> N
 
     tracker.start_tracking()
     assert _wait_until_events(tracker), "tracker did not emit an event before timeout"
-    result = tracker.stop_tracking()
+    result = tracker.get_tracking_results()
 
     assert result.events
     first = result.events[0]
@@ -85,6 +99,12 @@ def test_tf_cli_track_output_normalizes_legacy_events(
 
         def get_current_memory(self) -> float:
             return 2.0
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_mb": 2.0,
+                "collector_health_status": "healthy",
+            }
 
         def stop_tracking(self) -> "_FakeResult":
             return _FakeResult()
@@ -143,6 +163,12 @@ def test_tf_cli_track_passes_distributed_identity_to_tracker(
         def get_current_memory(self) -> float:
             return 0.0
 
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_mb": 0.0,
+                "collector_health_status": "healthy",
+            }
+
         def stop_tracking(self) -> "_FakeResult":
             return _FakeResult()
 
@@ -170,3 +196,114 @@ def test_tf_cli_track_passes_distributed_identity_to_tracker(
     assert created["rank"] == 3
     assert created["local_rank"] == 1
     assert created["world_size"] == 8
+
+
+def test_tf_tracker_records_degrade_and_recover_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    samples: Iterator[float | RuntimeError] = iter(
+        [RuntimeError("memory probe failed"), 16.0]
+    )
+    current_time = {"value": 50.0}
+    monkeypatch.setattr(tf_tracker.time, "time", lambda: current_time["value"])
+
+    def _sequence() -> float:
+        value = next(samples)
+        if isinstance(value, Exception):
+            raise value
+        return value
+
+    monkeypatch.setattr(tracker, "_get_current_memory", _sequence)
+
+    tracker._run_tracking_iteration()
+    degraded = tracker.events[-1]
+    assert degraded["event_type"] == "collector_degraded"
+    assert degraded["metadata"]["collector_health_status"] == "unhealthy"
+    assert degraded["metadata"]["telemetry_partial"] is True
+
+    current_time["value"] = 51.1
+    tracker._run_tracking_iteration()
+    event_types = [event["event_type"] for event in tracker.events]
+    assert event_types == ["collector_degraded", "collector_recovered", "sample"]
+    assert tracker.memory_usage == [16.0]
+    assert tracker.get_statistics()["collector_health_status"] == "healthy"
+
+
+def test_tf_tracker_persistent_failure_preserves_status_events_without_samples(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    tracker._collector_retry_backoff_initial_s = 0.1
+    tracker._collector_retry_backoff_cap_s = 0.4
+    current_time = {"value": 60.0}
+    monkeypatch.setattr(tf_tracker.time, "time", lambda: current_time["value"])
+
+    def _fail() -> float:
+        raise RuntimeError("memory probe failed")
+
+    monkeypatch.setattr(tracker, "_get_current_memory", _fail)
+
+    tracker._run_tracking_iteration()
+    current_time["value"] = 60.11
+    tracker._run_tracking_iteration()
+    current_time["value"] = 60.32
+    tracker._run_tracking_iteration()
+
+    result = tracker.get_tracking_results()
+
+    assert result.events
+    assert [event["event_type"] for event in result.events] == ["collector_degraded"]
+    assert result.memory_usage == []
+    assert tracker.get_statistics()["collector_health_status"] == (
+        COLLECTOR_HEALTH_UNHEALTHY
+    )
+    assert tracker.get_statistics()["collector_consecutive_failures"] == 3
+
+
+def test_tf_tracker_uses_session_wall_clock_for_failure_only_runs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    current_time = {"value": 100.0}
+    monkeypatch.setattr(tf_tracker.time, "time", lambda: current_time["value"])
+    monkeypatch.setattr(tf_tracker.threading, "Thread", _NoOpThread)
+
+    def _fail() -> float:
+        raise RuntimeError("memory probe failed")
+
+    monkeypatch.setattr(tracker, "_get_current_memory", _fail)
+
+    tracker.start_tracking()
+    current_time["value"] = 101.5
+    tracker._run_tracking_iteration()
+
+    stats = tracker.get_statistics()
+    assert stats["tracking_duration_seconds"] == pytest.approx(1.5)
+
+    current_time["value"] = 103.0
+    result = tracker.stop_tracking()
+
+    assert result.start_time == pytest.approx(100.0)
+    assert result.end_time == pytest.approx(103.0)
+    assert result.duration == pytest.approx(3.0)
+    assert result.memory_usage == []
+    assert [event["event_type"] for event in result.events] == ["collector_degraded"]

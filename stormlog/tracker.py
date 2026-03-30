@@ -14,6 +14,13 @@ from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 
+from .collector_health import (
+    COLLECTOR_HEALTH_DEGRADED,
+    COLLECTOR_HEALTH_HEALTHY,
+    COLLECTOR_HEALTH_UNHEALTHY,
+    CollectorHealthState,
+    collector_retry_delay_seconds,
+)
 from .cuda_native_debug import (
     DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
     capture_cuda_snapshot_artifacts,
@@ -23,6 +30,7 @@ from .cuda_native_debug import (
 )
 from .device_collectors import (
     DeviceMemorySample,
+    DeviceMemorySampleResult,
     _resolve_device,
     build_device_memory_collector,
     detect_torch_runtime_backend,
@@ -146,6 +154,11 @@ class MemoryTracker:
         self.is_tracking = False
         self._tracking_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._collector_health = CollectorHealthState()
+        self._last_observed_sample: Optional[DeviceMemorySample] = None
+        self._collector_retry_backoff_initial_s = 1.0
+        self._collector_retry_backoff_factor = 2.0
+        self._collector_retry_backoff_cap_s = 30.0
 
         # Memory thresholds for alerts
         self.thresholds: Dict[str, float] = {
@@ -172,14 +185,28 @@ class MemoryTracker:
 
         # Get memory limits with backend-aware fallback.
         self.gpu_info = get_gpu_info(self.device) if self.device.type == "cuda" else {}
-        initial_sample = self._safe_sample()
-        total_memory = initial_sample.total_bytes
+        initial_result = self.collector.sample_with_diagnostics()
+        initial_sample = initial_result.sample
+        if initial_sample is not None:
+            self._last_observed_sample = initial_sample
+        total_memory = (
+            initial_sample.total_bytes if initial_sample is not None else None
+        )
         if total_memory is None:
             fallback_total = self.gpu_info.get("total_memory", 0)
             total_memory = (
                 int(fallback_total) if isinstance(fallback_total, (int, float)) else 0
             )
         self.total_memory = int(total_memory)
+
+    def _reset_collector_session_state(self) -> None:
+        """Reset per-session collector state before a fresh tracking run."""
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
+        self._last_observed_sample = None
+        self.stats["last_memory_check"] = 0
 
     @property
     def oom_buffer_size(self) -> int:
@@ -214,37 +241,250 @@ class MemoryTracker:
         return resolved_device
 
     def _safe_sample(self) -> DeviceMemorySample:
-        """Collect one backend sample with defensive fallback values."""
-        try:
-            return self.collector.sample()
-        except Exception as exc:
-            logger.debug("Could not sample %s memory: %s", self.backend, exc)
-            device_id = 0
-            if self.device.type == "cuda":
-                try:
-                    device_id = (
-                        self.device.index
-                        if self.device.index is not None
-                        else torch.cuda.current_device()
-                    )
-                except Exception:
-                    device_id = 0
-            return DeviceMemorySample(
-                allocated_bytes=0,
-                reserved_bytes=0,
-                used_bytes=0,
-                free_bytes=None,
-                total_bytes=None,
-                active_bytes=None,
-                inactive_bytes=None,
-                device_id=device_id,
+        """Collect one backend sample for ad-hoc diagnostics with fallback values."""
+        result = self.collector.sample_with_diagnostics()
+        if result.sample is not None:
+            return result.sample
+
+        logger.debug(
+            "Could not sample %s memory: %s",
+            self.backend,
+            result.core_error or "unknown collector error",
+        )
+        return self._empty_sample()
+
+    def _empty_sample(self) -> DeviceMemorySample:
+        """Build a zeroed sample for status-only events without live telemetry."""
+        device_id = 0
+        if self.device.type == "cuda":
+            try:
+                device_id = (
+                    self.device.index
+                    if self.device.index is not None
+                    else torch.cuda.current_device()
+                )
+            except Exception:
+                device_id = 0
+        return DeviceMemorySample(
+            allocated_bytes=0,
+            reserved_bytes=0,
+            used_bytes=0,
+            free_bytes=None,
+            total_bytes=None,
+            active_bytes=None,
+            inactive_bytes=None,
+            device_id=device_id,
+        )
+
+    def _event_sample(self, sample: Optional[DeviceMemorySample]) -> DeviceMemorySample:
+        if sample is not None:
+            return sample
+        if self._last_observed_sample is not None:
+            return self._last_observed_sample
+        return self._empty_sample()
+
+    @staticmethod
+    def _collector_error_message(result: DeviceMemorySampleResult) -> Optional[str]:
+        if result.core_error:
+            return result.core_error
+        unique_messages = list(dict.fromkeys(result.errors.values()))
+        if not unique_messages:
+            return None
+        return "; ".join(unique_messages)
+
+    def _set_collector_health(
+        self,
+        *,
+        status: str,
+        telemetry_partial: bool,
+        partial_fields: tuple[str, ...] = (),
+        last_error: Optional[str] = None,
+        consecutive_failures: int = 0,
+        next_retry_epoch_s: Optional[float] = None,
+    ) -> None:
+        self._collector_health = CollectorHealthState(
+            status=status,
+            telemetry_partial=telemetry_partial,
+            partial_fields=partial_fields,
+            last_error=last_error,
+            consecutive_failures=consecutive_failures,
+            next_retry_epoch_s=next_retry_epoch_s,
+        )
+
+    def _retry_collection_due(self, now: float) -> bool:
+        retry_at = self._collector_health.next_retry_epoch_s
+        return retry_at is None or now >= retry_at
+
+    def _transition_to_core_failure(
+        self,
+        result: DeviceMemorySampleResult,
+        *,
+        event_time: float,
+    ) -> None:
+        previous_health = self._collector_health
+        consecutive_failures = previous_health.consecutive_failures + 1
+        retry_delay_s = collector_retry_delay_seconds(
+            consecutive_failures,
+            initial_delay_s=self._collector_retry_backoff_initial_s,
+            factor=self._collector_retry_backoff_factor,
+            max_delay_s=self._collector_retry_backoff_cap_s,
+        )
+        next_retry_epoch_s = event_time + retry_delay_s if retry_delay_s > 0 else None
+        error_message = self._collector_error_message(result) or "Collector unavailable"
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_UNHEALTHY,
+            telemetry_partial=True,
+            last_error=error_message,
+            consecutive_failures=consecutive_failures,
+            next_retry_epoch_s=next_retry_epoch_s,
+        )
+        if previous_health.status == COLLECTOR_HEALTH_HEALTHY:
+            self._add_event(
+                "collector_degraded",
+                0,
+                "Collector unavailable; telemetry paused until recovery.",
+                metadata={
+                    "collector_transition": "degraded",
+                    "collector_degraded_from": previous_health.status,
+                    "collector_degradation_reason": error_message,
+                    "collector_retry_delay_s": retry_delay_s,
+                },
             )
+
+    def _transition_to_sampled_state(
+        self,
+        result: DeviceMemorySampleResult,
+        *,
+        sample: DeviceMemorySample,
+    ) -> bool:
+        previous_health = self._collector_health
+        is_partial = result.is_partial
+        error_message = self._collector_error_message(result)
+
+        if is_partial:
+            self._set_collector_health(
+                status=COLLECTOR_HEALTH_DEGRADED,
+                telemetry_partial=True,
+                partial_fields=result.partial_fields,
+                last_error=error_message,
+                consecutive_failures=0,
+                next_retry_epoch_s=None,
+            )
+            if previous_health.status == COLLECTOR_HEALTH_HEALTHY:
+                self._add_event(
+                    "collector_degraded",
+                    0,
+                    "Collector degraded; telemetry is partial.",
+                    metadata={
+                        "collector_transition": "degraded",
+                        "collector_degraded_from": previous_health.status,
+                        "collector_degradation_reason": error_message,
+                    },
+                    sample=sample,
+                )
+            return True
+
+        recovered = previous_health.status != COLLECTOR_HEALTH_HEALTHY
+        previous_error = previous_health.last_error
+        previous_failures = previous_health.consecutive_failures
+        previous_status = previous_health.status
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
+        if recovered:
+            self._add_event(
+                "collector_recovered",
+                0,
+                "Collector recovered; full telemetry sampling resumed.",
+                metadata={
+                    "collector_transition": "recovered",
+                    "collector_recovered_from": previous_status,
+                    "collector_previous_error": previous_error,
+                    "collector_previous_failure_count": previous_failures,
+                },
+                sample=sample,
+            )
+        return False
+
+    def _run_tracking_iteration(self, last_allocated: int) -> int:
+        """Run one collection iteration, preserving health state across failures."""
+        now = time.time()
+        if not self._retry_collection_due(now):
+            return last_allocated
+
+        result = self.collector.sample_with_diagnostics()
+        if result.sample is None:
+            self._transition_to_core_failure(result, event_time=now)
+            return last_allocated
+
+        sample = result.sample
+        self._last_observed_sample = sample
+        current_allocated = sample.allocated_bytes
+        current_reserved = sample.reserved_bytes
+        memory_change = current_allocated - last_allocated
+        is_partial = self._transition_to_sampled_state(result, sample=sample)
+
+        self.stats["last_memory_check"] = now
+        sample_event_emitted = False
+
+        if current_allocated > self.stats["peak_memory"]:
+            self.stats["peak_memory"] = current_allocated
+            self._add_event(
+                "peak",
+                memory_change,
+                f"New peak memory: {format_bytes(current_allocated)}",
+                sample=sample,
+            )
+            sample_event_emitted = True
+
+        if memory_change > 0:
+            self.stats["total_allocations"] += 1
+            self.stats["total_allocation_bytes"] += memory_change
+            self._add_event(
+                "allocation",
+                memory_change,
+                f"Memory allocated: {format_bytes(memory_change)}",
+                sample=sample,
+            )
+            sample_event_emitted = True
+        elif memory_change < 0:
+            self.stats["total_deallocations"] += 1
+            self.stats["total_deallocation_bytes"] += abs(memory_change)
+            self._add_event(
+                "deallocation",
+                memory_change,
+                f"Memory freed: {format_bytes(abs(memory_change))}",
+                sample=sample,
+            )
+            sample_event_emitted = True
+
+        if self.enable_alerts:
+            alert_event_emitted = self._check_alerts(
+                current_allocated,
+                current_reserved,
+                memory_change,
+                sample=sample,
+            )
+            sample_event_emitted = sample_event_emitted or alert_event_emitted
+
+        if is_partial and not sample_event_emitted:
+            partial_fields = ", ".join(result.partial_fields)
+            self._add_event(
+                "sample",
+                0,
+                f"Collected partial telemetry sample ({partial_fields}).",
+                sample=sample,
+            )
+
+        return current_allocated
 
     def start_tracking(self) -> None:
         """Start real-time memory tracking."""
         if self.is_tracking:
             return
 
+        self._reset_collector_session_state()
         self.is_tracking = True
         self._stop_event.clear()
         self.stats["tracking_start_time"] = time.time()
@@ -276,56 +516,10 @@ class MemoryTracker:
 
         while not self._stop_event.wait(self.sampling_interval):
             try:
-                # Get current memory usage
-                sample = self._safe_sample()
-                current_allocated = sample.allocated_bytes
-                current_reserved = sample.reserved_bytes
-
-                # Calculate change
-                memory_change = current_allocated - last_allocated
-
-                # Update statistics
-                self.stats["last_memory_check"] = time.time()
-                if current_allocated > self.stats["peak_memory"]:
-                    self.stats["peak_memory"] = current_allocated
-                    self._add_event(
-                        "peak",
-                        memory_change,
-                        f"New peak memory: {format_bytes(current_allocated)}",
-                        sample=sample,
-                    )
-
-                # Track allocations/deallocations
-                if memory_change > 0:
-                    self.stats["total_allocations"] += 1
-                    self.stats["total_allocation_bytes"] += memory_change
-                    self._add_event(
-                        "allocation",
-                        memory_change,
-                        f"Memory allocated: {format_bytes(memory_change)}",
-                        sample=sample,
-                    )
-                elif memory_change < 0:
-                    self.stats["total_deallocations"] += 1
-                    self.stats["total_deallocation_bytes"] += abs(memory_change)
-                    self._add_event(
-                        "deallocation",
-                        memory_change,
-                        f"Memory freed: {format_bytes(abs(memory_change))}",
-                        sample=sample,
-                    )
-
-                # Check for alerts
-                if self.enable_alerts:
-                    self._check_alerts(
-                        current_allocated, current_reserved, memory_change
-                    )
-
-                last_allocated = current_allocated
-
-            except Exception as e:
-                self._add_event("error", 0, f"Tracking error: {str(e)}")
-                time.sleep(1.0)  # Back off on errors
+                last_allocated = self._run_tracking_iteration(last_allocated)
+            except Exception as exc:
+                self._add_event("error", 0, f"Tracking error: {str(exc)}")
+                time.sleep(1.0)  # Back off on unexpected tracker logic errors
 
     def _add_event(
         self,
@@ -336,9 +530,11 @@ class MemoryTracker:
         sample: Optional[DeviceMemorySample] = None,
     ) -> None:
         """Add a tracking event."""
-        snapshot = sample if sample is not None else self._safe_sample()
+        snapshot = self._event_sample(sample)
         current_allocated = snapshot.allocated_bytes
         current_reserved = snapshot.reserved_bytes
+        event_metadata = dict(metadata or {})
+        event_metadata.update(self._collector_health.to_dict())
 
         event = TrackingEvent(
             timestamp=time.time(),
@@ -352,7 +548,7 @@ class MemoryTracker:
             rank=self.distributed_identity["rank"],
             local_rank=self.distributed_identity["local_rank"],
             world_size=self.distributed_identity["world_size"],
-            metadata=metadata,
+            metadata=event_metadata,
             active_memory=snapshot.active_bytes,
             inactive_memory=snapshot.inactive_bytes,
             device_used=snapshot.used_bytes,
@@ -373,13 +569,21 @@ class MemoryTracker:
                 except Exception as exc:
                     logger.debug("Alert callback error (suppressed): %s", exc)
 
-    def _check_alerts(self, allocated: int, reserved: int, change: int) -> None:
+    def _check_alerts(
+        self,
+        allocated: int,
+        reserved: int,
+        change: int,
+        *,
+        sample: Optional[DeviceMemorySample] = None,
+    ) -> bool:
         """Check for memory alerts and warnings."""
         if self.total_memory == 0:
-            return
+            return False
 
         # Memory usage percentage
         usage_percent = (allocated / self.total_memory) * 100
+        emitted = False
 
         # Critical memory usage
         if usage_percent >= self.thresholds["memory_critical_percent"]:
@@ -388,7 +592,9 @@ class MemoryTracker:
                 change,
                 f"CRITICAL: Memory usage at {usage_percent:.1f}%",
                 {"usage_percent": usage_percent},
+                sample=sample,
             )
+            emitted = True
 
         # Warning memory usage
         elif usage_percent >= self.thresholds["memory_warning_percent"]:
@@ -397,7 +603,9 @@ class MemoryTracker:
                 change,
                 f"WARNING: Memory usage at {usage_percent:.1f}%",
                 {"usage_percent": usage_percent},
+                sample=sample,
             )
+            emitted = True
 
         # Large allocation warning
         if change > self.thresholds["memory_leak_threshold"]:
@@ -406,7 +614,9 @@ class MemoryTracker:
                 change,
                 f"Large allocation detected: {format_bytes(change)}",
                 {"large_allocation": True},
+                sample=sample,
             )
+            emitted = True
 
         # Fragmentation warning
         if reserved > 0:
@@ -417,7 +627,11 @@ class MemoryTracker:
                     change,
                     f"High fragmentation: {fragmentation:.1%}",
                     {"fragmentation": fragmentation},
+                    sample=sample,
                 )
+                emitted = True
+
+        return emitted
 
     @staticmethod
     def _tracking_event_payload(event: TrackingEvent) -> Dict[str, Any]:
@@ -686,49 +900,50 @@ class MemoryTracker:
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive tracking statistics."""
         current_stats = self.stats.copy()
+        recent_events = [e for e in self.events if e.timestamp > time.time() - 3600]
+        sample = (
+            self._last_observed_sample
+            if self._collector_health.status != COLLECTOR_HEALTH_UNHEALTHY
+            else None
+        )
 
-        if self.events:
-            # Calculate additional statistics
-            recent_events = [
-                e for e in self.events if e.timestamp > time.time() - 3600
-            ]  # Last hour
-            sample = self._safe_sample()
+        current_stats.update(
+            {
+                "total_events": len(self.events),
+                "events_last_hour": len(recent_events),
+                "backend": self.backend,
+                "oom_flight_recorder_enabled": self._oom_flight_recorder.config.enabled,
+                "last_oom_dump_path": self.last_oom_dump_path,
+                "current_memory_allocated": (
+                    sample.allocated_bytes if sample is not None else None
+                ),
+                "current_memory_reserved": (
+                    sample.reserved_bytes if sample is not None else None
+                ),
+                "memory_utilization_percent": (
+                    (sample.used_bytes / self.total_memory * 100)
+                    if sample is not None and self.total_memory > 0
+                    else None
+                ),
+                "average_allocation_size": self.stats["total_allocation_bytes"]
+                / max(self.stats["total_allocations"], 1),
+                "average_deallocation_size": self.stats["total_deallocation_bytes"]
+                / max(self.stats["total_deallocations"], 1),
+            }
+        )
+        current_stats.update(self._collector_health.to_dict())
 
+        if self.stats["tracking_start_time"]:
+            tracking_duration = time.time() - self.stats["tracking_start_time"]
             current_stats.update(
                 {
-                    "total_events": len(self.events),
-                    "events_last_hour": len(recent_events),
-                    "backend": self.backend,
-                    "oom_flight_recorder_enabled": self._oom_flight_recorder.config.enabled,
-                    "last_oom_dump_path": self.last_oom_dump_path,
-                    "current_memory_allocated": sample.allocated_bytes,
-                    "current_memory_reserved": sample.reserved_bytes,
-                    "memory_utilization_percent": (
-                        (sample.used_bytes / self.total_memory * 100)
-                        if self.total_memory > 0
-                        else 0
-                    ),
-                    "average_allocation_size": self.stats["total_allocation_bytes"]
-                    / max(self.stats["total_allocations"], 1),
-                    "average_deallocation_size": self.stats["total_deallocation_bytes"]
-                    / max(self.stats["total_deallocations"], 1),
+                    "tracking_duration_seconds": tracking_duration,
+                    "allocations_per_second": self.stats["total_allocations"]
+                    / max(tracking_duration, 1),
+                    "bytes_allocated_per_second": self.stats["total_allocation_bytes"]
+                    / max(tracking_duration, 1),
                 }
             )
-
-            # Time-based statistics
-            if self.stats["tracking_start_time"]:
-                tracking_duration = time.time() - self.stats["tracking_start_time"]
-                current_stats.update(
-                    {
-                        "tracking_duration_seconds": tracking_duration,
-                        "allocations_per_second": self.stats["total_allocations"]
-                        / max(tracking_duration, 1),
-                        "bytes_allocated_per_second": self.stats[
-                            "total_allocation_bytes"
-                        ]
-                        / max(tracking_duration, 1),
-                    }
-                )
 
         return current_stats
 
@@ -773,14 +988,17 @@ class MemoryTracker:
         for event in self.events:
             metadata = dict(event.metadata or {})
             metadata.update(capability_metadata)
+            partial_fields = set(metadata.get("collector_partial_fields", []) or [])
             device_used = event.device_used
             if device_used is None:
                 device_used = max(event.memory_allocated, event.memory_reserved)
-            event_total = (
-                event.device_total
-                if event.device_total is not None
-                else (self.total_memory or None)
-            )
+            event_total = event.device_total
+            if (
+                event_total is None
+                and "device_total_bytes" not in partial_fields
+                and self.total_memory
+            ):
+                event_total = self.total_memory
             legacy = {
                 "timestamp": event.timestamp,
                 "event_type": event.event_type,

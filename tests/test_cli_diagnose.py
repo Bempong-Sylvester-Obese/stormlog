@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
@@ -454,7 +455,7 @@ def test_diagnose_native_history_writes_snapshot_artifacts_for_cuda(
     def _fake_native_history(
         device: object = None,
         trace_alloc_max_entries: int = 0,
-    ) -> object:
+    ) -> Iterator[None]:
         history_calls["device"] = device
         history_calls["trace_alloc_max_entries"] = trace_alloc_max_entries
         yield

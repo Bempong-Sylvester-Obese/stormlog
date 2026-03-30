@@ -531,20 +531,22 @@ def cmd_monitor(args: argparse.Namespace) -> None:
                     current_mem = torch_module.cuda.memory_allocated(
                         profiler.device
                     ) / (1024**3)
-                    unit = "GB"
+                    current_mem_text = f"{current_mem:.2f} GB"
                 elif tracker is not None:
                     stats = tracker.get_statistics()
-                    current_mem = stats.get("current_memory_allocated", 0) / (1024**3)
-                    unit = "GB"
+                    current_allocated = stats.get("current_memory_allocated")
+                    current_mem_text = (
+                        f"{float(current_allocated) / (1024**3):.2f} GB"
+                        if isinstance(current_allocated, (int, float))
+                        else "-"
+                    )
                 else:
                     current_mem = (
                         profiler._take_snapshot().rss / (1024**2) if profiler else 0.0
                     )
-                    unit = "MB"
+                    current_mem_text = f"{current_mem:.2f} MB"
                 elapsed = time.time() - start_time
-                print(
-                    f"Elapsed: {elapsed:.1f}s, Current Memory: {current_mem:.2f} {unit}"
-                )
+                print(f"Elapsed: {elapsed:.1f}s, Current Memory: {current_mem_text}")
             time.sleep(1)
 
     except KeyboardInterrupt:
@@ -730,13 +732,32 @@ def cmd_track(args: argparse.Namespace) -> None:
                     stats = tracker.get_statistics()
                     divisor = 1024**3 if gpu_runtime else 1024**2
                     unit = "GB" if gpu_runtime else "MB"
-                    current_mem = stats.get("current_memory_allocated", 0) / divisor
+                    current_allocated = stats.get("current_memory_allocated")
                     peak_mem = stats.get("peak_memory", 0) / divisor
-                    utilization = stats.get("memory_utilization_percent", 0)
-                    print(
-                        f"Elapsed: {elapsed:.1f}s, Memory: {current_mem:.2f} {unit} "
-                        f"({utilization:.1f}%), Peak: {peak_mem:.2f} {unit}"
+                    utilization = stats.get("memory_utilization_percent")
+                    collector_health = str(
+                        stats.get("collector_health_status", "healthy")
                     )
+                    retry_at = stats.get("collector_next_retry_epoch_s")
+                    current_mem_text = (
+                        f"{float(current_allocated) / divisor:.2f} {unit}"
+                        if isinstance(current_allocated, (int, float))
+                        else "-"
+                    )
+                    utilization_text = (
+                        f"{float(utilization):.1f}%"
+                        if isinstance(utilization, (int, float))
+                        else "-"
+                    )
+                    status_line = (
+                        f"Elapsed: {elapsed:.1f}s, Memory: {current_mem_text} "
+                        f"({utilization_text}), Peak: {peak_mem:.2f} {unit}, "
+                        f"Health: {collector_health}"
+                    )
+                    if isinstance(retry_at, (int, float)):
+                        retry_in = max(float(retry_at) - time.time(), 0.0)
+                        status_line += f", Retry In: {retry_in:.1f}s"
+                    print(status_line)
 
                 time.sleep(1)
 
@@ -756,6 +777,10 @@ def cmd_track(args: argparse.Namespace) -> None:
     unit = "GB" if gpu_runtime else "MB"
     print(f"Total events: {stats.get('total_events', 0)}")
     print(f"Peak memory: {stats.get('peak_memory', 0) / divisor:.2f} {unit}")
+    if "collector_health_status" in stats:
+        print(f"Collector health: {stats.get('collector_health_status', 'healthy')}")
+    if stats.get("collector_last_error"):
+        print(f"Last collector error: {stats.get('collector_last_error')}")
 
     if watchdog:
         cleanup_stats = watchdog.get_cleanup_stats()

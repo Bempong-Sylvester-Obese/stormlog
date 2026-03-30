@@ -178,6 +178,11 @@ print(f"Peak memory: {stats.get('peak_memory', 0) / (1024**3):.2f} GB")
 print(f"Events: {stats.get('total_events', 0)}")
 ```
 
+If the underlying collector becomes unstable, `MemoryTracker` keeps the tracking
+session alive, exposes collector health through `get_statistics()`, and emits
+`collector_degraded` / `collector_recovered` events instead of exporting
+synthetic zero-valued samples.
+
 For CUDA-only OOM debugging, enable native allocator-history capture and wrap
 the risky block with `capture_oom()`:
 

@@ -8,8 +8,16 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-from ..context_profiler import clear_results as clear_pt_results
-from ..context_profiler import get_profile_results as get_pt_results
+try:
+    from ..context_profiler import clear_results as _clear_pt_results
+    from ..context_profiler import get_profile_results as _get_pt_results
+
+    get_pt_results: Optional[Callable[..., List[Any]]] = _get_pt_results
+    clear_pt_results: Optional[Callable[[], None]] = _clear_pt_results
+except ImportError as exc:
+    logger.debug("PyTorch context profiler unavailable: %s", exc)
+    get_pt_results = None
+    clear_pt_results = None
 
 try:
     from stormlog.tensorflow.context_profiler import (
@@ -21,11 +29,10 @@ try:
 
     get_tf_summaries: Optional[Callable[..., List[Dict[str, Any]]]] = _get_tf_summaries
     clear_tf_profiles: Optional[Callable[[], None]] = _clear_tf_profiles
-except ImportError as e:
-    raise ImportError(
-        "stormlog.tensorflow.context_profiler is required for TensorFlow profile support. "
-        "Install with `pip install 'stormlog[tf]'`."
-    ) from e
+except ImportError as exc:
+    logger.debug("TensorFlow context profiler unavailable: %s", exc)
+    get_tf_summaries = None
+    clear_tf_profiles = None
 
 
 @dataclass
@@ -42,6 +49,9 @@ class ProfileRow:
 
 def fetch_pytorch_profiles(limit: int = 15) -> List[ProfileRow]:
     """Return recent PyTorch profile rows."""
+    if get_pt_results is None:
+        return []
+
     try:
         results = get_pt_results(limit=limit)
     except Exception as exc:
@@ -73,6 +83,9 @@ def fetch_pytorch_profiles(limit: int = 15) -> List[ProfileRow]:
 
 def clear_pytorch_profiles() -> bool:
     """Clear global PyTorch profile results."""
+    if clear_pt_results is None:
+        return False
+
     try:
         clear_pt_results()
         return True

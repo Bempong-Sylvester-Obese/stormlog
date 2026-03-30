@@ -26,7 +26,7 @@ class DummyCPUTracker:
     def stop_tracking(self) -> None:
         self.is_tracking = False
 
-    def get_statistics(self) -> dict[str, str]:
+    def get_statistics(self) -> dict[str, object]:
         return {"mode": "cpu"}
 
     def get_memory_timeline(self, interval: float = 1.0) -> dict[str, object]:
@@ -143,3 +143,44 @@ def test_tracker_session_get_telemetry_events_normalizes_cpu_events(
     assert first.local_rank == 0
     assert first.world_size == 4
     assert first.job_id == "job-123"
+
+
+def test_tracker_session_preserves_collector_health_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "MemoryTracker", BrokenGPUTracker)
+    monkeypatch.setattr(monitor, "MemoryWatchdog", None)
+    monkeypatch.setattr(monitor, "CPUMemoryTracker", DummyCPUTracker)
+    monkeypatch.setattr(monitor, "torch", _stub_torch(False))
+
+    session = monitor.TrackerSession()
+    session.start()
+
+    assert isinstance(session._tracker, DummyCPUTracker)
+    session._tracker.events.append(
+        types.SimpleNamespace(
+            timestamp=1700000001.0,
+            event_type="collector_degraded",
+            memory_allocated=1024,
+            memory_reserved=1024,
+            memory_change=0,
+            device_id=-1,
+            device_total=None,
+            context="collector degraded",
+            metadata={
+                "collector_health_status": "degraded",
+                "telemetry_partial": True,
+                "collector_partial_fields": ["device_total_bytes"],
+            },
+        )
+    )
+
+    telemetry_events = session.get_telemetry_events()
+
+    assert len(telemetry_events) == 1
+    first = telemetry_events[0]
+    assert first.event_type == "collector_degraded"
+    assert first.device_total_bytes is None
+    assert first.metadata["collector_health_status"] == "degraded"
+    assert first.metadata["telemetry_partial"] is True
+    assert first.metadata["collector_partial_fields"] == ["device_total_bytes"]
