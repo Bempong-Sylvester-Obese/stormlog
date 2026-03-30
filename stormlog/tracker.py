@@ -45,6 +45,7 @@ from .telemetry import (
     telemetry_event_from_record,
     telemetry_event_to_dict,
 )
+from .telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 from .utils import format_bytes, get_gpu_info
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class MemoryTracker:
         world_size: Optional[int] = None,
         enable_native_cuda_history: bool = False,
         native_history_max_entries: int = DEFAULT_TRACE_ALLOC_MAX_ENTRIES,
+        telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
     ):
         """
         Initialize the memory tracker.
@@ -125,6 +127,11 @@ class MemoryTracker:
         self.enable_alerts = enable_alerts
         self.enable_native_cuda_history = enable_native_cuda_history
         self.native_history_max_entries = native_history_max_entries
+        self._telemetry_sink = (
+            AppendOnlyTelemetrySink(telemetry_sink_config)
+            if telemetry_sink_config is not None
+            else None
+        )
         self.last_oom_dump_path: Optional[str] = None
         self.distributed_identity = resolve_distributed_identity(
             job_id=job_id,
@@ -509,6 +516,7 @@ class MemoryTracker:
 
         # Add final event
         self._add_event("stop", 0, "Memory tracking stopped")
+        self._close_telemetry_sink()
 
     def _tracking_loop(self) -> None:
         """Main tracking loop running in background thread."""
@@ -517,8 +525,10 @@ class MemoryTracker:
         while not self._stop_event.wait(self.sampling_interval):
             try:
                 last_allocated = self._run_tracking_iteration(last_allocated)
+                self._flush_telemetry_sink()
             except Exception as exc:
                 self._add_event("error", 0, f"Tracking error: {str(exc)}")
+                self._flush_telemetry_sink(force=True)
                 time.sleep(1.0)  # Back off on unexpected tracker logic errors
 
     def _add_event(
@@ -559,6 +569,7 @@ class MemoryTracker:
 
         self.events.append(event)
         self._oom_flight_recorder.record_event(self._tracking_event_payload(event))
+        self._append_to_telemetry_sink(event)
 
         # Trigger callbacks for alerts
         if event_type in ["warning", "critical", "error"]:
@@ -656,6 +667,86 @@ class MemoryTracker:
             "device_total": event.device_total,
             "backend": event.backend,
         }
+
+    def _telemetry_record_from_event(self, event: TrackingEvent) -> Dict[str, Any]:
+        host = socket.gethostname()
+        pid = os.getpid()
+        sampling_interval_ms = int(round(self.sampling_interval * 1000))
+        default_collector = str(
+            self.collector_capabilities.get(
+                "telemetry_collector", "stormlog.cuda_tracker"
+            )
+        )
+        capability_metadata = {
+            "backend": self.backend,
+            "supports_device_total": bool(
+                self.collector_capabilities.get("supports_device_total", False)
+            ),
+            "supports_device_free": bool(
+                self.collector_capabilities.get("supports_device_free", False)
+            ),
+            "sampling_source": str(
+                self.collector_capabilities.get("sampling_source", "unknown")
+            ),
+        }
+        metadata = dict(event.metadata or {})
+        metadata.update(capability_metadata)
+        partial_fields = set(metadata.get("collector_partial_fields", []) or [])
+        device_used = event.device_used
+        if device_used is None:
+            device_used = max(event.memory_allocated, event.memory_reserved)
+        event_total = event.device_total
+        if (
+            event_total is None
+            and "device_total_bytes" not in partial_fields
+            and self.total_memory
+        ):
+            event_total = self.total_memory
+        legacy = {
+            "timestamp": event.timestamp,
+            "event_type": event.event_type,
+            "memory_allocated": event.memory_allocated,
+            "memory_reserved": event.memory_reserved,
+            "memory_change": event.memory_change,
+            "allocator_active_bytes": event.active_memory,
+            "allocator_inactive_bytes": event.inactive_memory,
+            "device_used_bytes": device_used,
+            "device_free_bytes": event.device_free,
+            "device_total_bytes": event_total,
+            "device_id": event.device_id,
+            "context": event.context,
+            "job_id": event.job_id,
+            "rank": event.rank,
+            "local_rank": event.local_rank,
+            "world_size": event.world_size,
+            "metadata": metadata,
+            "total_memory": event_total,
+            "pid": pid,
+            "host": host,
+            "collector": default_collector,
+            "sampling_interval_ms": sampling_interval_ms,
+        }
+        telemetry_event = telemetry_event_from_record(
+            legacy,
+            default_collector=default_collector,
+            default_sampling_interval_ms=sampling_interval_ms,
+        )
+        return telemetry_event_to_dict(telemetry_event)
+
+    def _append_to_telemetry_sink(self, event: TrackingEvent) -> None:
+        if self._telemetry_sink is None:
+            return
+        self._telemetry_sink.append(self._telemetry_record_from_event(event))
+
+    def _flush_telemetry_sink(self, *, force: bool = False) -> None:
+        if self._telemetry_sink is None:
+            return
+        self._telemetry_sink.flush(force=force)
+
+    def _close_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None:
+            return
+        self._telemetry_sink.close()
 
     def handle_exception(
         self,
@@ -962,73 +1053,8 @@ class MemoryTracker:
         if not self.events:
             return
 
-        host = socket.gethostname()
-        pid = os.getpid()
-        sampling_interval_ms = int(round(self.sampling_interval * 1000))
-        default_collector = str(
-            self.collector_capabilities.get(
-                "telemetry_collector", "stormlog.cuda_tracker"
-            )
-        )
-        capability_metadata = {
-            "backend": self.backend,
-            "supports_device_total": bool(
-                self.collector_capabilities.get("supports_device_total", False)
-            ),
-            "supports_device_free": bool(
-                self.collector_capabilities.get("supports_device_free", False)
-            ),
-            "sampling_source": str(
-                self.collector_capabilities.get("sampling_source", "unknown")
-            ),
-        }
-
         # Convert events to canonical telemetry records.
-        records = []
-        for event in self.events:
-            metadata = dict(event.metadata or {})
-            metadata.update(capability_metadata)
-            partial_fields = set(metadata.get("collector_partial_fields", []) or [])
-            device_used = event.device_used
-            if device_used is None:
-                device_used = max(event.memory_allocated, event.memory_reserved)
-            event_total = event.device_total
-            if (
-                event_total is None
-                and "device_total_bytes" not in partial_fields
-                and self.total_memory
-            ):
-                event_total = self.total_memory
-            legacy = {
-                "timestamp": event.timestamp,
-                "event_type": event.event_type,
-                "memory_allocated": event.memory_allocated,
-                "memory_reserved": event.memory_reserved,
-                "memory_change": event.memory_change,
-                "allocator_active_bytes": event.active_memory,
-                "allocator_inactive_bytes": event.inactive_memory,
-                "device_used_bytes": device_used,
-                "device_free_bytes": event.device_free,
-                "device_total_bytes": event_total,
-                "device_id": event.device_id,
-                "context": event.context,
-                "job_id": event.job_id,
-                "rank": event.rank,
-                "local_rank": event.local_rank,
-                "world_size": event.world_size,
-                "metadata": metadata,
-                "total_memory": event_total,
-                "pid": pid,
-                "host": host,
-                "collector": default_collector,
-                "sampling_interval_ms": sampling_interval_ms,
-            }
-            telemetry_event = telemetry_event_from_record(
-                legacy,
-                default_collector=default_collector,
-                default_sampling_interval_ms=sampling_interval_ms,
-            )
-            records.append(telemetry_event_to_dict(telemetry_event))
+        records = [self._telemetry_record_from_event(event) for event in self.events]
 
         if format == "csv":
             df = pd.DataFrame(records)

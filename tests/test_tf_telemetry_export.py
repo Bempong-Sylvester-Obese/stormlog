@@ -14,6 +14,7 @@ import stormlog.tensorflow.cli as tf_cli
 import stormlog.tensorflow.tracker as tf_tracker
 from stormlog.collector_health import COLLECTOR_HEALTH_UNHEALTHY
 from stormlog.telemetry import validate_telemetry_record
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 
 def _wait_until_events(
@@ -234,6 +235,36 @@ def test_tf_tracker_records_degrade_and_recover_events(
     assert event_types == ["collector_degraded", "collector_recovered", "sample"]
     assert tracker.memory_usage == [16.0]
     assert tracker.get_statistics()["collector_health_status"] == "healthy"
+
+
+def test_tf_tracker_streams_events_to_append_only_sink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+        telemetry_sink_config=TelemetrySinkConfig(
+            root_dir=tmp_path / "sink",
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            rollover_max_bytes=1024,
+            retention_max_total_bytes=1024 * 1024,
+        ),
+    )
+    monkeypatch.setattr(tracker, "_get_current_memory", lambda: 32.0)
+
+    tracker._run_tracking_iteration()
+    tracker._close_telemetry_sink()
+
+    segment = tmp_path / "sink" / "segment-000001.jsonl"
+    payload = json.loads(segment.read_text(encoding="utf-8").splitlines()[0])
+    assert payload["collector"] == "stormlog.tensorflow.memory_tracker"
+    assert payload["event_type"] == "sample"
+    assert payload["allocator_allocated_bytes"] == 32 * 1024 * 1024
 
 
 def test_tf_tracker_persistent_failure_preserves_status_events_without_samples(

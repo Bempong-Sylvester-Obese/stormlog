@@ -20,6 +20,7 @@ from stormlog.cpu_profiler import (
     CPUMemoryTracker,
     CPUProfileResult,
 )
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -489,6 +490,30 @@ class TestCPUMemoryTracker:
 
         tracker.export_events(str(filepath), format="csv")
         assert not filepath.exists()
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_streams_events_to_append_only_sink(
+        self, mock_cls: Any, tmp_path: Path
+    ) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker(
+            telemetry_sink_config=TelemetrySinkConfig(
+                root_dir=tmp_path / "sink",
+                flush_every_events=1,
+                flush_every_seconds=1.0,
+                rollover_max_bytes=1024,
+                retention_max_total_bytes=1024 * 1024,
+            )
+        )
+
+        tracker._add_event("allocation", 10, "sink_test")
+        tracker._close_telemetry_sink()
+
+        segment = tmp_path / "sink" / "segment-000001.jsonl"
+        payload = json.loads(segment.read_text(encoding="utf-8").splitlines()[0])
+        assert payload["collector"] == "stormlog.cpu_tracker"
+        assert payload["event_type"] == "allocation"
+        assert payload["context"] == "sink_test"
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_export_events_with_timestamp(self, mock_cls: Any, tmp_path: Path) -> None:
