@@ -374,6 +374,44 @@ def test_load_telemetry_events_reads_append_only_sink_directory(tmp_path: Path) 
     assert events[1].timestamp_ns == second["timestamp_ns"]
 
 
+def test_load_telemetry_events_reads_unlisted_sink_segments(tmp_path: Path) -> None:
+    sink_dir = tmp_path / "sink"
+    sink_dir.mkdir()
+
+    first = telemetry_event_to_dict(_make_valid_event())
+    second = telemetry_event_to_dict(_make_valid_event())
+    second["timestamp_ns"] = first["timestamp_ns"] + 1
+
+    first_payload = json.dumps(first) + "\n"
+    second_payload = json.dumps(second) + "\n"
+    (sink_dir / "segment-000001.jsonl").write_text(first_payload, encoding="utf-8")
+    (sink_dir / "segment-000002.jsonl").write_text(second_payload, encoding="utf-8")
+    (sink_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.append_only_telemetry_sink",
+                "segments": [
+                    {
+                        "filename": "segment-000001.jsonl",
+                        "event_count": 1,
+                        "size_bytes": len(first_payload.encode("utf-8")),
+                        "closed": False,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    events = load_telemetry_events(sink_dir)
+
+    assert len(events) == 2
+    assert events[0].timestamp_ns == first["timestamp_ns"]
+    assert events[1].timestamp_ns == second["timestamp_ns"]
+
+
 def test_load_telemetry_events_ignores_truncated_jsonl_tail(tmp_path: Path) -> None:
     record = telemetry_event_to_dict(_make_valid_event())
     segment = tmp_path / "segment-000001.jsonl"

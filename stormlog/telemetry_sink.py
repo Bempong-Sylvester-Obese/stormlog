@@ -244,7 +244,10 @@ def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
         if resolved_path.suffix == SEGMENT_SUFFIX:
             return [resolved_path]
         if resolved_path.name == MANIFEST_FILENAME:
-            return _segment_paths_from_manifest(resolved_path)
+            return _merge_segment_paths(
+                _segment_paths_from_manifest(resolved_path),
+                _discover_segment_paths(resolved_path.parent),
+            )
         return []
 
     if not resolved_path.is_dir():
@@ -253,8 +256,25 @@ def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
     manifest_path = resolved_path / MANIFEST_FILENAME
     manifest_segments = _segment_paths_from_manifest(manifest_path)
     if manifest_segments:
-        return manifest_segments
-    return sorted(resolved_path.glob(f"{SEGMENT_PREFIX}*{SEGMENT_SUFFIX}"))
+        return _merge_segment_paths(
+            manifest_segments,
+            _discover_segment_paths(resolved_path),
+        )
+    return _discover_segment_paths(resolved_path)
+
+
+def _discover_segment_paths(root_dir: Path) -> list[Path]:
+    return sorted(root_dir.glob(f"{SEGMENT_PREFIX}*{SEGMENT_SUFFIX}"))
+
+
+def _merge_segment_paths(
+    manifest_segments: list[Path],
+    discovered_segments: list[Path],
+) -> list[Path]:
+    merged_by_name = {path.name: path for path in discovered_segments}
+    for path in manifest_segments:
+        merged_by_name[path.name] = path
+    return [merged_by_name[name] for name in sorted(merged_by_name)]
 
 
 def _segment_paths_from_manifest(manifest_path: Path) -> list[Path]:
