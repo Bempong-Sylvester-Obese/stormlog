@@ -13,6 +13,7 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
+from .telemetry_sink import TelemetrySinkConfig
 from .utils import (
     _detect_gpu_hardware,
     format_bytes,
@@ -114,6 +115,27 @@ def _is_visualization_dependency_error(exc: BaseException) -> bool:
         current = next_exc
 
     return False
+
+
+def _build_telemetry_sink_config(
+    args: argparse.Namespace,
+) -> Optional[TelemetrySinkConfig]:
+    sink_dir = getattr(args, "telemetry_sink_dir", None)
+    if not sink_dir:
+        return None
+    return TelemetrySinkConfig(
+        root_dir=Path(sink_dir),
+        flush_every_seconds=float(getattr(args, "telemetry_flush_seconds", 2.0)),
+        rollover_max_bytes=int(getattr(args, "telemetry_rollover_mb", 64))
+        * 1024
+        * 1024,
+        retention_max_files=int(getattr(args, "telemetry_retention_files", 8)),
+        retention_max_total_bytes=int(
+            getattr(args, "telemetry_retention_total_mb", 512)
+        )
+        * 1024
+        * 1024,
+    )
 
 
 def main() -> None:
@@ -273,6 +295,36 @@ Examples:
         type=int,
         default=256,
         help="Maximum retained OOM dump storage in MB (default: 256)",
+    )
+    track_parser.add_argument(
+        "--telemetry-sink-dir",
+        type=str,
+        default=None,
+        help="Directory for append-only telemetry sink segments",
+    )
+    track_parser.add_argument(
+        "--telemetry-flush-seconds",
+        type=float,
+        default=2.0,
+        help="Maximum seconds between telemetry sink flushes (default: 2.0)",
+    )
+    track_parser.add_argument(
+        "--telemetry-rollover-mb",
+        type=int,
+        default=64,
+        help="Telemetry sink segment rollover size in MB (default: 64)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-files",
+        type=int,
+        default=8,
+        help="Maximum retained telemetry sink segments (default: 8)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-total-mb",
+        type=int,
+        default=512,
+        help="Maximum retained telemetry sink size in MB (default: 512)",
     )
 
     # Analyze command
@@ -631,6 +683,9 @@ def cmd_track(args: argparse.Namespace) -> None:
 
     runtime_backend = str(get_system_info().get("detected_backend", "cpu"))
     gpu_runtime = runtime_backend in {"cuda", "rocm", "mps"}
+    telemetry_sink_config = _build_telemetry_sink_config(args)
+    if telemetry_sink_config is not None:
+        print(f"Append-only telemetry sink: {telemetry_sink_config.root_dir}")
     tracker: Any
     watchdog: Optional[Any] = None
     if gpu_runtime:
@@ -660,6 +715,7 @@ def cmd_track(args: argparse.Namespace) -> None:
             rank=rank,
             local_rank=local_rank,
             world_size=world_size,
+            telemetry_sink_config=telemetry_sink_config,
         )
 
         if args.oom_flight_recorder:
@@ -704,6 +760,7 @@ def cmd_track(args: argparse.Namespace) -> None:
             rank=rank,
             local_rank=local_rank,
             world_size=world_size,
+            telemetry_sink_config=telemetry_sink_config,
         )
         print("Running CPU memory tracker (no GPU backend available).")
 

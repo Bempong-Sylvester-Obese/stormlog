@@ -199,6 +199,76 @@ def test_tf_cli_track_passes_distributed_identity_to_tracker(
     assert created["world_size"] == 8
 
 
+def test_tf_cli_track_passes_telemetry_sink_config_to_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_cli, "TF_AVAILABLE", True)
+    created: dict[str, object] = {}
+
+    class _FakeResult:
+        peak_memory = 0.0
+        average_memory = 0.0
+        duration = 0.0
+        memory_usage: list[float] = []
+        timestamps: list[float] = []
+        alerts_triggered: list[object] = []
+        events: list[dict[str, object]] = []
+
+    class _FakeTracker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args
+            created.update(kwargs)
+
+        def add_alert_callback(self, callback: object) -> None:
+            _ = callback
+
+        def start_tracking(self) -> None:
+            return None
+
+        def get_current_memory(self) -> float:
+            return 0.0
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_mb": 0.0,
+                "collector_health_status": "healthy",
+            }
+
+        def stop_tracking(self) -> "_FakeResult":
+            return _FakeResult()
+
+    monkeypatch.setattr(tf_cli, "MemoryTracker", _FakeTracker)
+    monkeypatch.setattr(
+        tf_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    exit_code = tf_cli.cmd_track(
+        Namespace(
+            interval=0.25,
+            threshold=4000,
+            device="/GPU:0",
+            output="ignored.json",
+            job_id=None,
+            rank=None,
+            local_rank=None,
+            world_size=None,
+            telemetry_sink_dir="tf_sink",
+            telemetry_flush_seconds=4.0,
+            telemetry_rollover_mb=12,
+            telemetry_retention_files=5,
+            telemetry_retention_total_mb=96,
+        )
+    )
+
+    assert exit_code == 0
+    telemetry_sink_config = created["telemetry_sink_config"]
+    assert telemetry_sink_config.root_dir == tf_cli.Path("tf_sink")
+    assert telemetry_sink_config.flush_every_seconds == 4.0
+    assert telemetry_sink_config.rollover_max_bytes == 12 * 1024 * 1024
+    assert telemetry_sink_config.retention_max_files == 5
+    assert telemetry_sink_config.retention_max_total_bytes == 96 * 1024 * 1024
+
+
 def test_tf_tracker_records_degrade_and_recover_events(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

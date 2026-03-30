@@ -1,7 +1,9 @@
 import types
+from pathlib import Path
 
 import pytest
 
+from stormlog.telemetry_sink import TelemetrySinkConfig
 from stormlog.tui import monitor
 
 
@@ -13,10 +15,12 @@ class DummyCPUTracker:
         sampling_interval: float = 0.5,
         max_events: int = 10_000,
         enable_alerts: bool = True,
+        telemetry_sink_config: object | None = None,
     ) -> None:
         self.sampling_interval = sampling_interval
         self.max_events = max_events
         self.enable_alerts = enable_alerts
+        self.telemetry_sink_config = telemetry_sink_config
         self.is_tracking = False
         self.events: list[object] = []
 
@@ -184,3 +188,21 @@ def test_tracker_session_preserves_collector_health_metadata(
     assert first.metadata["collector_health_status"] == "degraded"
     assert first.metadata["telemetry_partial"] is True
     assert first.metadata["collector_partial_fields"] == ["device_total_bytes"]
+
+
+def test_tracker_session_passes_telemetry_sink_config_to_cpu_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(monitor, "MemoryTracker", BrokenGPUTracker)
+    monkeypatch.setattr(monitor, "MemoryWatchdog", None)
+    monkeypatch.setattr(monitor, "CPUMemoryTracker", DummyCPUTracker)
+    monkeypatch.setattr(monitor, "torch", _stub_torch(False))
+
+    sink_config = TelemetrySinkConfig(root_dir=Path("/tmp/tui_sink"))
+    session = monitor.TrackerSession(telemetry_sink_config=sink_config)
+    session.start()
+
+    assert isinstance(session._tracker, DummyCPUTracker)
+    assert session._tracker.telemetry_sink_config == sink_config
+
+    session.stop()

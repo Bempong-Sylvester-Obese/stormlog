@@ -21,6 +21,7 @@ except ImportError:
     tf = None
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 from .analyzer import MemoryAnalyzer
 from .diagnose import run_diagnose
@@ -51,6 +52,27 @@ def _normalize_telemetry_events(
         )
         normalized.append(telemetry_event_to_dict(event))
     return normalized
+
+
+def _build_telemetry_sink_config(
+    args: argparse.Namespace,
+) -> TelemetrySinkConfig | None:
+    sink_dir = getattr(args, "telemetry_sink_dir", None)
+    if not sink_dir:
+        return None
+    return TelemetrySinkConfig(
+        root_dir=Path(sink_dir),
+        flush_every_seconds=float(getattr(args, "telemetry_flush_seconds", 2.0)),
+        rollover_max_bytes=int(getattr(args, "telemetry_rollover_mb", 64))
+        * 1024
+        * 1024,
+        retention_max_files=int(getattr(args, "telemetry_retention_files", 8)),
+        retention_max_total_bytes=int(
+            getattr(args, "telemetry_retention_total_mb", 512)
+        )
+        * 1024
+        * 1024,
+    )
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -220,6 +242,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     rank = getattr(args, "rank", None)
     local_rank = getattr(args, "local_rank", None)
     world_size = getattr(args, "world_size", None)
+    telemetry_sink_config = _build_telemetry_sink_config(args)
 
     tracker = MemoryTracker(
         sampling_interval=args.interval,
@@ -230,7 +253,10 @@ def cmd_track(args: argparse.Namespace) -> int:
         rank=rank,
         local_rank=local_rank,
         world_size=world_size,
+        telemetry_sink_config=telemetry_sink_config,
     )
+    if telemetry_sink_config is not None:
+        print(f"Append-only telemetry sink: {telemetry_sink_config.root_dir}")
 
     # Add alert callback
     def alert_callback(alert: Dict[str, Any]) -> None:
@@ -587,6 +613,35 @@ def main() -> int:
     )
     track_parser.add_argument(
         "--output", required=True, help="Output file for tracking results"
+    )
+    track_parser.add_argument(
+        "--telemetry-sink-dir",
+        default=None,
+        help="Directory for append-only telemetry sink segments",
+    )
+    track_parser.add_argument(
+        "--telemetry-flush-seconds",
+        type=float,
+        default=2.0,
+        help="Maximum seconds between telemetry sink flushes (default: 2.0)",
+    )
+    track_parser.add_argument(
+        "--telemetry-rollover-mb",
+        type=int,
+        default=64,
+        help="Telemetry sink segment rollover size in MB (default: 64)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-files",
+        type=int,
+        default=8,
+        help="Maximum retained telemetry sink segments (default: 8)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-total-mb",
+        type=int,
+        default=512,
+        help="Maximum retained telemetry sink size in MB (default: 512)",
     )
 
     # Analyze command
