@@ -41,6 +41,31 @@ class _NoOpThread:
         _ = timeout
 
 
+class _FailingSink:
+    def __init__(self, *, fail_on: set[str]) -> None:
+        self.fail_on = fail_on
+        self.append_calls = 0
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def append(self, record: dict[str, object]) -> None:
+        _ = record
+        self.append_calls += 1
+        if "append" in self.fail_on:
+            raise OSError("disk full")
+
+    def flush(self, *, force: bool = False) -> None:
+        _ = force
+        self.flush_calls += 1
+        if "flush" in self.fail_on:
+            raise OSError("disk full")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if "close" in self.fail_on:
+            raise OSError("disk full")
+
+
 def test_tf_tracker_emits_v2_event_records(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
 
@@ -335,6 +360,71 @@ def test_tf_tracker_streams_events_to_append_only_sink(
     assert payload["collector"] == "stormlog.tensorflow.memory_tracker"
     assert payload["event_type"] == "sample"
     assert payload["allocator_allocated_bytes"] == 32 * 1024 * 1024
+
+
+def test_tf_tracker_disables_sink_after_append_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    sink = _FailingSink(fail_on={"append"})
+    tracker._telemetry_sink = sink  # type: ignore[assignment]
+
+    tracker._append_event(
+        timestamp=1.0,
+        memory_mb=32.0,
+        event_type="sample",
+    )
+
+    assert tracker.events
+    assert tracker._telemetry_sink is None
+    assert sink.append_calls == 1
+
+
+def test_tf_tracker_disables_sink_after_flush_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    sink = _FailingSink(fail_on={"flush"})
+    tracker._telemetry_sink = sink  # type: ignore[assignment]
+
+    tracker._flush_telemetry_sink()
+
+    assert tracker._telemetry_sink is None
+    assert sink.flush_calls == 1
+
+
+def test_tf_tracker_stop_tracking_disables_sink_after_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+    monkeypatch.setattr(tf_tracker.threading, "Thread", _NoOpThread)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+    tracker.start_tracking()
+    sink = _FailingSink(fail_on={"close"})
+    tracker._telemetry_sink = sink  # type: ignore[assignment]
+
+    result = tracker.stop_tracking()
+
+    assert result.events == []
+    assert tracker._telemetry_sink is None
+    assert sink.close_calls >= 1
 
 
 def test_tf_tracker_persistent_failure_preserves_status_events_without_samples(

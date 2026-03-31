@@ -529,17 +529,47 @@ class MemoryTracker:
     def _append_to_telemetry_sink(self, record: Dict[str, Any]) -> None:
         if self._telemetry_sink is None:
             return
-        self._telemetry_sink.append(record)
+        try:
+            self._telemetry_sink.append(record)
+        except Exception as exc:
+            self._disable_telemetry_sink("append", exc)
 
     def _flush_telemetry_sink(self, *, force: bool = False) -> None:
         if self._telemetry_sink is None:
             return
-        self._telemetry_sink.flush(force=force)
+        try:
+            self._telemetry_sink.flush(force=force)
+        except Exception as exc:
+            self._disable_telemetry_sink("flush", exc)
 
     def _close_telemetry_sink(self) -> None:
         if self._telemetry_sink is None:
             return
-        self._telemetry_sink.close()
+        try:
+            self._telemetry_sink.close()
+        except Exception as exc:
+            self._disable_telemetry_sink("close", exc)
+        else:
+            self._telemetry_sink = None
+
+    def _disable_telemetry_sink(self, operation: str, exc: Exception) -> None:
+        sink = self._telemetry_sink
+        if sink is None:
+            return
+        self._telemetry_sink = None
+        logging.warning(
+            "Disabling TensorFlow telemetry sink after %s failure: %s",
+            operation,
+            exc,
+        )
+        try:
+            sink.close()
+        except Exception as close_exc:
+            logging.debug(
+                "TensorFlow telemetry sink close failed after %s error: %s",
+                operation,
+                close_exc,
+            )
 
     def set_alert_threshold(self, threshold_mb: float) -> None:
         """Update alert threshold."""
