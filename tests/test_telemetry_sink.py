@@ -111,6 +111,54 @@ def test_append_only_sink_flushes_without_new_events(tmp_path: Path) -> None:
         sink.close()
 
 
+def test_append_only_sink_resume_skips_stale_manifest_segment_reuse(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "segment-000001.jsonl"
+    second = tmp_path / "segment-000002.jsonl"
+    third = tmp_path / "segment-000003.jsonl"
+    first.write_text(json.dumps({"seq": 1}) + "\n", encoding="utf-8")
+    second.write_text(json.dumps({"seq": 2}) + "\n", encoding="utf-8")
+    third.write_text(json.dumps({"seq": 3}) + "\n", encoding="utf-8")
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.append_only_telemetry_sink",
+                "segments": [
+                    {
+                        "filename": "segment-000001.jsonl",
+                        "event_count": 1,
+                        "size_bytes": first.stat().st_size,
+                        "closed": True,
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append({"seq": 4})
+    sink.close()
+
+    assert _segment_records(second) == [{"seq": 2}]
+
+    resumed_records = _segment_records(third)
+    next_segment = tmp_path / "segment-000004.jsonl"
+    if next_segment.exists():
+        resumed_records.extend(_segment_records(next_segment))
+
+    assert [record["seq"] for record in resumed_records] == [3, 4]
+
+
 def test_telemetry_sink_config_rejects_total_retention_below_rollover() -> None:
     with pytest.raises(
         ValueError, match="retention_max_total_bytes must be >= rollover_max_bytes"

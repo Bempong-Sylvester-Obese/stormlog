@@ -213,17 +213,18 @@ class AppendOnlyTelemetrySink:
         return self._handle
 
     def _load_existing_state(self) -> None:
+        discovered = _discover_segment_paths(self.root_dir)
         if self._manifest_path.exists():
             payload = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-            self._segments = [
+            manifest_segments = [
                 _SegmentState(**dict(segment))
                 for segment in payload.get("segments", [])
                 if isinstance(segment, dict)
             ]
+            self._segments = self._merge_segment_state(manifest_segments, discovered)
             self._next_segment_index = self._compute_next_segment_index()
             return
 
-        discovered = sorted(self.root_dir.glob(f"{SEGMENT_PREFIX}*{SEGMENT_SUFFIX}"))
         if not discovered:
             return
 
@@ -283,6 +284,46 @@ class AppendOnlyTelemetrySink:
 
         current.size_bytes = len(payload)
         current.event_count = self._count_records(segment_path)
+
+    def _merge_segment_state(
+        self,
+        manifest_segments: list[_SegmentState],
+        discovered_segments: list[Path],
+    ) -> list[_SegmentState]:
+        manifest_by_name = {
+            segment.filename: _SegmentState(
+                filename=segment.filename,
+                event_count=segment.event_count,
+                size_bytes=segment.size_bytes,
+                closed=segment.closed,
+            )
+            for segment in manifest_segments
+        }
+        discovered_by_name = {path.name: path for path in discovered_segments}
+        merged_names = sorted(set(manifest_by_name) | set(discovered_by_name))
+        merged: list[_SegmentState] = []
+
+        for name in merged_names:
+            manifest_segment = manifest_by_name.get(name)
+            if manifest_segment is not None:
+                merged.append(manifest_segment)
+                continue
+
+            path = discovered_by_name[name]
+            merged.append(
+                _SegmentState(
+                    filename=name,
+                    event_count=self._count_records(path),
+                    size_bytes=path.stat().st_size,
+                    closed=False,
+                )
+            )
+
+        for segment in merged[:-1]:
+            segment.closed = True
+        if merged and merged[-1].filename not in manifest_by_name:
+            merged[-1].closed = False
+        return merged
 
 
 def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
