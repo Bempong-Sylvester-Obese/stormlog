@@ -60,6 +60,31 @@ def _wait_until(
     return predicate()
 
 
+class _FailingSink:
+    def __init__(self, *, fail_on: set[str]) -> None:
+        self.fail_on = fail_on
+        self.append_calls = 0
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def append(self, record: dict[str, object]) -> None:
+        _ = record
+        self.append_calls += 1
+        if "append" in self.fail_on:
+            raise OSError("disk full")
+
+    def flush(self, *, force: bool = False) -> None:
+        _ = force
+        self.flush_calls += 1
+        if "flush" in self.fail_on:
+            raise OSError("disk full")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if "close" in self.fail_on:
+            raise OSError("disk full")
+
+
 # ---------------------------------------------------------------------------
 # CPUMemorySnapshot
 # ---------------------------------------------------------------------------
@@ -514,6 +539,50 @@ class TestCPUMemoryTracker:
         assert payload["collector"] == "stormlog.cpu_tracker"
         assert payload["event_type"] == "allocation"
         assert payload["context"] == "sink_test"
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_disables_sink_after_append_failure(self, mock_cls: Any) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker()
+        sink = _FailingSink(fail_on={"append"})
+        tracker._telemetry_sink = sink
+
+        tracker._add_event("allocation", 10, "sink_failure")
+
+        assert len(tracker.events) == 1
+        assert tracker.events[-1].context == "sink_failure"
+        assert sink.append_calls == 1
+        assert sink.close_calls == 1
+        assert tracker._telemetry_sink is None
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_disables_sink_after_flush_failure(self, mock_cls: Any) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker()
+        sink = _FailingSink(fail_on={"flush"})
+        tracker._telemetry_sink = sink
+
+        tracker._flush_telemetry_sink()
+
+        assert sink.flush_calls == 1
+        assert sink.close_calls == 1
+        assert tracker._telemetry_sink is None
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_stop_tracking_disables_sink_after_close_failure(
+        self, mock_cls: Any
+    ) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker()
+        tracker.is_tracking = True
+        sink = _FailingSink(fail_on={"close"})
+        tracker._telemetry_sink = sink
+
+        tracker.stop_tracking()
+
+        assert tracker.events[-1].event_type == "stop"
+        assert sink.close_calls >= 1
+        assert tracker._telemetry_sink is None
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_export_events_with_timestamp(self, mock_cls: Any, tmp_path: Path) -> None:

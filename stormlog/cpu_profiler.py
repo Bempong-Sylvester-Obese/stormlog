@@ -376,17 +376,47 @@ class CPUMemoryTracker:
     def _append_to_telemetry_sink(self, event: TrackingEvent) -> None:
         if self._telemetry_sink is None:
             return
-        self._telemetry_sink.append(self._telemetry_record_from_event(event))
+        try:
+            self._telemetry_sink.append(self._telemetry_record_from_event(event))
+        except Exception as exc:
+            self._disable_telemetry_sink("append", exc)
 
     def _flush_telemetry_sink(self, *, force: bool = False) -> None:
         if self._telemetry_sink is None:
             return
-        self._telemetry_sink.flush(force=force)
+        try:
+            self._telemetry_sink.flush(force=force)
+        except Exception as exc:
+            self._disable_telemetry_sink("flush", exc)
 
     def _close_telemetry_sink(self) -> None:
         if self._telemetry_sink is None:
             return
-        self._telemetry_sink.close()
+        try:
+            self._telemetry_sink.close()
+        except Exception as exc:
+            self._disable_telemetry_sink("close", exc)
+        else:
+            self._telemetry_sink = None
+
+    def _disable_telemetry_sink(self, operation: str, exc: Exception) -> None:
+        sink = self._telemetry_sink
+        if sink is None:
+            return
+        self._telemetry_sink = None
+        logger.warning(
+            "Disabling CPU telemetry sink after %s failure: %s",
+            operation,
+            exc,
+        )
+        try:
+            sink.close()
+        except Exception as close_exc:
+            logger.debug(
+                "CPU telemetry sink close failed after %s error: %s",
+                operation,
+                close_exc,
+            )
 
     def get_events(
         self,
