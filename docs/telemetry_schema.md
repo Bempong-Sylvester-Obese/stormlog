@@ -140,3 +140,30 @@ from stormlog.telemetry import (
 - `validate_telemetry_record(record)`
 
 These APIs normalize legacy records to `schema_version: 2` and enforce required fields.
+
+## Append-only sink layout
+
+Always-on `track` sessions can also write append-only telemetry into a sink
+directory during the run. The sink format is:
+
+```text
+telemetry_sink/
+  manifest.json
+  segment-000001.jsonl
+  segment-000002.jsonl
+```
+
+- each JSONL line is one canonical telemetry record
+- `manifest.json` tracks segment ordering and rollover state
+- closed segments may be pruned when file-count or total-size retention limits are hit
+
+`load_telemetry_events()` can read:
+
+- a normal JSON export
+- a sink directory
+- `manifest.json`
+- an individual JSONL segment
+
+If the final JSONL line is truncated because the process was interrupted during a
+write, the loader ignores that incomplete tail and still returns the fully
+written records ahead of it.

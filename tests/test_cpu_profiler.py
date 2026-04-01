@@ -20,6 +20,7 @@ from stormlog.cpu_profiler import (
     CPUMemoryTracker,
     CPUProfileResult,
 )
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -57,6 +58,31 @@ def _wait_until(
             return True
         time.sleep(interval)
     return predicate()
+
+
+class _FailingSink:
+    def __init__(self, *, fail_on: set[str]) -> None:
+        self.fail_on = fail_on
+        self.append_calls = 0
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def append(self, record: dict[str, object]) -> None:
+        _ = record
+        self.append_calls += 1
+        if "append" in self.fail_on:
+            raise OSError("disk full")
+
+    def flush(self, *, force: bool = False) -> None:
+        _ = force
+        self.flush_calls += 1
+        if "flush" in self.fail_on:
+            raise OSError("disk full")
+
+    def close(self) -> None:
+        self.close_calls += 1
+        if "close" in self.fail_on:
+            raise OSError("disk full")
 
 
 # ---------------------------------------------------------------------------
@@ -489,6 +515,74 @@ class TestCPUMemoryTracker:
 
         tracker.export_events(str(filepath), format="csv")
         assert not filepath.exists()
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_streams_events_to_append_only_sink(
+        self, mock_cls: Any, tmp_path: Path
+    ) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker(
+            telemetry_sink_config=TelemetrySinkConfig(
+                root_dir=tmp_path / "sink",
+                flush_every_events=1,
+                flush_every_seconds=1.0,
+                rollover_max_bytes=1024,
+                retention_max_total_bytes=1024 * 1024,
+            )
+        )
+
+        tracker._add_event("allocation", 10, "sink_test")
+        tracker._close_telemetry_sink()
+
+        segment = tmp_path / "sink" / "segment-000001.jsonl"
+        payload = json.loads(segment.read_text(encoding="utf-8").splitlines()[0])
+        assert payload["collector"] == "stormlog.cpu_tracker"
+        assert payload["event_type"] == "allocation"
+        assert payload["context"] == "sink_test"
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_disables_sink_after_append_failure(self, mock_cls: Any) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker()
+        sink = _FailingSink(fail_on={"append"})
+        tracker._telemetry_sink = sink
+
+        tracker._add_event("allocation", 10, "sink_failure")
+
+        assert len(tracker.events) == 1
+        assert tracker.events[-1].context == "sink_failure"
+        assert sink.append_calls == 1
+        assert sink.close_calls == 1
+        assert tracker._telemetry_sink is None
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_disables_sink_after_flush_failure(self, mock_cls: Any) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker()
+        sink = _FailingSink(fail_on={"flush"})
+        tracker._telemetry_sink = sink
+
+        tracker._flush_telemetry_sink()
+
+        assert sink.flush_calls == 1
+        assert sink.close_calls == 1
+        assert tracker._telemetry_sink is None
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_stop_tracking_disables_sink_after_close_failure(
+        self, mock_cls: Any
+    ) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker()
+        tracker.is_tracking = True
+        sink = _FailingSink(fail_on={"close"})
+        tracker._telemetry_sink = sink
+
+        tracker.stop_tracking()
+
+        assert tracker.events[-1].event_type == "stop"
+        assert sink.close_calls >= 1
+        assert tracker._telemetry_sink is None
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_export_events_with_timestamp(self, mock_cls: Any, tmp_path: Path) -> None:

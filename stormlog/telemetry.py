@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional
 
+from .telemetry_sink import resolve_telemetry_sink_segment_paths
+
 SCHEMA_VERSION_V2: Literal[2] = 2
 UNKNOWN_PID = -1
 UNKNOWN_HOST = "unknown"
@@ -758,6 +760,38 @@ def _looks_like_event_record(payload: Mapping[str, Any]) -> bool:
     return any(key in payload for key in candidate_keys)
 
 
+def _load_jsonl_events(
+    path: Path,
+    *,
+    permissive_legacy: bool,
+) -> list[TelemetryEventV2]:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    output: list[TelemetryEventV2] = []
+
+    for index, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if index == len(lines) and not line.endswith("\n"):
+                break
+            raise ValueError(
+                f"Malformed telemetry JSONL record in {path} at line {index}"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError(
+                f"Telemetry record in {path} at line {index} must be an object"
+            )
+        output.append(
+            telemetry_event_from_record(
+                payload,
+                permissive_legacy=permissive_legacy,
+            )
+        )
+    return output
+
+
 def load_telemetry_events(
     path: str | Path,
     permissive_legacy: bool = True,
@@ -766,6 +800,18 @@ def load_telemetry_events(
     """Load telemetry events from JSON and normalize to v2 payloads."""
 
     payload_path = Path(path)
+    segment_paths = resolve_telemetry_sink_segment_paths(payload_path)
+    if segment_paths:
+        segment_events: list[TelemetryEventV2] = []
+        for segment_path in segment_paths:
+            segment_events.extend(
+                _load_jsonl_events(
+                    segment_path,
+                    permissive_legacy=permissive_legacy,
+                )
+            )
+        return segment_events
+
     with payload_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
 

@@ -13,6 +13,7 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
+from .telemetry_sink import TelemetrySinkConfig
 from .utils import (
     _detect_gpu_hardware,
     format_bytes,
@@ -114,6 +115,27 @@ def _is_visualization_dependency_error(exc: BaseException) -> bool:
         current = next_exc
 
     return False
+
+
+def _build_telemetry_sink_config(
+    args: argparse.Namespace,
+) -> Optional[TelemetrySinkConfig]:
+    sink_dir = getattr(args, "telemetry_sink_dir", None)
+    if not sink_dir:
+        return None
+    return TelemetrySinkConfig(
+        root_dir=Path(sink_dir),
+        flush_every_seconds=float(getattr(args, "telemetry_flush_seconds", 2.0)),
+        rollover_max_bytes=int(getattr(args, "telemetry_rollover_mb", 64))
+        * 1024
+        * 1024,
+        retention_max_files=int(getattr(args, "telemetry_retention_files", 8)),
+        retention_max_total_bytes=int(
+            getattr(args, "telemetry_retention_total_mb", 512)
+        )
+        * 1024
+        * 1024,
+    )
 
 
 def main() -> None:
@@ -273,6 +295,36 @@ Examples:
         type=int,
         default=256,
         help="Maximum retained OOM dump storage in MB (default: 256)",
+    )
+    track_parser.add_argument(
+        "--telemetry-sink-dir",
+        type=str,
+        default=None,
+        help="Directory for append-only telemetry sink segments",
+    )
+    track_parser.add_argument(
+        "--telemetry-flush-seconds",
+        type=float,
+        default=2.0,
+        help="Maximum seconds between telemetry sink flushes (default: 2.0)",
+    )
+    track_parser.add_argument(
+        "--telemetry-rollover-mb",
+        type=int,
+        default=64,
+        help="Telemetry sink segment rollover size in MB (default: 64)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-files",
+        type=int,
+        default=8,
+        help="Maximum retained telemetry sink segments (default: 8)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-total-mb",
+        type=int,
+        default=512,
+        help="Maximum retained telemetry sink size in MB (default: 512)",
     )
 
     # Analyze command
@@ -631,6 +683,9 @@ def cmd_track(args: argparse.Namespace) -> None:
 
     runtime_backend = str(get_system_info().get("detected_backend", "cpu"))
     gpu_runtime = runtime_backend in {"cuda", "rocm", "mps"}
+    telemetry_sink_config = _build_telemetry_sink_config(args)
+    if telemetry_sink_config is not None:
+        print(f"Append-only telemetry sink: {telemetry_sink_config.root_dir}")
     tracker: Any
     watchdog: Optional[Any] = None
     if gpu_runtime:
@@ -660,6 +715,7 @@ def cmd_track(args: argparse.Namespace) -> None:
             rank=rank,
             local_rank=local_rank,
             world_size=world_size,
+            telemetry_sink_config=telemetry_sink_config,
         )
 
         if args.oom_flight_recorder:
@@ -704,6 +760,7 @@ def cmd_track(args: argparse.Namespace) -> None:
             rank=rank,
             local_rank=local_rank,
             world_size=world_size,
+            telemetry_sink_config=telemetry_sink_config,
         )
         print("Running CPU memory tracker (no GPU backend available).")
 
@@ -800,6 +857,14 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _input_artifact_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return int(path.stat().st_size)
+    if path.is_dir():
+        return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+    return 0
 
 
 def _build_analyze_summary(
@@ -902,30 +967,44 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print(f"Error: Input file '{input_file}' not found")
         return 1
 
-    try:
-        with input_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception as e:
-        print(f"Error loading input file: {e}")
-        return 1
-
     (load_telemetry_events,) = _import_runtime_symbols(
         ".telemetry", ("load_telemetry_events",), "The analyze command"
     )
 
     events: list[Any] | None = None
     telemetry_note: str | None = None
+    data: Any = None
     try:
         events = load_telemetry_events(input_path, permissive_legacy=True)
     except ValueError as exc:
+        if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        try:
+            with input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            print(f"Error loading input file: {error}")
+            return 1
         if not _json_payload_looks_like_telemetry(data):
             telemetry_note = "JSON payload does not contain telemetry events"
         else:
             print(f"Error parsing telemetry events: {exc}")
             return 1
     except Exception as exc:
-        print(f"Error parsing telemetry events: {exc}")
-        return 1
+        if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        try:
+            with input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            print(f"Error loading input file: {error}")
+            return 1
+        if _json_payload_looks_like_telemetry(data):
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        telemetry_note = "JSON payload does not contain telemetry events"
 
     if events is not None:
         (MemoryAnalyzer,) = _import_runtime_symbols(
@@ -948,7 +1027,7 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     summary_text = _build_analyze_summary(
         input_file=input_file,
-        file_size_bytes=input_path.stat().st_size,
+        file_size_bytes=_input_artifact_size_bytes(input_path),
         report=report,
     )
     print(summary_text)

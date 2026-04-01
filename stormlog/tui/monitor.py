@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 
 from stormlog.telemetry import TelemetryEventV2, telemetry_event_from_record
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 from ..utils import format_bytes
 
@@ -70,6 +71,7 @@ class TrackerSession:
         auto_cleanup: bool = False,
         max_events_per_poll: int = 50,
         max_events: int = 10_000,
+        telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
     ) -> None:
         # Defensive check: ensure at least one tracker is available
         # (In normal operation, imports are required and will raise ImportError if missing.
@@ -83,6 +85,7 @@ class TrackerSession:
         self.auto_cleanup = auto_cleanup
         self.max_events_per_poll = max_events_per_poll
         self.max_events = max_events
+        self.telemetry_sink_config = telemetry_sink_config
         self._tracker: Optional[Any] = None
         self._watchdog: Optional[Any] = None
         self._last_seen_ts: Optional[float] = None
@@ -103,6 +106,7 @@ class TrackerSession:
 
         tracker_kwargs.setdefault("sampling_interval", self.sampling_interval)
         tracker_kwargs.setdefault("enable_alerts", True)
+        tracker_kwargs.setdefault("telemetry_sink_config", self.telemetry_sink_config)
 
         tracker: Optional[Any] = None
         backend = "gpu"
@@ -126,6 +130,7 @@ class TrackerSession:
                 sampling_interval=tracker_kwargs["sampling_interval"],
                 max_events=self.max_events,
                 enable_alerts=tracker_kwargs.get("enable_alerts", True),
+                telemetry_sink_config=tracker_kwargs.get("telemetry_sink_config"),
             )
 
         if tracker is None:

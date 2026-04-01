@@ -36,6 +36,7 @@ from stormlog.telemetry import (
     telemetry_event_from_record,
     telemetry_event_to_dict,
 )
+from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 
 @dataclass
@@ -78,6 +79,7 @@ class MemoryTracker:
         rank: Optional[int] = None,
         local_rank: Optional[int] = None,
         world_size: Optional[int] = None,
+        telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
     ):
         """
         Initialize memory tracker.
@@ -97,6 +99,11 @@ class MemoryTracker:
         self.alert_threshold_mb = alert_threshold_mb
         self.device = device or self._get_default_device()
         self.enable_logging = enable_logging
+        self._telemetry_sink = (
+            AppendOnlyTelemetrySink(telemetry_sink_config)
+            if telemetry_sink_config is not None
+            else None
+        )
         self.distributed_identity = resolve_distributed_identity(
             job_id=job_id,
             rank=rank,
@@ -241,16 +248,16 @@ class MemoryTracker:
         context: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> None:
+        record = self._build_telemetry_event_record(
+            timestamp=timestamp,
+            memory_mb=memory_mb,
+            event_type=event_type,
+            context=context,
+            metadata=metadata,
+        )
         with self._lock:
-            self.events.append(
-                self._build_telemetry_event_record(
-                    timestamp=timestamp,
-                    memory_mb=memory_mb,
-                    event_type=event_type,
-                    context=context,
-                    metadata=metadata,
-                )
-            )
+            self.events.append(record)
+        self._append_to_telemetry_sink(record)
 
     def _transition_to_failure(self, timestamp: float, exc: BaseException) -> None:
         previous_health = self._collector_health
@@ -331,13 +338,11 @@ class MemoryTracker:
         with self._lock:
             self.memory_usage.append(current_memory)
             self.timestamps.append(current_time)
-            self.events.append(
-                self._build_telemetry_event_record(
-                    timestamp=current_time,
-                    memory_mb=current_memory,
-                    event_type="sample",
-                )
-            )
+        self._append_event(
+            timestamp=current_time,
+            memory_mb=current_memory,
+            event_type="sample",
+        )
 
         if self.alert_threshold_mb and current_memory > self.alert_threshold_mb:
             self._trigger_alert(current_memory, current_time)
@@ -347,10 +352,12 @@ class MemoryTracker:
         while not self._stop_event.is_set():
             try:
                 self._run_tracking_iteration()
+                self._flush_telemetry_sink()
                 self._stop_event.wait(self.sampling_interval)
             except Exception as e:
                 if self.enable_logging:
                     logging.error(f"Error in tracking loop: {e}")
+                self._flush_telemetry_sink(force=True)
                 self._stop_event.wait(self.sampling_interval)
 
     def _trigger_alert(self, memory_mb: float, timestamp: float) -> None:
@@ -429,6 +436,7 @@ class MemoryTracker:
             self.tracking_thread.join(timeout=5.0)
 
         self._session_end_time = time.time()
+        self._close_telemetry_sink()
         # Create result
         result = self._create_tracking_result()
 
@@ -517,6 +525,51 @@ class MemoryTracker:
             "tracking_duration_seconds": tracking_duration,
             **self._collector_health.to_dict(),
         }
+
+    def _append_to_telemetry_sink(self, record: Dict[str, Any]) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.append(record)
+        except Exception as exc:
+            self._disable_telemetry_sink("append", exc)
+
+    def _flush_telemetry_sink(self, *, force: bool = False) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.flush(force=force)
+        except Exception as exc:
+            self._disable_telemetry_sink("flush", exc)
+
+    def _close_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.close()
+        except Exception as exc:
+            self._disable_telemetry_sink("close", exc)
+        else:
+            self._telemetry_sink = None
+
+    def _disable_telemetry_sink(self, operation: str, exc: Exception) -> None:
+        sink = self._telemetry_sink
+        if sink is None:
+            return
+        self._telemetry_sink = None
+        logging.warning(
+            "Disabling TensorFlow telemetry sink after %s failure: %s",
+            operation,
+            exc,
+        )
+        try:
+            sink.close()
+        except Exception as close_exc:
+            logging.debug(
+                "TensorFlow telemetry sink close failed after %s error: %s",
+                operation,
+                close_exc,
+            )
 
     def set_alert_threshold(self, threshold_mb: float) -> None:
         """Update alert threshold."""

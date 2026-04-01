@@ -64,6 +64,7 @@ gpumemprof monitor --duration 30 --interval 0.5 --output monitor.json --format j
 gpumemprof track --duration 30 --interval 0.5 --output track.json --format json
 gpumemprof track --warning-threshold 75 --critical-threshold 90 --output alerts.csv
 gpumemprof track --job-id train-42 --rank 1 --local-rank 1 --world-size 8 --output rank1.json --format json
+gpumemprof track --telemetry-sink-dir ./live_sink --telemetry-rollover-mb 32 --telemetry-retention-total-mb 256
 ```
 
 For long-running tracking sessions, Stormlog now degrades gracefully when a
@@ -73,6 +74,20 @@ collector becomes unhealthy:
 - exported telemetry includes `collector_degraded` / `collector_recovered` events
 - per-event metadata marks partial or unhealthy collector state
 - retries use bounded exponential backoff instead of crashing the tracker loop
+
+For always-on sessions, `gpumemprof track` can also stream append-only
+telemetry into a sink directory during the run instead of waiting for shutdown.
+The sink writes JSONL segments plus a manifest, rolls segments when they hit the
+configured size limit, and prunes the oldest closed segments to stay within the
+retention budget.
+
+Useful sink options:
+
+- `--telemetry-sink-dir`
+- `--telemetry-flush-seconds`
+- `--telemetry-rollover-mb`
+- `--telemetry-retention-files`
+- `--telemetry-retention-total-mb`
 
 Optional OOM flight-recorder support:
 
@@ -90,9 +105,13 @@ gpumemprof track \
 ```bash
 gpumemprof analyze track.json --format txt --output analysis.txt
 gpumemprof analyze track.json --visualization --plot-dir plots
+gpumemprof analyze ./live_sink
 ```
 
-`gpumemprof analyze` uses a positional input file. If you add `--visualization`, plots are written to the directory passed via `--plot-dir` or to `plots/` by default.
+`gpumemprof analyze` uses a positional input file. It can now read a normal JSON
+telemetry export, a sink JSONL segment, or a sink directory containing the
+current and rolled append-only outputs. If you add `--visualization`, plots are
+written to the directory passed via `--plot-dir` or to `plots/` by default.
 
 ### Produce a diagnose bundle
 
@@ -147,11 +166,14 @@ tfmemprof track --interval 0.5 --threshold 4096 --device /CPU:0 --output tf_trac
 ```bash
 tfmemprof track --interval 0.5 --threshold 4096 --output tf_track.json
 tfmemprof track --interval 0.5 --threshold 4096 --job-id train-42 --rank 3 --local-rank 1 --world-size 8 --output tf_rank3.json
+tfmemprof track --interval 0.5 --threshold 4096 --output tf_track.json --telemetry-sink-dir ./tf_live_sink
 ```
 
 `tfmemprof track` follows the same degraded-mode rules as the PyTorch tracker:
 collector failures pause new sample emission, status events remain visible in the
 artifact stream, and normal sampling resumes automatically after recovery.
+The same append-only sink options are available when you need bounded,
+interrupt-tolerant TensorFlow telemetry during a long-running session.
 
 ### Analyze TensorFlow results
 

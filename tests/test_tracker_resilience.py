@@ -12,6 +12,7 @@ from stormlog.collector_health import (
     COLLECTOR_HEALTH_UNHEALTHY,
 )
 from stormlog.device_collectors import DeviceMemorySample, DeviceMemorySampleResult
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 
 def _sample(
@@ -84,9 +85,45 @@ class _NoOpThread:
         _ = timeout
 
 
+class _SequencedStopEvent:
+    def __init__(self, waits: list[bool]) -> None:
+        self._waits = deque(waits)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        _ = timeout
+        if self._waits:
+            return self._waits.popleft()
+        return True
+
+    def set(self) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+
+class _FailingFlushSink:
+    def __init__(self) -> None:
+        self.flush_calls = 0
+        self.close_calls = 0
+
+    def append(self, record: dict[str, object]) -> None:
+        _ = record
+        return None
+
+    def flush(self, *, force: bool = False) -> None:
+        _ = force
+        self.flush_calls += 1
+        raise OSError("disk full")
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 def _build_tracker(
     monkeypatch: pytest.MonkeyPatch,
     collector: _SequencedCollector,
+    **kwargs: object,
 ) -> tracker_mod.MemoryTracker:
     monkeypatch.setattr(
         tracker_mod.MemoryTracker,
@@ -103,7 +140,11 @@ def _build_tracker(
         "get_gpu_info",
         lambda _device: {"total_memory": 4096},
     )
-    return tracker_mod.MemoryTracker(sampling_interval=0.01, enable_alerts=False)
+    return tracker_mod.MemoryTracker(
+        sampling_interval=0.01,
+        enable_alerts=False,
+        **kwargs,
+    )
 
 
 def test_memory_tracker_recovers_after_transient_collector_failure(
@@ -281,6 +322,64 @@ def test_memory_tracker_export_preserves_health_metadata(
     assert "collector_health_status" in payload
     assert "collector_degraded" in payload
     assert "device_total_bytes" in payload
+
+
+def test_memory_tracker_streams_events_to_append_only_sink(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(
+        monkeypatch,
+        collector,
+        telemetry_sink_config=TelemetrySinkConfig(
+            root_dir=tmp_path / "sink",
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            rollover_max_bytes=1024,
+            retention_max_total_bytes=1024 * 1024,
+        ),
+    )
+
+    tracker._run_tracking_iteration(0)
+    tracker._close_telemetry_sink()
+
+    segment = tmp_path / "sink" / "segment-000001.jsonl"
+    lines = [line for line in segment.read_text(encoding="utf-8").splitlines() if line]
+    assert len(lines) == 2
+    payload = tracker_mod.json.loads(lines[-1])
+    assert payload["collector"] == "stormlog.cuda_tracker"
+    assert payload["event_type"] == "allocation"
+    assert payload["allocator_allocated_bytes"] == 128
+
+
+def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    sink = _FailingFlushSink()
+    tracker._telemetry_sink = sink
+    tracker._stop_event = _SequencedStopEvent([False, False, True])
+    iteration_inputs: list[int] = []
+
+    def _run_iteration(last_allocated: int) -> int:
+        iteration_inputs.append(last_allocated)
+        return last_allocated + 1
+
+    monkeypatch.setattr(tracker, "_run_tracking_iteration", _run_iteration)
+    monkeypatch.setattr(tracker_mod.time, "sleep", lambda _: None)
+
+    tracker._tracking_loop()
+
+    assert iteration_inputs == [0, 1]
+    assert sink.flush_calls == 1
+    assert sink.close_calls == 1
+    assert tracker._telemetry_sink is None
 
 
 def test_memory_tracker_start_tracking_resets_collector_session_state(
