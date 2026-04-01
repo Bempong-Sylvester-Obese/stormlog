@@ -1228,6 +1228,17 @@ class GPUMemoryProfilerTUI(App):
             f"(session={self._diagnostics_selected_session_id}).",
         )
 
+    async def _load_artifact_diagnostics_result(
+        self,
+        paths: list[Path],
+        *,
+        session_id: str | None,
+    ) -> Any:
+        """Load artifact diagnostics while preserving the legacy one-arg call shape."""
+        if session_id is None:
+            return await asyncio.to_thread(load_distributed_artifacts, paths)
+        return await asyncio.to_thread(load_distributed_artifacts, paths, session_id)
+
     async def load_diagnostics_artifacts(self) -> None:
         paths = self._parse_diagnostics_paths(self.diagnostics_path_input.value)
         if not paths:
@@ -1240,10 +1251,9 @@ class GPUMemoryProfilerTUI(App):
         self._diagnostics_last_paths = paths
         requested_session_id = self._requested_diagnostics_session_id()
         try:
-            result = await asyncio.to_thread(
-                load_distributed_artifacts,
+            result = await self._load_artifact_diagnostics_result(
                 paths,
-                requested_session_id,
+                session_id=requested_session_id,
             )
         except Exception as exc:
             self._set_diagnostics_sessions(
@@ -1309,10 +1319,9 @@ class GPUMemoryProfilerTUI(App):
             self._diagnostics_last_paths = paths
             requested_session_id = self._requested_diagnostics_session_id()
             try:
-                result = await asyncio.to_thread(
-                    load_distributed_artifacts,
+                result = await self._load_artifact_diagnostics_result(
                     paths,
-                    requested_session_id,
+                    session_id=requested_session_id,
                 )
             except Exception as exc:
                 self._set_diagnostics_sessions(
@@ -1359,10 +1368,9 @@ class GPUMemoryProfilerTUI(App):
             self._diagnostics_last_paths = paths
             requested_session_id = self._requested_diagnostics_session_id()
             try:
-                result = await asyncio.to_thread(
-                    load_distributed_artifacts,
+                result = await self._load_artifact_diagnostics_result(
                     paths,
-                    requested_session_id,
+                    session_id=requested_session_id,
                 )
             except Exception as exc:
                 self._set_diagnostics_sessions(
