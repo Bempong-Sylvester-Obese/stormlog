@@ -31,6 +31,15 @@ from stormlog.collector_health import (
     CollectorHealthState,
     collector_retry_delay_seconds,
 )
+from stormlog.session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INCOMPLETE,
+    SESSION_STATUS_RUNNING,
+    SessionSummary,
+    create_session_summary,
+    now_ns,
+    update_session_summary,
+)
 from stormlog.telemetry import (
     resolve_distributed_identity,
     telemetry_event_from_record,
@@ -111,6 +120,8 @@ class MemoryTracker:
             world_size=world_size,
             env=os.environ,
         )
+        self.session_source = "stormlog.tensorflow.tracker"
+        self._session_summary: Optional[SessionSummary] = None
 
         # Tracking state
         self.tracking = False
@@ -137,6 +148,31 @@ class MemoryTracker:
         if enable_logging:
             logging.info(f"TensorFlow Memory Tracker initialized for {self.device}")
 
+    def _ensure_session_summary(self) -> SessionSummary:
+        """Create the active tracking session summary if needed."""
+        if self._session_summary is None:
+            summary = create_session_summary(
+                source=self.session_source,
+                status=SESSION_STATUS_RUNNING,
+                started_at_ns=now_ns(),
+                host=socket.gethostname(),
+                pid=os.getpid(),
+                job_id=self.distributed_identity["job_id"],
+                rank=self.distributed_identity["rank"],
+                local_rank=self.distributed_identity["local_rank"],
+                world_size=self.distributed_identity["world_size"],
+            )
+            if self._telemetry_sink is not None and hasattr(
+                self._telemetry_sink, "start_session"
+            ):
+                summary = self._telemetry_sink.start_session(summary)
+            self._session_summary = summary
+        return self._session_summary
+
+    def get_session_summary(self) -> Optional[SessionSummary]:
+        """Return the active or most recent TensorFlow tracking session."""
+        return self._session_summary
+
     def _device_id(self) -> int:
         """Best-effort device id extraction."""
         if isinstance(self.device, str):
@@ -161,6 +197,7 @@ class MemoryTracker:
     ) -> Dict[str, Any]:
         sampling_interval_ms = int(round(self.sampling_interval * 1000))
         legacy = {
+            "session_id": self._ensure_session_summary().session_id,
             "timestamp": timestamp,
             "type": event_type,
             "memory_mb": memory_mb,
@@ -183,6 +220,7 @@ class MemoryTracker:
             legacy,
             default_collector="stormlog.tensorflow.memory_tracker",
             default_sampling_interval_ms=sampling_interval_ms,
+            default_session_id=self._ensure_session_summary().session_id,
         )
         return telemetry_event_to_dict(event)
 
@@ -397,6 +435,7 @@ class MemoryTracker:
 
         self._session_start_time = time.time()
         self._session_end_time = None
+        self._session_summary = None
         self.tracking = True
         self._stop_event.clear()
 
@@ -415,6 +454,13 @@ class MemoryTracker:
         # Start tracking thread
         self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
         self.tracking_thread.start()
+        self._ensure_session_summary()
+        self._append_event(
+            timestamp=self._session_start_time,
+            memory_mb=self._status_memory_value(),
+            event_type="start",
+            context="Memory tracking started",
+        )
 
         if self.enable_logging:
             logging.info(
@@ -436,7 +482,19 @@ class MemoryTracker:
             self.tracking_thread.join(timeout=5.0)
 
         self._session_end_time = time.time()
+        self._append_event(
+            timestamp=self._session_end_time,
+            memory_mb=self._status_memory_value(),
+            event_type="stop",
+            context="Memory tracking stopped",
+        )
         self._close_telemetry_sink()
+        if self._session_summary is not None:
+            self._session_summary = update_session_summary(
+                self._session_summary,
+                status=SESSION_STATUS_COMPLETED,
+                ended_at_ns=now_ns(),
+            )
         # Create result
         result = self._create_tracking_result()
 
@@ -523,6 +581,16 @@ class MemoryTracker:
             "peak_memory_mb": peak_memory,
             "total_events": total_events,
             "tracking_duration_seconds": tracking_duration,
+            "session_id": (
+                self._session_summary.session_id
+                if self._session_summary is not None
+                else None
+            ),
+            "session_status": (
+                self._session_summary.status
+                if self._session_summary is not None
+                else None
+            ),
             **self._collector_health.to_dict(),
         }
 
@@ -546,7 +614,10 @@ class MemoryTracker:
         if self._telemetry_sink is None:
             return
         try:
-            self._telemetry_sink.close()
+            self._close_sink_with_status(
+                self._telemetry_sink,
+                SESSION_STATUS_COMPLETED,
+            )
         except Exception as exc:
             self._disable_telemetry_sink("close", exc)
         else:
@@ -562,14 +633,27 @@ class MemoryTracker:
             operation,
             exc,
         )
+        if self._session_summary is not None:
+            self._session_summary = update_session_summary(
+                self._session_summary,
+                status=SESSION_STATUS_INCOMPLETE,
+                ended_at_ns=now_ns(),
+            )
         try:
-            sink.close()
+            self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
         except Exception as close_exc:
             logging.debug(
                 "TensorFlow telemetry sink close failed after %s error: %s",
                 operation,
                 close_exc,
             )
+
+    @staticmethod
+    def _close_sink_with_status(sink: Any, status: str) -> None:
+        try:
+            sink.close(session_status=status)
+        except TypeError:
+            sink.close()
 
     def set_alert_threshold(self, threshold_mb: float) -> None:
         """Update alert threshold."""

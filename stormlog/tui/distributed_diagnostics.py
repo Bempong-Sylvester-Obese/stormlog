@@ -7,8 +7,9 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 from stormlog.collective_attribution import (
     CollectiveAttributionResult,
@@ -16,14 +17,31 @@ from stormlog.collective_attribution import (
     resolve_collective_attribution_config,
 )
 from stormlog.gap_analysis import analyze_hidden_memory_gaps
+from stormlog.session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INCOMPLETE,
+    SessionSummary,
+    create_session_summary,
+    normalize_session_status,
+    select_default_session,
+    session_summary_from_dict,
+    sort_session_summaries,
+    stable_legacy_session_id,
+    update_session_summary,
+)
 from stormlog.telemetry import (
+    LoadedTelemetrySession,
+    TelemetryEvent,
     TelemetryEventV2,
-    load_telemetry_events,
+    load_telemetry_sessions,
     telemetry_event_from_record,
 )
+from stormlog.telemetry_sink import resolve_telemetry_sink_segment_paths
 from stormlog.utils import format_bytes
 
 logger = logging.getLogger(__name__)
+
+TelemetryCompatibleEvent = TelemetryEvent | TelemetryEventV2
 
 GAP_RATIO_THRESHOLD = 0.05
 _GAP_THRESHOLDS = {
@@ -78,7 +96,9 @@ _RANK_CONTEXT_PATTERN = re.compile(
 class ArtifactLoadResult:
     """Result of loading one or more distributed artifact inputs."""
 
-    events: list[TelemetryEventV2]
+    events: list[TelemetryEvent]
+    sessions: list[LoadedTelemetrySession]
+    selected_session_id: str | None
     warnings: list[str]
     sources_loaded: list[str]
 
@@ -150,7 +170,7 @@ class _TimelineRankAllocator:
     used_ranks: set[int] = field(default_factory=set)
     max_world_size: int = 1
 
-    def register_events(self, events: Iterable[TelemetryEventV2]) -> None:
+    def register_events(self, events: Iterable[TelemetryCompatibleEvent]) -> None:
         for event in events:
             self.register_rank(event.rank, event.world_size)
 
@@ -164,6 +184,14 @@ class _TimelineRankAllocator:
         while rank in self.used_ranks:
             rank += 1
         return rank
+
+
+@dataclass
+class _LoadedSessionAccumulator:
+    summary: SessionSummary
+    events: list[TelemetryEvent] = field(default_factory=list)
+    sources_loaded: set[str] = field(default_factory=set)
+    warnings: list[str] = field(default_factory=list)
 
 
 def parse_rank_filter(expr: str, available_ranks: list[int]) -> set[int]:
@@ -197,11 +225,137 @@ def parse_rank_filter(expr: str, available_ranks: list[int]) -> set[int]:
     return {rank for rank in selected if rank in available_set}
 
 
-def load_distributed_artifacts(paths: list[Path]) -> ArtifactLoadResult:
+def _session_source_for_path(path: Path) -> str:
+    return f"artifact:{path.name or path.resolve()}"
+
+
+def _merge_session_summaries(
+    existing: SessionSummary,
+    incoming: SessionSummary,
+) -> SessionSummary:
+    return sort_session_summaries([existing, incoming])[0]
+
+
+def _load_sessions_from_events(
+    events: list[TelemetryEvent],
+    *,
+    source_path: Path,
+    warnings: list[str] | None = None,
+    summary_by_id: Mapping[str, SessionSummary] | None = None,
+) -> list[LoadedTelemetrySession]:
+    grouped: dict[str, list[TelemetryEvent]] = {}
+    for event in events:
+        grouped.setdefault(event.session_id, []).append(event)
+
+    sessions: list[LoadedTelemetrySession] = []
+    for session_id, session_events in grouped.items():
+        ordered_events = _dedupe_events(session_events)
+        ordered_events.sort(key=lambda event: event.timestamp_ns)
+        summary = (
+            dict(summary_by_id or {}).get(session_id)
+            if summary_by_id is not None
+            else None
+        )
+        if summary is None:
+            summary = create_session_summary(
+                source=_session_source_for_path(source_path),
+                status=SESSION_STATUS_INCOMPLETE,
+                session_id=session_id,
+                started_at_ns=ordered_events[0].timestamp_ns,
+                ended_at_ns=(
+                    ordered_events[-1].timestamp_ns
+                    if ordered_events[-1].event_type == "stop"
+                    else None
+                ),
+                host=ordered_events[0].host,
+                pid=ordered_events[0].pid,
+                job_id=ordered_events[0].job_id,
+                rank=ordered_events[0].rank,
+                local_rank=ordered_events[0].local_rank,
+                world_size=ordered_events[0].world_size,
+            )
+            if ordered_events[-1].event_type == "stop":
+                summary = update_session_summary(
+                    summary,
+                    status=SESSION_STATUS_COMPLETED,
+                    ended_at_ns=ordered_events[-1].timestamp_ns,
+                )
+        sessions.append(
+            LoadedTelemetrySession(
+                summary=summary,
+                events=ordered_events,
+                sources_loaded=[str(source_path)],
+                warnings=list(warnings or []),
+            )
+        )
+
+    return sessions
+
+
+def _accumulate_loaded_sessions(
+    accumulators: dict[str, _LoadedSessionAccumulator],
+    loaded_sessions: Iterable[LoadedTelemetrySession],
+) -> None:
+    for loaded in loaded_sessions:
+        session_id = loaded.summary.session_id
+        accumulator = accumulators.get(session_id)
+        if accumulator is None:
+            accumulator = _LoadedSessionAccumulator(summary=loaded.summary)
+            accumulators[session_id] = accumulator
+        else:
+            accumulator.summary = _merge_session_summaries(
+                accumulator.summary,
+                loaded.summary,
+            )
+        accumulator.events.extend(loaded.events)
+        accumulator.sources_loaded.update(loaded.sources_loaded)
+        accumulator.warnings.extend(loaded.warnings)
+
+
+def _finalize_loaded_sessions(
+    accumulators: Mapping[str, _LoadedSessionAccumulator],
+) -> list[LoadedTelemetrySession]:
+    ordered_ids = [
+        summary.session_id
+        for summary in sort_session_summaries(
+            accumulator.summary for accumulator in accumulators.values()
+        )
+    ]
+    sessions: list[LoadedTelemetrySession] = []
+    for session_id in ordered_ids:
+        accumulator = accumulators[session_id]
+        events = _dedupe_events(accumulator.events)
+        events.sort(key=lambda event: event.timestamp_ns)
+        sessions.append(
+            LoadedTelemetrySession(
+                summary=accumulator.summary,
+                events=events,
+                sources_loaded=sorted(accumulator.sources_loaded),
+                warnings=_unique_strings(accumulator.warnings),
+            )
+        )
+    return sessions
+
+
+def _unique_strings(values: Iterable[str]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        ordered.append(value)
+    return ordered
+
+
+def load_distributed_artifacts(
+    paths: list[Path],
+    session_id: str | None = None,
+) -> ArtifactLoadResult:
     """Load telemetry events from JSON/CSV files and artifact directories."""
-    events: list[TelemetryEventV2] = []
     warnings: list[str] = []
-    sources_loaded: list[str] = []
+    sources_loaded: set[str] = set()
+    accumulators: dict[str, _LoadedSessionAccumulator] = {}
     rank_allocator = _TimelineRankAllocator()
 
     for input_path in paths:
@@ -211,39 +365,58 @@ def load_distributed_artifacts(paths: list[Path]) -> ArtifactLoadResult:
             continue
 
         if path.is_file():
-            loaded, file_warnings = _load_artifact_file(
+            loaded_sessions, file_warnings = _load_artifact_file(
                 path,
                 rank_allocator=rank_allocator,
             )
-            events.extend(loaded)
+            _accumulate_loaded_sessions(accumulators, loaded_sessions)
             warnings.extend(file_warnings)
-            if loaded:
-                sources_loaded.append(str(path))
+            for loaded in loaded_sessions:
+                sources_loaded.update(loaded.sources_loaded)
             continue
 
         if path.is_dir():
-            loaded, dir_warnings, dir_sources = _load_artifact_directory(
+            loaded_sessions, dir_warnings = _load_artifact_directory(
                 path,
                 rank_allocator=rank_allocator,
             )
-            events.extend(loaded)
+            _accumulate_loaded_sessions(accumulators, loaded_sessions)
             warnings.extend(dir_warnings)
-            sources_loaded.extend(dir_sources)
+            for loaded in loaded_sessions:
+                sources_loaded.update(loaded.sources_loaded)
             continue
 
         warnings.append(f"Unsupported path type: {path}")
 
-    deduped = _dedupe_events(events)
-    deduped.sort(key=lambda event: event.timestamp_ns)
+    sessions = _finalize_loaded_sessions(accumulators)
+    selected: LoadedTelemetrySession | None = None
+    if session_id is not None:
+        selected = next(
+            (loaded for loaded in sessions if loaded.summary.session_id == session_id),
+            None,
+        )
+        if selected is None:
+            raise ValueError(f"Requested session_id not found: {session_id}")
+    else:
+        selected = select_default_session(sessions)
+
+    selected_events = list(selected.events) if selected is not None else []
+    combined_warnings = _unique_strings(
+        list(warnings) + [warning for loaded in sessions for warning in loaded.warnings]
+    )
     return ArtifactLoadResult(
-        events=deduped,
-        warnings=warnings,
-        sources_loaded=sorted(set(sources_loaded)),
+        events=selected_events,
+        sessions=sessions,
+        selected_session_id=(
+            selected.summary.session_id if selected is not None else None
+        ),
+        warnings=combined_warnings,
+        sources_loaded=sorted(sources_loaded),
     )
 
 
 def build_distributed_model(
-    events: list[TelemetryEventV2],
+    events: Sequence[TelemetryCompatibleEvent],
     selected_ranks: set[int] | None = None,
 ) -> DistributedDiagnosticsModel:
     """Build rank-level distributed diagnostics and first-cause indicators."""
@@ -258,7 +431,7 @@ def build_distributed_model(
             warnings=["No telemetry events loaded."],
         )
 
-    grouped: dict[int, list[TelemetryEventV2]] = {}
+    grouped: dict[int, list[TelemetryCompatibleEvent]] = {}
     world_sizes: set[int] = set()
     for event in sorted(events, key=lambda item: item.timestamp_ns):
         grouped.setdefault(event.rank, []).append(event)
@@ -347,7 +520,7 @@ def build_distributed_model(
 
 def _build_rank_row(
     rank: int,
-    rank_events: list[TelemetryEventV2],
+    rank_events: Sequence[TelemetryCompatibleEvent],
     collective_attribution: list[CollectiveAttributionResult],
 ) -> tuple[RankDiagnosticsRow, list[_AnomalyCandidate]]:
     first_event = rank_events[0]
@@ -393,7 +566,7 @@ def _build_rank_row(
 
 def _derive_rank_anomaly_candidates(
     rank: int,
-    rank_events: list[TelemetryEventV2],
+    rank_events: Sequence[TelemetryCompatibleEvent],
     collective_attribution: list[CollectiveAttributionResult],
 ) -> list[_AnomalyCandidate]:
     candidates: list[_AnomalyCandidate] = []
@@ -429,7 +602,7 @@ def _derive_rank_anomaly_candidates(
                 )
 
     gap_findings = analyze_hidden_memory_gaps(
-        events=rank_events,
+        events=cast(Sequence[TelemetryEventV2], rank_events),
         thresholds=_GAP_THRESHOLDS,
         format_memory=format_bytes,
         remediation_by_classification=_EMPTY_REMEDIATION,
@@ -470,11 +643,11 @@ def _derive_rank_anomaly_candidates(
 
 
 def _group_collective_attribution_by_rank(
-    events: list[TelemetryEventV2],
+    events: Sequence[TelemetryCompatibleEvent],
 ) -> dict[int, list[CollectiveAttributionResult]]:
     grouped: dict[int, list[CollectiveAttributionResult]] = {}
     attributions = attribute_collective_memory(
-        events=events,
+        events=cast(Sequence[TelemetryEventV2], events),
         config=_COLLECTIVE_ATTRIBUTION_CONFIG,
     )
     for attribution in attributions:
@@ -533,19 +706,20 @@ def _load_artifact_file(
     path: Path,
     *,
     rank_allocator: _TimelineRankAllocator | None = None,
-) -> tuple[list[TelemetryEventV2], list[str]]:
+) -> tuple[list[LoadedTelemetrySession], list[str]]:
     warnings: list[str] = []
     suffix = path.suffix.lower()
 
-    if suffix == ".json":
+    if suffix in {".json", ".jsonl"}:
         try:
-            events = load_telemetry_events(path, permissive_legacy=True)
+            sessions = load_telemetry_sessions(path, permissive_legacy=True)
             if rank_allocator is not None:
-                rank_allocator.register_events(events)
-            return events, warnings
+                for loaded in sessions:
+                    rank_allocator.register_events(loaded.events)
+            return sessions, warnings
         except Exception as exc:
             if path.name == "telemetry_timeline.json":
-                synthesized, synth_warnings = _synthesize_events_from_timeline(
+                synthesized, synth_warnings = _synthesize_sessions_from_timeline(
                     path,
                     rank_allocator=rank_allocator,
                 )
@@ -554,18 +728,20 @@ def _load_artifact_file(
             return [], warnings
 
     if suffix == ".csv":
-        events, csv_warnings = _load_csv_events(path)
+        sessions, csv_warnings = _load_csv_sessions(path)
         if rank_allocator is not None:
-            rank_allocator.register_events(events)
-        return events, csv_warnings
+            for loaded in sessions:
+                rank_allocator.register_events(loaded.events)
+        return sessions, csv_warnings
 
     warnings.append(f"Unsupported artifact file type: {path}")
     return [], warnings
 
 
-def _load_csv_events(path: Path) -> tuple[list[TelemetryEventV2], list[str]]:
-    events: list[TelemetryEventV2] = []
+def _load_csv_sessions(path: Path) -> tuple[list[LoadedTelemetrySession], list[str]]:
+    events: list[TelemetryEvent] = []
     warnings: list[str] = []
+    default_session_id = stable_legacy_session_id(str(path.resolve()), "csv")
 
     try:
         with path.open("r", encoding="utf-8", newline="") as handle:
@@ -578,6 +754,7 @@ def _load_csv_events(path: Path) -> tuple[list[TelemetryEventV2], list[str]]:
                         permissive_legacy=True,
                         default_collector="legacy.csv",
                         default_sampling_interval_ms=0,
+                        default_session_id=default_session_id,
                     )
                     events.append(event)
                 except Exception as exc:
@@ -585,7 +762,14 @@ def _load_csv_events(path: Path) -> tuple[list[TelemetryEventV2], list[str]]:
     except OSError as exc:
         warnings.append(f"Failed to read CSV file {path}: {exc}")
 
-    return events, warnings
+    return (
+        _load_sessions_from_events(
+            events,
+            source_path=path,
+            warnings=warnings,
+        ),
+        warnings,
+    )
 
 
 def _normalize_csv_record(row: Mapping[str, str]) -> dict[str, Any]:
@@ -624,39 +808,47 @@ def _load_artifact_directory(
     directory: Path,
     *,
     rank_allocator: _TimelineRankAllocator | None = None,
-) -> tuple[list[TelemetryEventV2], list[str], list[str]]:
+) -> tuple[list[LoadedTelemetrySession], list[str]]:
     warnings: list[str] = []
-    sources: list[str] = []
-    events: list[TelemetryEventV2] = []
+    accumulators: dict[str, _LoadedSessionAccumulator] = {}
     allocator = rank_allocator or _TimelineRankAllocator()
+
+    sink_segment_paths = resolve_telemetry_sink_segment_paths(directory)
+    if sink_segment_paths:
+        try:
+            sink_sessions = load_telemetry_sessions(directory, permissive_legacy=True)
+            for loaded in sink_sessions:
+                allocator.register_events(loaded.events)
+            _accumulate_loaded_sessions(accumulators, sink_sessions)
+        except Exception as exc:
+            warnings.append(
+                f"Failed to parse telemetry sink directory {directory}: {exc}"
+            )
 
     candidate_files = _discover_candidate_files(directory)
     for file_path in candidate_files:
         if file_path.name == "telemetry_timeline.json":
             continue
-        loaded, file_warnings = _load_artifact_file(
+        loaded_sessions, file_warnings = _load_artifact_file(
             file_path,
             rank_allocator=allocator,
         )
-        events.extend(loaded)
+        _accumulate_loaded_sessions(accumulators, loaded_sessions)
         warnings.extend(file_warnings)
-        if loaded:
-            sources.append(str(file_path))
 
     timeline_files = sorted(directory.rglob("telemetry_timeline.json"))
     for timeline_file in timeline_files:
-        synthesized, synth_warnings = _synthesize_events_from_timeline(
+        synthesized_sessions, synth_warnings = _synthesize_sessions_from_timeline(
             timeline_file,
             rank_allocator=allocator,
         )
-        events.extend(synthesized)
+        _accumulate_loaded_sessions(accumulators, synthesized_sessions)
         warnings.extend(synth_warnings)
-        if synthesized:
-            sources.append(str(timeline_file))
 
-    if not events:
+    sessions = _finalize_loaded_sessions(accumulators)
+    if not sessions:
         warnings.append(f"No telemetry event payloads found in directory: {directory}")
-    return events, warnings, sources
+    return sessions, warnings
 
 
 def _discover_candidate_files(directory: Path) -> list[Path]:
@@ -674,11 +866,98 @@ def _discover_candidate_files(directory: Path) -> list[Path]:
     return sorted(discovered)
 
 
-def _synthesize_events_from_timeline(
+def _created_iso_to_ns(value: Any) -> int | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+    try:
+        return int(datetime.fromisoformat(text).timestamp() * 1_000_000_000)
+    except ValueError:
+        return None
+
+
+def _summary_with_rank_context(
+    summary: SessionSummary,
+    rank_context: _TimelineRankContext,
+) -> SessionSummary:
+    if (
+        summary.rank == rank_context.rank
+        and summary.local_rank == rank_context.local_rank
+        and summary.world_size == rank_context.world_size
+    ):
+        return summary
+    return SessionSummary(
+        session_id=summary.session_id,
+        status=summary.status,
+        started_at_ns=summary.started_at_ns,
+        ended_at_ns=summary.ended_at_ns,
+        host=summary.host,
+        pid=summary.pid,
+        job_id=summary.job_id,
+        rank=rank_context.rank,
+        local_rank=rank_context.local_rank,
+        world_size=rank_context.world_size,
+        source=summary.source,
+    )
+
+
+def _load_diagnose_session_summary(
+    timeline_file: Path,
+    rank_context: _TimelineRankContext,
+) -> SessionSummary | None:
+    manifest_path = timeline_file.parent / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, Mapping):
+        return None
+
+    session_payload = payload.get("session")
+    if isinstance(session_payload, Mapping):
+        try:
+            return _summary_with_rank_context(
+                session_summary_from_dict(session_payload),
+                rank_context,
+            )
+        except Exception:
+            pass
+
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id.strip():
+        return None
+
+    try:
+        status = normalize_session_status(
+            payload.get("session_status", SESSION_STATUS_INCOMPLETE)
+        )
+    except ValueError:
+        status = SESSION_STATUS_INCOMPLETE
+    started_at_ns = _created_iso_to_ns(payload.get("created_iso"))
+    ended_at_ns = started_at_ns if status != "running" else None
+    return create_session_summary(
+        source="stormlog.diagnose.bundle",
+        status=status,
+        session_id=session_id,
+        started_at_ns=started_at_ns,
+        ended_at_ns=ended_at_ns,
+        host="unknown",
+        pid=-1,
+        rank=rank_context.rank,
+        local_rank=rank_context.local_rank,
+        world_size=rank_context.world_size,
+    )
+
+
+def _synthesize_sessions_from_timeline(
     timeline_file: Path,
     *,
     rank_allocator: _TimelineRankAllocator | None = None,
-) -> tuple[list[TelemetryEventV2], list[str]]:
+) -> tuple[list[LoadedTelemetrySession], list[str]]:
     warnings: list[str] = []
     allocator = rank_allocator or _TimelineRankAllocator()
 
@@ -712,8 +991,24 @@ def _synthesize_events_from_timeline(
         payload=payload,
         rank_allocator=allocator,
     )
+    session_summary = _load_diagnose_session_summary(timeline_file, rank_context)
+    if session_summary is None:
+        session_summary = create_session_summary(
+            source="stormlog.diagnose.timeline",
+            status=SESSION_STATUS_INCOMPLETE,
+            session_id=stable_legacy_session_id(
+                str(timeline_file.resolve()),
+                "diagnose.timeline",
+            ),
+            started_at_ns=int(float(timestamps[0]) * 1_000_000_000),
+            host="unknown",
+            pid=-1,
+            rank=rank_context.rank,
+            local_rank=rank_context.local_rank,
+            world_size=rank_context.world_size,
+        )
 
-    events: list[TelemetryEventV2] = []
+    events: list[TelemetryEvent] = []
     previous_allocated = 0
     previous_timestamp = float(timestamps[0])
 
@@ -725,12 +1020,13 @@ def _synthesize_events_from_timeline(
             int(round((timestamp - previous_timestamp) * 1000)) if index > 0 else 0
         )
         record = {
+            "session_id": session_summary.session_id,
             "timestamp": timestamp,
             "event_type": "sample",
             "collector": "stormlog.diagnose.timeline",
             "sampling_interval_ms": max(0, interval_ms),
-            "pid": -1,
-            "host": "unknown",
+            "pid": session_summary.pid,
+            "host": session_summary.host,
             "device_id": 0,
             "memory_allocated": allocated_bytes,
             "memory_reserved": reserved_bytes,
@@ -738,10 +1034,10 @@ def _synthesize_events_from_timeline(
             "device_used_bytes": max(allocated_bytes, reserved_bytes),
             "device_total_bytes": None,
             "context": "diagnose timeline sample",
-            "job_id": None,
-            "rank": rank_context.rank,
-            "local_rank": rank_context.local_rank,
-            "world_size": rank_context.world_size,
+            "job_id": session_summary.job_id,
+            "rank": session_summary.rank,
+            "local_rank": session_summary.local_rank,
+            "world_size": session_summary.world_size,
             "metadata": {"source": "diagnose.telemetry_timeline"},
         }
         event = telemetry_event_from_record(
@@ -749,17 +1045,25 @@ def _synthesize_events_from_timeline(
             permissive_legacy=True,
             default_collector="stormlog.diagnose.timeline",
             default_sampling_interval_ms=max(0, interval_ms),
+            default_session_id=session_summary.session_id,
         )
         events.append(event)
         previous_allocated = allocated_bytes
         previous_timestamp = timestamp
 
+    sessions = _load_sessions_from_events(
+        events,
+        source_path=timeline_file,
+        warnings=[],
+        summary_by_id={session_summary.session_id: session_summary},
+    )
     warnings.append(
         "Synthesized telemetry events from telemetry_timeline.json; "
         f"assigned rank={rank_context.rank} world_size={rank_context.world_size} "
-        f"(source={rank_context.source})."
+        f"(source={rank_context.source}, session_id={session_summary.session_id}, "
+        f"status={session_summary.status})."
     )
-    return events, warnings
+    return sessions, warnings
 
 
 def _resolve_timeline_rank_context(
@@ -863,11 +1167,12 @@ def _coerce_optional_int(value: Any, *, minimum: int) -> int | None:
     return parsed
 
 
-def _dedupe_events(events: Iterable[TelemetryEventV2]) -> list[TelemetryEventV2]:
-    unique: list[TelemetryEventV2] = []
+def _dedupe_events(events: Iterable[TelemetryEvent]) -> list[TelemetryEvent]:
+    unique: list[TelemetryEvent] = []
     seen: set[tuple[Any, ...]] = set()
     for event in events:
         key = (
+            event.session_id,
             event.timestamp_ns,
             event.rank,
             event.local_rank,

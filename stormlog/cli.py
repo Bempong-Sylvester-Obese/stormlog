@@ -348,6 +348,12 @@ Examples:
         default="plots",
         help="Directory for visualization plots (default: plots)",
     )
+    analyze_parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        help="Explicit telemetry session id to analyze when multiple sessions are present",
+    )
 
     # Diagnose command
     diagnose_parser = subparsers.add_parser(
@@ -967,15 +973,45 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print(f"Error: Input file '{input_file}' not found")
         return 1
 
-    (load_telemetry_events,) = _import_runtime_symbols(
-        ".telemetry", ("load_telemetry_events",), "The analyze command"
+    (load_telemetry_sessions,) = _import_runtime_symbols(
+        ".telemetry", ("load_telemetry_sessions",), "The analyze command"
     )
 
     events: list[Any] | None = None
     telemetry_note: str | None = None
+    session_note: str | None = None
     data: Any = None
+    requested_session_id = getattr(args, "session_id", None)
     try:
-        events = load_telemetry_events(input_path, permissive_legacy=True)
+        loaded_sessions = load_telemetry_sessions(input_path, permissive_legacy=True)
+        if loaded_sessions:
+            selected_session = None
+            if requested_session_id is not None:
+                selected_session = next(
+                    (
+                        loaded
+                        for loaded in loaded_sessions
+                        if loaded.summary.session_id == requested_session_id
+                    ),
+                    None,
+                )
+                if selected_session is None:
+                    print(
+                        "Error parsing telemetry events: Requested session_id not found: "
+                        f"{requested_session_id}"
+                    )
+                    return 1
+            else:
+                selected_session = loaded_sessions[0]
+            events = list(selected_session.events)
+            session_note = (
+                "Telemetry session selected: "
+                f"{selected_session.summary.session_id} "
+                f"({selected_session.summary.status}, "
+                f"started_at_ns={selected_session.summary.started_at_ns})."
+            )
+        else:
+            events = []
     except ValueError as exc:
         if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
             print(f"Error parsing telemetry events: {exc}")
@@ -1012,6 +1048,21 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         )
         analyzer = MemoryAnalyzer()
         report = analyzer.generate_optimization_report(events=events)
+        if session_note:
+            report["session"] = {
+                "selected_session_id": (
+                    requested_session_id
+                    if requested_session_id is not None
+                    else (
+                        loaded_sessions[0].summary.session_id
+                        if loaded_sessions
+                        else None
+                    )
+                ),
+                "discovered_session_ids": [
+                    loaded.summary.session_id for loaded in loaded_sessions
+                ],
+            }
     else:
         report = {
             "summary": {
@@ -1031,6 +1082,8 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         report=report,
     )
     print(summary_text)
+    if session_note:
+        print(session_note)
 
     if args.output:
         output_path = Path(args.output)

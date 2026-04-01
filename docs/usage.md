@@ -66,6 +66,11 @@ This gives you:
 - a readable analysis artifact
 - a portable diagnose bundle you can load later
 
+For long-running captures, Stormlog now treats every `track` run or standalone
+`diagnose` bundle as its own session. That makes it possible to reuse the same
+sink directory across runs and still reconstruct or audit one capture at a
+time.
+
 If you are working from a source checkout, you can optionally add the maintained
 example smoke paths:
 
@@ -183,6 +188,13 @@ session alive, exposes collector health through `get_statistics()`, and emits
 `collector_degraded` / `collector_recovered` events instead of exporting
 synthetic zero-valued samples.
 
+The tracker session lifecycle is:
+
+- session begins after tracker startup succeeds and before the first persisted record
+- clean `stop_tracking()` finalization marks the session `completed`
+- recovered append-only runs are marked `interrupted`
+- partial artifacts without provable shutdown remain `incomplete`
+
 For CUDA-only OOM debugging, enable native allocator-history capture and wrap
 the risky block with `capture_oom()`:
 
@@ -200,6 +212,8 @@ with tracker.capture_oom(context="train-step"):
 
 If that block raises a CUDA OOM, the OOM dump bundle is extended with native
 snapshot artifacts and pointer-attribution summaries.
+The OOM manifest and metadata also include the owning `session_id`, so the dump
+can be traced back to the exact tracking run that produced it.
 
 ### CPU tracker
 
@@ -212,6 +226,26 @@ tracker.start_tracking()
 tracker.stop_tracking()
 print(tracker.get_statistics()["total_events"])
 ```
+
+## Reusing a sink directory across runs
+
+You can keep a long-lived sink directory and still separate captures
+deterministically:
+
+```bash
+gpumemprof track --telemetry-sink-dir ./live_sink --duration 30
+gpumemprof track --telemetry-sink-dir ./live_sink --duration 30
+gpumemprof analyze ./live_sink
+gpumemprof analyze ./live_sink --session-id "<session-id-from-report>"
+```
+
+The default loader behavior is:
+
+1. newest `completed`
+2. newest `interrupted`
+3. newest `incomplete`
+
+Use explicit session selection when you want an older or partial run.
 
 ## Plot exports
 
@@ -244,6 +278,7 @@ Use the TUI when you want:
 - quick CSV/JSON export from an active tracker
 - PNG or HTML timeline export from the current session
 - artifact loading and distributed diagnostics in one place
+- session-aware switching between multiple captures loaded from the same artifact root
 
 See the [TUI Guide](tui.md) for the TUI flow and the [CLI Guide](cli.md) for scriptable automation.
 

@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from stormlog.telemetry import load_telemetry_sessions
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 
@@ -27,10 +28,14 @@ def test_append_only_sink_writes_jsonl_segment_and_manifest(tmp_path: Path) -> N
     sink.close()
 
     manifest = json.loads((tmp_path / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
+    assert len(manifest["sessions"]) == 1
+    session = manifest["sessions"][0]
+    assert session["status"] == "completed"
     assert len(manifest["segments"]) == 1
     assert manifest["segments"][0]["event_count"] == 1
     assert manifest["segments"][0]["closed"] is True
+    assert manifest["segments"][0]["session_id"] == session["session_id"]
 
     records = _segment_records(tmp_path / manifest["segments"][0]["filename"])
     assert records == [{"event_type": "start", "schema_version": 2, "seq": 1}]
@@ -157,6 +162,83 @@ def test_append_only_sink_resume_skips_stale_manifest_segment_reuse(
         resumed_records.extend(_segment_records(next_segment))
 
     assert [record["seq"] for record in resumed_records] == [3, 4]
+
+
+def test_append_only_sink_recovery_marks_prior_session_interrupted(
+    tmp_path: Path,
+) -> None:
+    config = TelemetrySinkConfig(
+        root_dir=tmp_path,
+        flush_every_events=1,
+        flush_every_seconds=1.0,
+    )
+
+    first_sink = AppendOnlyTelemetrySink(config)
+    first_sink.append(
+        {
+            "schema_version": 3,
+            "session_id": "session-a",
+            "event_type": "start",
+            "timestamp_ns": 1,
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1,
+            "host": "host",
+            "device_id": 0,
+            "allocator_allocated_bytes": 1,
+            "allocator_reserved_bytes": 1,
+            "allocator_active_bytes": None,
+            "allocator_inactive_bytes": None,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": 1,
+            "device_free_bytes": None,
+            "device_total_bytes": None,
+            "context": "first",
+            "metadata": {},
+        }
+    )
+    if first_sink._handle is not None:
+        first_sink._handle.close()
+        first_sink._handle = None
+    first_sink._stop_flush_thread()
+
+    recovered_sink = AppendOnlyTelemetrySink(config)
+    recovered_sink.append(
+        {
+            "schema_version": 3,
+            "session_id": "session-b",
+            "event_type": "start",
+            "timestamp_ns": 2,
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1,
+            "host": "host",
+            "device_id": 0,
+            "allocator_allocated_bytes": 1,
+            "allocator_reserved_bytes": 1,
+            "allocator_active_bytes": None,
+            "allocator_inactive_bytes": None,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": 1,
+            "device_free_bytes": None,
+            "device_total_bytes": None,
+            "context": "second",
+            "metadata": {},
+        }
+    )
+    recovered_sink.close()
+
+    sessions = load_telemetry_sessions(tmp_path)
+    assert [session.summary.session_id for session in sessions] == [
+        "session-b",
+        "session-a",
+    ]
+    assert [session.summary.status for session in sessions] == [
+        "completed",
+        "interrupted",
+    ]
+    assert [event.context for event in sessions[0].events] == ["second"]
+    assert [event.context for event in sessions[1].events] == ["first"]
 
 
 def test_telemetry_sink_config_rejects_total_retention_below_rollover() -> None:

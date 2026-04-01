@@ -31,7 +31,13 @@ from textual.widgets import (
     TabPane,
 )
 
-from stormlog.telemetry import TelemetryEventV2
+from stormlog.session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_RUNNING,
+    create_session_summary,
+    select_default_session,
+)
+from stormlog.telemetry import LoadedTelemetrySession, TelemetryEvent
 from stormlog.utils import format_bytes, get_gpu_info, get_system_info
 
 try:
@@ -255,7 +261,9 @@ class GPUMemoryProfilerTUI(App):
     _last_monitor_stats: dict[str, Any]
     _last_timeline: dict[str, list[Any]]
     _diagnostics_source: str
-    _diagnostics_events: list[TelemetryEventV2]
+    _diagnostics_events: list[TelemetryEvent]
+    _diagnostics_sessions: list[LoadedTelemetrySession]
+    _diagnostics_selected_session_id: str | None
     _diagnostics_selected_ranks: set[int] | None
     _diagnostics_active_rank: int | None
     _diagnostics_last_paths: list[Path]
@@ -319,6 +327,10 @@ class GPUMemoryProfilerTUI(App):
         self.diagnostics_path_input = Input(
             placeholder="artifacts/run_rank0.json,artifacts/run_rank1.json",
             id="diagnostics-path-input",
+        )
+        self.diagnostics_session_input = Input(
+            placeholder="auto-select latest completed session",
+            id="diagnostics-session-input",
         )
         self.diagnostics_rank_filter_input = Input(
             value="all",
@@ -494,6 +506,15 @@ class GPUMemoryProfilerTUI(App):
                     ),
                     Horizontal(
                         self.diagnostics_path_input,
+                        self.diagnostics_session_input,
+                        Button(
+                            "Apply Session",
+                            id="btn-diag-apply-session",
+                            variant="primary",
+                        ),
+                        id="diagnostics-controls-row2",
+                    ),
+                    Horizontal(
                         self.diagnostics_rank_filter_input,
                         Button(
                             "Apply Filter",
@@ -505,7 +526,7 @@ class GPUMemoryProfilerTUI(App):
                             id="btn-diag-reset-filter",
                             variant="warning",
                         ),
-                        id="diagnostics-controls-row2",
+                        id="diagnostics-controls-row3",
                     ),
                     self.diagnostics_rank_table,
                     self.diagnostics_timeline_canvas,
@@ -650,6 +671,8 @@ class GPUMemoryProfilerTUI(App):
             await self.load_diagnostics_artifacts()
         elif button_id == "btn-diag-refresh":
             await self.refresh_diagnostics()
+        elif button_id == "btn-diag-apply-session":
+            await self.apply_diagnostics_session_selection()
         elif button_id == "btn-diag-apply-filter":
             self.apply_diagnostics_rank_filter()
         elif button_id == "btn-diag-reset-filter":
@@ -1188,13 +1211,21 @@ class GPUMemoryProfilerTUI(App):
                 "Diagnostics",
                 "No live telemetry events found. Start tracking and generate events first.",
             )
-            self._set_diagnostics_events([], source="live", reset_filter=True)
+            self._set_diagnostics_sessions([], source="live", reset_filter=True)
             return
 
-        self._set_diagnostics_events(events, source="live", reset_filter=True)
+        live_sessions = self._build_live_diagnostics_sessions(session, events)
+        self._set_diagnostics_sessions(
+            live_sessions,
+            source="live",
+            reset_filter=True,
+        )
+        self._log_discovered_diagnostic_sessions(live_sessions)
         self.log_diagnostics_message(
             "Diagnostics",
-            f"Loaded {len(events)} live telemetry events for distributed diagnostics.",
+            "Loaded "
+            f"{len(events)} live telemetry events for distributed diagnostics "
+            f"(session={self._diagnostics_selected_session_id}).",
         )
 
     async def load_diagnostics_artifacts(self) -> None:
@@ -1207,22 +1238,29 @@ class GPUMemoryProfilerTUI(App):
             return
 
         self._diagnostics_last_paths = paths
+        requested_session_id = self._requested_diagnostics_session_id()
         try:
-            result = await asyncio.to_thread(load_distributed_artifacts, paths)
+            result = await asyncio.to_thread(
+                load_distributed_artifacts,
+                paths,
+                requested_session_id,
+            )
         except Exception as exc:
-            self._set_diagnostics_events(
+            self._set_diagnostics_sessions(
                 [],
                 source="artifacts",
                 reset_filter=True,
                 extra_warnings=[f"Failed to load artifacts: {exc}"],
             )
             return
-        self._set_diagnostics_events(
-            result.events,
+        self._set_diagnostics_sessions(
+            result.sessions,
             source="artifacts",
             reset_filter=True,
+            selected_session_id=result.selected_session_id,
             extra_warnings=result.warnings,
         )
+        self._log_discovered_diagnostic_sessions(result.sessions)
         if result.sources_loaded:
             self.log_diagnostics_message(
                 "Diagnostics",
@@ -1231,7 +1269,9 @@ class GPUMemoryProfilerTUI(App):
 
         self.log_diagnostics_message(
             "Diagnostics",
-            f"Loaded {len(result.events)} artifact telemetry events.",
+            "Loaded "
+            f"{len(result.events)} artifact telemetry events "
+            f"(session={result.selected_session_id}).",
         )
 
     async def refresh_diagnostics(self) -> None:
@@ -1244,7 +1284,12 @@ class GPUMemoryProfilerTUI(App):
                 )
                 return
             events = session.get_telemetry_events()
-            self._set_diagnostics_events(events, source="live")
+            live_sessions = self._build_live_diagnostics_sessions(session, events)
+            self._set_diagnostics_sessions(
+                live_sessions,
+                source="live",
+                selected_session_id=self._requested_diagnostics_session_id(),
+            )
             self.log_diagnostics_message(
                 "Diagnostics",
                 f"Refreshed live diagnostics ({len(events)} events).",
@@ -1262,23 +1307,31 @@ class GPUMemoryProfilerTUI(App):
                 )
                 return
             self._diagnostics_last_paths = paths
+            requested_session_id = self._requested_diagnostics_session_id()
             try:
-                result = await asyncio.to_thread(load_distributed_artifacts, paths)
+                result = await asyncio.to_thread(
+                    load_distributed_artifacts,
+                    paths,
+                    requested_session_id,
+                )
             except Exception as exc:
-                self._set_diagnostics_events(
+                self._set_diagnostics_sessions(
                     [],
                     source="artifacts",
                     extra_warnings=[f"Failed to refresh artifacts: {exc}"],
                 )
                 return
-            self._set_diagnostics_events(
-                result.events,
+            self._set_diagnostics_sessions(
+                result.sessions,
                 source="artifacts",
+                selected_session_id=result.selected_session_id,
                 extra_warnings=result.warnings,
             )
+            self._log_discovered_diagnostic_sessions(result.sessions)
             self.log_diagnostics_message(
                 "Diagnostics",
-                f"Refreshed artifact diagnostics ({len(result.events)} events).",
+                "Refreshed artifact diagnostics "
+                f"({len(result.events)} events, session={result.selected_session_id}).",
             )
             return
 
@@ -1290,6 +1343,63 @@ class GPUMemoryProfilerTUI(App):
         self.log_diagnostics_message(
             "Diagnostics",
             "No diagnostics source loaded yet. Use Load Live or Load Artifacts first.",
+        )
+
+    async def apply_diagnostics_session_selection(self) -> None:
+        if self._diagnostics_source == "artifacts":
+            paths = list(self._diagnostics_last_paths)
+            if not paths:
+                paths = self._parse_diagnostics_paths(self.diagnostics_path_input.value)
+            if not paths:
+                self.log_diagnostics_message(
+                    "Diagnostics",
+                    "Load artifact paths before selecting a session.",
+                )
+                return
+            self._diagnostics_last_paths = paths
+            requested_session_id = self._requested_diagnostics_session_id()
+            try:
+                result = await asyncio.to_thread(
+                    load_distributed_artifacts,
+                    paths,
+                    requested_session_id,
+                )
+            except Exception as exc:
+                self._set_diagnostics_sessions(
+                    [],
+                    source="artifacts",
+                    extra_warnings=[f"Failed to select session: {exc}"],
+                )
+                return
+            self._set_diagnostics_sessions(
+                result.sessions,
+                source="artifacts",
+                selected_session_id=result.selected_session_id,
+                extra_warnings=result.warnings,
+            )
+            self._log_discovered_diagnostic_sessions(result.sessions)
+            self.log_diagnostics_message(
+                "Diagnostics",
+                f"Selected artifact session: {result.selected_session_id}",
+            )
+            return
+
+        if not self._diagnostics_sessions:
+            self.log_diagnostics_message(
+                "Diagnostics",
+                "Load diagnostics data before selecting a session.",
+            )
+            return
+
+        requested_session_id = self._requested_diagnostics_session_id()
+        self._set_diagnostics_sessions(
+            self._diagnostics_sessions,
+            source=self._diagnostics_source,
+            selected_session_id=requested_session_id,
+        )
+        self.log_diagnostics_message(
+            "Diagnostics",
+            f"Selected session: {self._diagnostics_selected_session_id}",
         )
 
     def apply_diagnostics_rank_filter(self) -> None:
@@ -1328,16 +1438,108 @@ class GPUMemoryProfilerTUI(App):
         parts = [part.strip() for part in (value or "").split(",") if part.strip()]
         return [Path(part).expanduser() for part in parts]
 
-    def _set_diagnostics_events(
+    def _requested_diagnostics_session_id(self) -> str | None:
+        text = (self.diagnostics_session_input.value or "").strip()
+        if not text or text.lower() in {"auto", "default", "latest"}:
+            return None
+        return text
+
+    def _build_live_diagnostics_sessions(
         self,
-        events: list[TelemetryEventV2],
+        session: Any,
+        events: list[TelemetryEvent],
+    ) -> list[LoadedTelemetrySession]:
+        summary = (
+            session.get_session_summary()
+            if hasattr(session, "get_session_summary")
+            else None
+        )
+        if summary is None and events:
+            status = (
+                SESSION_STATUS_RUNNING
+                if session.is_active
+                else SESSION_STATUS_COMPLETED
+            )
+            summary = create_session_summary(
+                source="stormlog.tui.live",
+                status=status,
+                session_id=events[0].session_id,
+                started_at_ns=events[0].timestamp_ns,
+                ended_at_ns=(
+                    None
+                    if status == SESSION_STATUS_RUNNING
+                    else events[-1].timestamp_ns
+                ),
+                host=events[0].host,
+                pid=events[0].pid,
+                job_id=events[0].job_id,
+                rank=events[0].rank,
+                local_rank=events[0].local_rank,
+                world_size=events[0].world_size,
+            )
+        if summary is None:
+            return []
+        return [
+            LoadedTelemetrySession(
+                summary=summary,
+                events=list(events),
+                sources_loaded=["live"],
+                warnings=[],
+            )
+        ]
+
+    def _log_discovered_diagnostic_sessions(
+        self,
+        sessions: list[LoadedTelemetrySession],
+    ) -> None:
+        if not sessions:
+            return
+        details = ", ".join(
+            f"{loaded.summary.session_id} [{loaded.summary.status}] ({len(loaded.events)} events)"
+            for loaded in sessions
+        )
+        self.log_diagnostics_message("Sessions", f"Discovered sessions: {details}")
+
+    def _set_diagnostics_sessions(
+        self,
+        sessions: list[LoadedTelemetrySession],
         *,
         source: str,
         reset_filter: bool = False,
+        selected_session_id: str | None = None,
         extra_warnings: list[str] | None = None,
     ) -> None:
         self._diagnostics_source = source
-        self._diagnostics_events = list(events)
+        self._diagnostics_sessions = list(sessions)
+        selected: LoadedTelemetrySession | None = None
+        if sessions:
+            requested = (
+                selected_session_id
+                if selected_session_id is not None
+                else self._requested_diagnostics_session_id()
+            )
+            if requested is not None:
+                selected = next(
+                    (
+                        loaded
+                        for loaded in sessions
+                        if loaded.summary.session_id == requested
+                    ),
+                    None,
+                )
+                if selected is None:
+                    extra_warnings = list(extra_warnings or []) + [
+                        f"Requested session not found: {requested}"
+                    ]
+            if selected is None:
+                selected = select_default_session(sessions)
+        self._diagnostics_selected_session_id = (
+            selected.summary.session_id if selected is not None else None
+        )
+        self._diagnostics_events = list(selected.events) if selected is not None else []
+        self.diagnostics_session_input.value = (
+            self._diagnostics_selected_session_id or ""
+        )
         if reset_filter:
             self._diagnostics_selected_ranks = None
             self.diagnostics_rank_filter_input.value = "all"
@@ -1624,6 +1826,8 @@ class GPUMemoryProfilerTUI(App):
         self.recent_alerts = []
         self._diagnostics_source = "none"
         self._diagnostics_events = []
+        self._diagnostics_sessions = []
+        self._diagnostics_selected_session_id = None
         self._diagnostics_selected_ranks = None
         self._diagnostics_active_rank = None
         self._diagnostics_last_paths = []

@@ -40,7 +40,7 @@ class _TrackerHarness:
         self.sampling_interval = 0.1
         self.enable_native_cuda_history = enable_native_cuda_history
         self.native_history_max_entries = 256
-        self.last_oom_dump_path = None
+        self.last_oom_dump_path: str | None = None
         self.distributed_identity = {
             "job_id": "test-job",
             "rank": 0,
@@ -104,6 +104,15 @@ class _TrackerHarness:
         self, context: str = "runtime", metadata: dict[str, object] | None = None
     ) -> Any:
         return MemoryTracker.capture_oom(self, context=context, metadata=metadata)  # type: ignore[arg-type, unused-ignore]
+
+
+def _raise_cuda_oom_in_capture(
+    harness: _TrackerHarness,
+    *,
+    context: str,
+) -> None:
+    with harness.capture_oom(context=context):
+        raise RuntimeError("CUDA out of memory in context")
 
 
 def test_classify_oom_runtime_error_pattern() -> None:
@@ -316,12 +325,16 @@ def test_capture_oom_with_native_history_adds_snapshot_files(
         _fake_capture,
     )
 
-    with pytest.raises(RuntimeError, match="out of memory"):
-        with harness.capture_oom(context="capture-oom"):
-            raise RuntimeError("CUDA out of memory in context")
+    try:
+        _raise_cuda_oom_in_capture(harness, context="capture-oom")
+    except RuntimeError as exc:
+        assert "out of memory" in str(exc)
+    else:
+        pytest.fail("Expected capture_oom to re-raise the CUDA OOM")
 
-    assert harness.last_oom_dump_path is not None  # type: ignore[unreachable, unused-ignore]
-    bundle_dir = Path(harness.last_oom_dump_path)  # type: ignore[arg-type, unused-ignore]
+    dump_path = harness.last_oom_dump_path
+    assert dump_path is not None
+    bundle_dir = Path(dump_path)
     manifest = json.loads((bundle_dir / "manifest.json").read_text(encoding="utf-8"))
     metadata = json.loads((bundle_dir / "metadata.json").read_text(encoding="utf-8"))
 
@@ -359,8 +372,7 @@ def test_capture_oom_skips_native_history_when_oom_recorder_disabled(
     )
 
     with pytest.raises(RuntimeError, match="out of memory"):
-        with harness.capture_oom(context="capture-oom"):
-            raise RuntimeError("CUDA out of memory in context")
+        _raise_cuda_oom_in_capture(harness, context="capture-oom")
 
     assert calls == []
     assert harness.last_oom_dump_path is None
@@ -404,8 +416,7 @@ def test_capture_oom_reapplies_retention_after_native_history_writes(
     )
 
     with pytest.raises(RuntimeError, match="out of memory"):
-        with harness.capture_oom(context="capture-oom"):
-            raise RuntimeError("CUDA out of memory in context")
+        _raise_cuda_oom_in_capture(harness, context="capture-oom")
 
     bundles = list((tmp_path / "oom_dumps").glob("oom_dump_*"))
     total_size = 0

@@ -19,20 +19,36 @@ except ImportError as exc:
     get_pt_results = None
     clear_pt_results = None
 
-try:
-    from stormlog.tensorflow.context_profiler import (
-        clear_profiles as _clear_tf_profiles,
-    )
-    from stormlog.tensorflow.context_profiler import (
-        get_profile_summaries as _get_tf_summaries,
-    )
+get_tf_summaries: Optional[Callable[..., List[Dict[str, Any]]]] = None
+clear_tf_profiles: Optional[Callable[[], None]] = None
+_tf_profiles_import_attempted = False
 
-    get_tf_summaries: Optional[Callable[..., List[Dict[str, Any]]]] = _get_tf_summaries
-    clear_tf_profiles: Optional[Callable[[], None]] = _clear_tf_profiles
-except ImportError as exc:
-    logger.debug("TensorFlow context profiler unavailable: %s", exc)
-    get_tf_summaries = None
-    clear_tf_profiles = None
+
+def _ensure_tensorflow_profile_helpers() -> None:
+    """Import TensorFlow profile helpers lazily for import hardening."""
+    global clear_tf_profiles
+    global get_tf_summaries
+    global _tf_profiles_import_attempted
+
+    if _tf_profiles_import_attempted:
+        return
+    _tf_profiles_import_attempted = True
+
+    try:
+        from stormlog.tensorflow.context_profiler import (
+            clear_profiles as _clear_tf_profiles,
+        )
+        from stormlog.tensorflow.context_profiler import (
+            get_profile_summaries as _get_tf_summaries,
+        )
+    except Exception as exc:
+        logger.debug("TensorFlow context profiler unavailable: %s", exc)
+        get_tf_summaries = None
+        clear_tf_profiles = None
+        return
+
+    get_tf_summaries = _get_tf_summaries
+    clear_tf_profiles = _clear_tf_profiles
 
 
 @dataclass
@@ -96,6 +112,7 @@ def clear_pytorch_profiles() -> bool:
 
 def fetch_tensorflow_profiles(limit: int = 15) -> List[ProfileRow]:
     """Return aggregated TensorFlow profile summaries."""
+    _ensure_tensorflow_profile_helpers()
     if get_tf_summaries is None:
         return []
 
@@ -132,6 +149,7 @@ def fetch_tensorflow_profiles(limit: int = 15) -> List[ProfileRow]:
 
 def clear_tensorflow_profiles() -> bool:
     """Clear TensorFlow profile summaries if available."""
+    _ensure_tensorflow_profile_helpers()
     if clear_tf_profiles is None:
         return False
 

@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, Callable, List
+from typing import Any, Callable, List, cast
 from unittest.mock import patch
 
 import pytest
@@ -446,7 +446,8 @@ class TestCPUMemoryTracker:
             reader = csv.DictReader(f)
             rows = list(reader)
         assert len(rows) == 1
-        assert rows[0]["schema_version"] == "2"
+        assert rows[0]["schema_version"] == "3"
+        assert rows[0]["session_id"]
         assert rows[0]["event_type"] == "allocation"
         assert rows[0]["collector"] == "stormlog.cpu_tracker"
         assert rows[0]["context"] == "csv_test"
@@ -467,7 +468,8 @@ class TestCPUMemoryTracker:
         with open(filepath) as f:
             data = json.load(f)
         assert len(data) == 1
-        assert data[0]["schema_version"] == 2
+        assert data[0]["schema_version"] == 3
+        assert data[0]["session_id"]
         assert data[0]["event_type"] == "deallocation"
         assert data[0]["collector"] == "stormlog.cpu_tracker"
         assert isinstance(data[0]["sampling_interval_ms"], int)
@@ -545,7 +547,7 @@ class TestCPUMemoryTracker:
         mock_cls.return_value = _make_mock_process(rss=2048)
         tracker = CPUMemoryTracker()
         sink = _FailingSink(fail_on={"append"})
-        tracker._telemetry_sink = sink
+        tracker._telemetry_sink = cast(Any, sink)
 
         tracker._add_event("allocation", 10, "sink_failure")
 
@@ -560,7 +562,7 @@ class TestCPUMemoryTracker:
         mock_cls.return_value = _make_mock_process(rss=2048)
         tracker = CPUMemoryTracker()
         sink = _FailingSink(fail_on={"flush"})
-        tracker._telemetry_sink = sink
+        tracker._telemetry_sink = cast(Any, sink)
 
         tracker._flush_telemetry_sink()
 
@@ -576,7 +578,7 @@ class TestCPUMemoryTracker:
         tracker = CPUMemoryTracker()
         tracker.is_tracking = True
         sink = _FailingSink(fail_on={"close"})
-        tracker._telemetry_sink = sink
+        tracker._telemetry_sink = cast(Any, sink)
 
         tracker.stop_tracking()
 

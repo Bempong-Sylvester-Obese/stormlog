@@ -6,7 +6,7 @@ import json
 import time
 from argparse import Namespace
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, cast
 
 import pytest
 
@@ -66,7 +66,7 @@ class _FailingSink:
             raise OSError("disk full")
 
 
-def test_tf_tracker_emits_v2_event_records(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tf_tracker_emits_v3_event_records(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
 
     tracker = tf_tracker.MemoryTracker(
@@ -82,7 +82,9 @@ def test_tf_tracker_emits_v2_event_records(monkeypatch: pytest.MonkeyPatch) -> N
 
     assert result.events
     first = result.events[0]
-    assert first["schema_version"] == 2
+    assert first["schema_version"] == 3
+    assert isinstance(first["session_id"], str)
+    assert first["session_id"]
     assert first["collector"] == "stormlog.tensorflow.memory_tracker"
     assert first["job_id"] is None
     assert first["rank"] == 0
@@ -155,7 +157,9 @@ def test_tf_cli_track_output_normalizes_legacy_events(
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["events"]
     event = payload["events"][0]
-    assert event["schema_version"] == 2
+    assert event["schema_version"] == 3
+    assert isinstance(event["session_id"], str)
+    assert event["session_id"]
     assert event["collector"] == "stormlog.tensorflow.memory_tracker"
     validate_telemetry_record(event)
 
@@ -286,7 +290,7 @@ def test_tf_cli_track_passes_telemetry_sink_config_to_tracker(
     )
 
     assert exit_code == 0
-    telemetry_sink_config = created["telemetry_sink_config"]
+    telemetry_sink_config = cast(TelemetrySinkConfig, created["telemetry_sink_config"])
     assert telemetry_sink_config.root_dir == tf_cli.Path("tf_sink")
     assert telemetry_sink_config.flush_every_seconds == 4.0
     assert telemetry_sink_config.rollover_max_bytes == 12 * 1024 * 1024
@@ -422,7 +426,7 @@ def test_tf_tracker_stop_tracking_disables_sink_after_close_failure(
 
     result = tracker.stop_tracking()
 
-    assert result.events == []
+    assert [event["event_type"] for event in result.events] == ["start", "stop"]
     assert tracker._telemetry_sink is None
     assert sink.close_calls >= 1
 
@@ -497,4 +501,8 @@ def test_tf_tracker_uses_session_wall_clock_for_failure_only_runs(
     assert result.end_time == pytest.approx(103.0)
     assert result.duration == pytest.approx(3.0)
     assert result.memory_usage == []
-    assert [event["event_type"] for event in result.events] == ["collector_degraded"]
+    assert [event["event_type"] for event in result.events] == [
+        "start",
+        "collector_degraded",
+        "stop",
+    ]

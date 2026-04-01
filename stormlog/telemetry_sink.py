@@ -6,14 +6,26 @@ import json
 import os
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, TextIO
+
+from .session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INTERRUPTED,
+    SESSION_STATUS_RUNNING,
+    SessionSummary,
+    create_session_summary,
+    now_ns,
+    session_summary_from_dict,
+    session_summary_to_dict,
+    update_session_summary,
+)
 
 MANIFEST_FILENAME = "manifest.json"
 SEGMENT_PREFIX = "segment-"
 SEGMENT_SUFFIX = ".jsonl"
-SINK_SCHEMA_VERSION = 1
+SINK_SCHEMA_VERSION = 2
 
 
 @dataclass
@@ -47,11 +59,24 @@ class TelemetrySinkConfig:
 
 
 @dataclass
-class _SegmentState:
+class TelemetrySinkSegment:
+    """One JSONL segment tracked by the append-only sink manifest."""
+
     filename: str
     event_count: int
     size_bytes: int
     closed: bool
+    session_id: str | None = None
+
+
+@dataclass
+class TelemetrySinkManifest:
+    """Parsed append-only sink manifest with session ledger and segments."""
+
+    schema_version: int
+    format: str
+    sessions: list[SessionSummary] = field(default_factory=list)
+    segments: list[TelemetrySinkSegment] = field(default_factory=list)
 
 
 class AppendOnlyTelemetrySink:
@@ -62,7 +87,9 @@ class AppendOnlyTelemetrySink:
         self.root_dir = config.root_dir
         self.root_dir.mkdir(parents=True, exist_ok=True)
         self._manifest_path = self.root_dir / MANIFEST_FILENAME
-        self._segments: list[_SegmentState] = []
+        self._segments: list[TelemetrySinkSegment] = []
+        self._sessions: dict[str, SessionSummary] = {}
+        self._active_session_id: str | None = None
         self._next_segment_index = 1
         self._buffer: list[str] = []
         self._buffered_event_count = 0
@@ -74,10 +101,41 @@ class AppendOnlyTelemetrySink:
         self._closed = False
         self._load_existing_state()
 
+    def start_session(self, summary: SessionSummary | None = None) -> SessionSummary:
+        """Register the active session for subsequent records."""
+        with self._lock:
+            if self._active_session_id is not None:
+                active = self._sessions.get(self._active_session_id)
+                if active is not None:
+                    return active
+
+            resolved = summary or create_session_summary(
+                source="stormlog.telemetry_sink",
+                status=SESSION_STATUS_RUNNING,
+            )
+            resolved = update_session_summary(
+                resolved,
+                status=SESSION_STATUS_RUNNING,
+                ended_at_ns=None,
+            )
+            self._sessions[resolved.session_id] = resolved
+            self._active_session_id = resolved.session_id
+            self._closed = False
+            self._write_manifest_locked()
+            return resolved
+
+    def current_session(self) -> SessionSummary | None:
+        """Return the active session summary, if any."""
+        with self._lock:
+            if self._active_session_id is None:
+                return None
+            return self._sessions.get(self._active_session_id)
+
     def append(self, record: Mapping[str, Any]) -> None:
         with self._lock:
             self._ensure_flush_thread_locked()
             self._closed = False
+            self._ensure_active_session_locked(record)
             self._buffer.append(json.dumps(dict(record), sort_keys=True) + "\n")
             self._buffered_event_count += 1
             self._flush_locked(force=False)
@@ -86,7 +144,7 @@ class AppendOnlyTelemetrySink:
         with self._lock:
             self._flush_locked(force=force)
 
-    def close(self) -> None:
+    def close(self, session_status: str = SESSION_STATUS_COMPLETED) -> None:
         with self._lock:
             self._flush_locked(force=True)
             if self._handle is not None:
@@ -95,9 +153,42 @@ class AppendOnlyTelemetrySink:
             current = self._current_segment()
             if current is not None and not current.closed:
                 current.closed = True
-                self._write_manifest_locked()
+            if self._active_session_id is not None:
+                active = self._sessions.get(self._active_session_id)
+                if active is not None:
+                    self._sessions[self._active_session_id] = update_session_summary(
+                        active,
+                        status=session_status,
+                        ended_at_ns=now_ns(),
+                    )
+            self._active_session_id = None
+            self._write_manifest_locked()
             self._closed = True
         self._stop_flush_thread()
+
+    def _ensure_active_session_locked(self, record: Mapping[str, Any]) -> None:
+        record_session_id = record.get("session_id")
+        if record_session_id is not None and not isinstance(record_session_id, str):
+            raise ValueError("telemetry sink record session_id must be a string")
+        if self._active_session_id is None:
+            resolved = create_session_summary(
+                source="stormlog.telemetry_sink",
+                status=SESSION_STATUS_RUNNING,
+                session_id=(
+                    record_session_id if isinstance(record_session_id, str) else None
+                ),
+            )
+            self._sessions[resolved.session_id] = resolved
+            self._active_session_id = resolved.session_id
+            self._write_manifest_locked()
+            return
+        if (
+            isinstance(record_session_id, str)
+            and record_session_id != self._active_session_id
+        ):
+            raise ValueError(
+                "telemetry sink record session_id does not match the active session"
+            )
 
     def _flush_locked(self, force: bool) -> None:
         if not self._buffer:
@@ -128,7 +219,7 @@ class AppendOnlyTelemetrySink:
         self._prune_retention_locked()
         self._write_manifest_locked()
 
-    def _rollover_locked(self, current: _SegmentState) -> None:
+    def _rollover_locked(self, current: TelemetrySinkSegment) -> None:
         if (
             current.event_count < self.config.rollover_max_events
             and current.size_bytes < self.config.rollover_max_bytes
@@ -148,7 +239,8 @@ class AppendOnlyTelemetrySink:
                 return
 
             removable = next(
-                (segment for segment in self._segments if segment.closed), None
+                (segment for segment in self._segments if segment.closed),
+                None,
             )
             if removable is None:
                 return
@@ -158,11 +250,16 @@ class AppendOnlyTelemetrySink:
                 path.unlink()
             self._segments.remove(removable)
 
-    def _current_segment(self) -> _SegmentState | None:
+    def _current_segment(self) -> TelemetrySinkSegment | None:
         if not self._segments:
             return None
         current = self._segments[-1]
         if current.closed:
+            return None
+        if (
+            self._active_session_id is not None
+            and current.session_id != self._active_session_id
+        ):
             return None
         return current
 
@@ -190,22 +287,23 @@ class AppendOnlyTelemetrySink:
             with self._lock:
                 self._flush_locked(force=False)
 
-    def _ensure_current_segment_locked(self) -> _SegmentState:
+    def _ensure_current_segment_locked(self) -> TelemetrySinkSegment:
         current = self._current_segment()
         if current is not None:
             return current
 
-        segment = _SegmentState(
+        segment = TelemetrySinkSegment(
             filename=f"{SEGMENT_PREFIX}{self._next_segment_index:06d}{SEGMENT_SUFFIX}",
             event_count=0,
             size_bytes=0,
             closed=False,
+            session_id=self._active_session_id,
         )
         self._next_segment_index += 1
         self._segments.append(segment)
         return segment
 
-    def _ensure_handle_locked(self, current: _SegmentState) -> TextIO:
+    def _ensure_handle_locked(self, current: TelemetrySinkSegment) -> TextIO:
         if self._handle is None:
             segment_path = self.root_dir / current.filename
             self._recover_segment_tail_locked(segment_path, current)
@@ -214,27 +312,46 @@ class AppendOnlyTelemetrySink:
 
     def _load_existing_state(self) -> None:
         discovered = _discover_segment_paths(self.root_dir)
-        if self._manifest_path.exists():
-            payload = json.loads(self._manifest_path.read_text(encoding="utf-8"))
-            manifest_segments = [
-                _SegmentState(**dict(segment))
-                for segment in payload.get("segments", [])
-                if isinstance(segment, dict)
-            ]
-            self._segments = self._merge_segment_state(manifest_segments, discovered)
+        manifest = read_telemetry_sink_manifest(self.root_dir)
+        manifest_needs_rewrite = False
+
+        if manifest is not None:
+            self._segments = self._merge_segment_state(manifest.segments, discovered)
+            self._sessions = {
+                summary.session_id: summary for summary in manifest.sessions
+            }
+            for session_id, summary in list(self._sessions.items()):
+                if summary.status == SESSION_STATUS_RUNNING:
+                    self._sessions[session_id] = update_session_summary(
+                        summary,
+                        status=SESSION_STATUS_INTERRUPTED,
+                        ended_at_ns=now_ns(),
+                    )
+                    manifest_needs_rewrite = True
+            for segment in self._segments:
+                if segment.session_id in self._sessions and (
+                    self._sessions[segment.session_id].status
+                    == SESSION_STATUS_INTERRUPTED
+                ):
+                    segment.closed = True
             self._next_segment_index = self._compute_next_segment_index()
+            if manifest.schema_version != SINK_SCHEMA_VERSION:
+                manifest_needs_rewrite = True
+            if manifest_needs_rewrite:
+                self._write_manifest_locked()
             return
 
         if not discovered:
             return
 
-        for index, path in enumerate(discovered):
+        for path in discovered:
             self._segments.append(
-                _SegmentState(
+                TelemetrySinkSegment(
                     filename=path.name,
                     event_count=self._count_records(path),
                     size_bytes=path.stat().st_size,
-                    closed=index < len(discovered) - 1,
+                    closed=True,
+                    session_id=None,
                 )
             )
         self._next_segment_index = self._compute_next_segment_index()
@@ -255,6 +372,13 @@ class AppendOnlyTelemetrySink:
         payload = {
             "schema_version": SINK_SCHEMA_VERSION,
             "format": "stormlog.append_only_telemetry_sink",
+            "sessions": [
+                session_summary_to_dict(summary)
+                for summary in sorted(
+                    self._sessions.values(),
+                    key=lambda session: (session.started_at_ns, session.session_id),
+                )
+            ],
             "segments": [asdict(segment) for segment in self._segments],
         }
         temp_path = self._manifest_path.with_suffix(".tmp")
@@ -269,7 +393,7 @@ class AppendOnlyTelemetrySink:
     def _recover_segment_tail_locked(
         self,
         segment_path: Path,
-        current: _SegmentState,
+        current: TelemetrySinkSegment,
     ) -> None:
         if not segment_path.exists():
             current.event_count = 0
@@ -287,21 +411,22 @@ class AppendOnlyTelemetrySink:
 
     def _merge_segment_state(
         self,
-        manifest_segments: list[_SegmentState],
+        manifest_segments: list[TelemetrySinkSegment],
         discovered_segments: list[Path],
-    ) -> list[_SegmentState]:
+    ) -> list[TelemetrySinkSegment]:
         manifest_by_name = {
-            segment.filename: _SegmentState(
+            segment.filename: TelemetrySinkSegment(
                 filename=segment.filename,
                 event_count=segment.event_count,
                 size_bytes=segment.size_bytes,
                 closed=segment.closed,
+                session_id=segment.session_id,
             )
             for segment in manifest_segments
         }
         discovered_by_name = {path.name: path for path in discovered_segments}
         merged_names = sorted(set(manifest_by_name) | set(discovered_by_name))
-        merged: list[_SegmentState] = []
+        merged: list[TelemetrySinkSegment] = []
 
         for name in merged_names:
             manifest_segment = manifest_by_name.get(name)
@@ -311,18 +436,15 @@ class AppendOnlyTelemetrySink:
 
             path = discovered_by_name[name]
             merged.append(
-                _SegmentState(
+                TelemetrySinkSegment(
                     filename=name,
                     event_count=self._count_records(path),
                     size_bytes=path.stat().st_size,
-                    closed=False,
+                    closed=True,
+                    session_id=None,
                 )
             )
 
-        for segment in merged[:-1]:
-            segment.closed = True
-        if merged and merged[-1].filename not in manifest_by_name:
-            merged[-1].closed = False
         return merged
 
 
@@ -333,8 +455,14 @@ def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
         if resolved_path.suffix == SEGMENT_SUFFIX:
             return [resolved_path]
         if resolved_path.name == MANIFEST_FILENAME:
+            manifest = read_telemetry_sink_manifest(resolved_path)
+            manifest_segments = [
+                resolved_path.parent / segment.filename
+                for segment in (manifest.segments if manifest is not None else [])
+                if (resolved_path.parent / segment.filename).exists()
+            ]
             return _merge_segment_paths(
-                _segment_paths_from_manifest(resolved_path),
+                manifest_segments,
                 _discover_segment_paths(resolved_path.parent),
             )
         return []
@@ -342,14 +470,92 @@ def resolve_telemetry_sink_segment_paths(path: str | Path) -> list[Path]:
     if not resolved_path.is_dir():
         return []
 
-    manifest_path = resolved_path / MANIFEST_FILENAME
-    manifest_segments = _segment_paths_from_manifest(manifest_path)
-    if manifest_segments:
+    manifest = read_telemetry_sink_manifest(resolved_path)
+    if manifest is not None:
+        manifest_segments = [
+            resolved_path / segment.filename
+            for segment in manifest.segments
+            if (resolved_path / segment.filename).exists()
+        ]
         return _merge_segment_paths(
             manifest_segments,
             _discover_segment_paths(resolved_path),
         )
     return _discover_segment_paths(resolved_path)
+
+
+def resolve_telemetry_sink_manifest_path(path: str | Path) -> Path | None:
+    """Resolve a file or directory path to a sink manifest path, if present."""
+    resolved = Path(path)
+    if resolved.is_file():
+        if resolved.name == MANIFEST_FILENAME:
+            return resolved
+        if resolved.suffix == SEGMENT_SUFFIX:
+            candidate = resolved.parent / MANIFEST_FILENAME
+            return candidate if candidate.exists() else None
+        return None
+    if resolved.is_dir():
+        candidate = resolved / MANIFEST_FILENAME
+        return candidate if candidate.exists() else None
+    return None
+
+
+def read_telemetry_sink_manifest(path: str | Path) -> TelemetrySinkManifest | None:
+    """Read a sink manifest from a sink directory, manifest file, or segment file."""
+    manifest_path = resolve_telemetry_sink_manifest_path(path)
+    if manifest_path is None or not manifest_path.exists():
+        return None
+
+    try:
+        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+    if not isinstance(payload, Mapping):
+        return None
+
+    schema_version = int(payload.get("schema_version", 1))
+    fmt = str(payload.get("format", "stormlog.append_only_telemetry_sink"))
+    sessions: list[SessionSummary] = []
+    if schema_version >= 2:
+        for raw_session in payload.get("sessions", []):
+            if not isinstance(raw_session, Mapping):
+                continue
+            try:
+                sessions.append(session_summary_from_dict(raw_session))
+            except Exception:
+                continue
+
+    segments: list[TelemetrySinkSegment] = []
+    for raw_segment in payload.get("segments", []):
+        if not isinstance(raw_segment, Mapping):
+            continue
+        filename = raw_segment.get("filename")
+        if not isinstance(filename, str):
+            continue
+        try:
+            segments.append(
+                TelemetrySinkSegment(
+                    filename=filename,
+                    event_count=int(raw_segment.get("event_count", 0)),
+                    size_bytes=int(raw_segment.get("size_bytes", 0)),
+                    closed=bool(raw_segment.get("closed", False)),
+                    session_id=(
+                        raw_segment.get("session_id")
+                        if isinstance(raw_segment.get("session_id"), str)
+                        else None
+                    ),
+                )
+            )
+        except Exception:
+            continue
+
+    return TelemetrySinkManifest(
+        schema_version=schema_version,
+        format=fmt,
+        sessions=sessions,
+        segments=segments,
+    )
 
 
 def _discover_segment_paths(root_dir: Path) -> list[Path]:
@@ -366,28 +572,6 @@ def _merge_segment_paths(
     return [merged_by_name[name] for name in sorted(merged_by_name)]
 
 
-def _segment_paths_from_manifest(manifest_path: Path) -> list[Path]:
-    if not manifest_path.exists():
-        return []
-
-    try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except Exception:
-        return []
-
-    root_dir = manifest_path.parent
-    segments = []
-    for segment in payload.get("segments", []):
-        if not isinstance(segment, dict):
-            continue
-        filename = segment.get("filename")
-        if isinstance(filename, str):
-            candidate = root_dir / filename
-            if candidate.exists():
-                segments.append(candidate)
-    return segments
-
-
 __all__ = [
     "AppendOnlyTelemetrySink",
     "MANIFEST_FILENAME",
@@ -395,5 +579,9 @@ __all__ = [
     "SEGMENT_SUFFIX",
     "SINK_SCHEMA_VERSION",
     "TelemetrySinkConfig",
+    "TelemetrySinkManifest",
+    "TelemetrySinkSegment",
+    "read_telemetry_sink_manifest",
+    "resolve_telemetry_sink_manifest_path",
     "resolve_telemetry_sink_segment_paths",
 ]

@@ -106,10 +106,22 @@ Trackers are responsible for:
 
 Key responsibilities:
 
-- normalize legacy records into `TelemetryEventV2`
+- normalize legacy records into canonical `TelemetryEventV3`
 - validate event shape
 - load saved event streams from disk
+- group saved artifacts into session-aware capture units
 - resolve distributed identity defaults from environment variables or explicit inputs
+
+`stormlog.session` is the shared lifecycle contract used by trackers,
+append-only sinks, diagnose bundles, OOM bundles, CLI analysis, and TUI
+diagnostics.
+
+It defines:
+
+- unique `session_id` generation
+- lifecycle states: `running`, `completed`, `interrupted`, `incomplete`
+- session summaries with host, pid, distributed identity, and source metadata
+- default session selection order for multi-session artifact roots
 
 This shared schema is what allows Stormlog tracker exports, TensorFlow tracker
 exports, diagnose bundles, and TUI diagnostics loading to operate on the same
@@ -184,7 +196,8 @@ Current tabs are:
 The TUI is not a separate analysis engine. It reuses:
 
 - tracker sessions for live data
-- TelemetryEventV2 records for artifact loading
+- TelemetryEventV3 records for artifact loading
+- session-aware artifact loading so users can switch between discovered captures
 - `MemoryVisualizer`-style plot generation for PNG/HTML export
 
 ## Main runtime flows
@@ -203,18 +216,23 @@ User code
 
 ```text
 Tracker start
+  -> create session summary
   -> periodic sampling
   -> alert evaluation
   -> event storage
+  -> append-only sink / OOM artifacts reference session_id
   -> statistics / timeline / export helpers
+  -> clean stop marks session completed
 ```
 
 ### 3. Diagnose flow
 
 ```text
 CLI diagnose
+  -> create session summary
   -> runtime/system info
   -> telemetry capture
+  -> manifest records session_id and terminal status
   -> artifact bundle on disk
   -> later reload in TUI Diagnostics or analyzer paths
 ```

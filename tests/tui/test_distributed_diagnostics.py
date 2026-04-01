@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 from stormlog.telemetry import (
+    TelemetryEvent,
     TelemetryEventV2,
     telemetry_event_from_record,
     telemetry_event_to_dict,
@@ -32,7 +33,7 @@ def _make_event(
     total: int | None = None,
     context: str = "",
     metadata: dict[str, object] | None = None,
-) -> TelemetryEventV2:
+) -> TelemetryEvent:
     return telemetry_event_from_record(
         {
             "timestamp": timestamp,
@@ -60,7 +61,7 @@ def _make_event(
     )
 
 
-def _write_csv_events(path: Path, events: list[TelemetryEventV2]) -> None:
+def _write_csv_events(path: Path, events: list[TelemetryEvent]) -> None:
     records = [telemetry_event_to_dict(event) for event in events]
     if not records:
         return
@@ -77,6 +78,11 @@ def _write_csv_events(path: Path, events: list[TelemetryEventV2]) -> None:
                 else:
                     row[key] = str(value)
             writer.writerow(row)
+
+
+def _flatten_result_events(result: object) -> list[TelemetryEvent]:
+    sessions = getattr(result, "sessions")
+    return [event for session in sessions for event in session.events]
 
 
 def test_parse_rank_filter_supports_all_lists_and_ranges() -> None:
@@ -187,7 +193,7 @@ def test_build_distributed_model_includes_earliest_and_most_severe_indicators() 
 
 
 def test_build_distributed_model_surfaces_collective_attribution_signals() -> None:
-    events: list[TelemetryEventV2] = []
+    events: list[TelemetryEvent] = []
     for rank in (0, 1):
         for index in range(12):
             timestamp = 1.0 + index * 0.1 + rank * 0.001
@@ -268,7 +274,13 @@ def test_load_distributed_artifacts_merges_json_and_csv_inputs(
     _write_csv_events(csv_path, [csv_event])
 
     result = load_distributed_artifacts([json_path, csv_path])
-    assert len(result.events) == 2
+    all_events = _flatten_result_events(result)
+    assert len(result.events) == 1
+    assert len(result.sessions) == 2
+    assert len(all_events) == 2
+    assert result.selected_session_id in {
+        session.summary.session_id for session in result.sessions
+    }
     assert result.warnings == []
     assert str(json_path) in result.sources_loaded
     assert str(csv_path) in result.sources_loaded
@@ -366,8 +378,9 @@ def test_load_distributed_artifacts_merges_mixed_directory_event_and_timeline_ra
     )
 
     result = load_distributed_artifacts([artifact_dir])
+    all_events = _flatten_result_events(result)
 
-    assert sorted({event.rank for event in result.events}) == [0, 1]
+    assert sorted({event.rank for event in all_events}) == [0, 1]
     assert str(events_path) in result.sources_loaded
     assert str(timeline_path) in result.sources_loaded
 
@@ -403,10 +416,11 @@ def test_load_distributed_artifacts_preserves_rank_identity_across_timeline_bund
     )
 
     result = load_distributed_artifacts([rank0_bundle, rank1_bundle])
-    model = build_distributed_model(result.events)
+    all_events = _flatten_result_events(result)
+    model = build_distributed_model(all_events)
 
     rank_to_allocated: dict[int, list[int]] = {}
-    for event in result.events:
+    for event in all_events:
         rank_to_allocated.setdefault(event.rank, []).append(
             event.allocator_allocated_bytes
         )
@@ -451,9 +465,10 @@ def test_load_distributed_artifacts_ignores_local_rank_path_segments_for_inferen
     )
 
     result = load_distributed_artifacts([local_dash_bundle, local_underscore_bundle])
-    model = build_distributed_model(result.events)
+    all_events = _flatten_result_events(result)
+    model = build_distributed_model(all_events)
 
-    assert sorted({event.rank for event in result.events}) == [0, 1]
+    assert sorted({event.rank for event in all_events}) == [0, 1]
     assert model.present_ranks == [0, 1]
     assert model.missing_ranks == []
     assert str(local_dash_timeline) in result.sources_loaded

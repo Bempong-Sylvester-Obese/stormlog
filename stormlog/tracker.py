@@ -40,6 +40,15 @@ from .oom_flight_recorder import (
     OOMFlightRecorderConfig,
     classify_oom_exception,
 )
+from .session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INCOMPLETE,
+    SESSION_STATUS_RUNNING,
+    SessionSummary,
+    create_session_summary,
+    now_ns,
+    update_session_summary,
+)
 from .telemetry import (
     resolve_distributed_identity,
     telemetry_event_from_record,
@@ -61,6 +70,7 @@ class TrackingEvent:
     memory_reserved: int
     memory_change: int
     device_id: int
+    session_id: Optional[str] = None
     context: Optional[str] = None
     job_id: Optional[str] = None
     rank: int = 0
@@ -140,6 +150,8 @@ class MemoryTracker:
             world_size=world_size,
             env=os.environ,
         )
+        self.session_source = "stormlog.tracker"
+        self._session_summary: Optional[SessionSummary] = None
 
         recorder_buffer_size = (
             oom_buffer_size if oom_buffer_size is not None else max_events
@@ -214,6 +226,50 @@ class MemoryTracker:
         )
         self._last_observed_sample = None
         self.stats["last_memory_check"] = 0
+
+    def _reset_tracking_state_for_new_session(self) -> None:
+        """Clear per-session in-memory state before starting a new run."""
+        self.events.clear()
+        self.last_oom_dump_path = None
+        self.stats.update(
+            {
+                "peak_memory": 0,
+                "total_allocations": 0,
+                "total_deallocations": 0,
+                "total_allocation_bytes": 0,
+                "total_deallocation_bytes": 0,
+                "alert_count": 0,
+                "tracking_start_time": None,
+                "last_memory_check": 0,
+            }
+        )
+        self._oom_flight_recorder.clear()
+
+    def _open_session(self) -> SessionSummary:
+        """Create the active runtime session summary for a tracking run."""
+        if self._session_summary is not None:
+            return self._session_summary
+        summary = create_session_summary(
+            source=self.session_source,
+            status=SESSION_STATUS_RUNNING,
+            started_at_ns=now_ns(),
+            host=socket.gethostname(),
+            pid=os.getpid(),
+            job_id=self.distributed_identity["job_id"],
+            rank=self.distributed_identity["rank"],
+            local_rank=self.distributed_identity["local_rank"],
+            world_size=self.distributed_identity["world_size"],
+        )
+        self._session_summary = summary
+        if self._telemetry_sink is not None and hasattr(
+            self._telemetry_sink, "start_session"
+        ):
+            self._session_summary = self._telemetry_sink.start_session(summary)
+        return self._session_summary
+
+    def get_session_summary(self) -> Optional[SessionSummary]:
+        """Return the current or most recent tracking session summary."""
+        return self._session_summary
 
     @property
     def oom_buffer_size(self) -> int:
@@ -492,6 +548,8 @@ class MemoryTracker:
             return
 
         self._reset_collector_session_state()
+        self._reset_tracking_state_for_new_session()
+        self._session_summary = None
         self.is_tracking = True
         self._stop_event.clear()
         self.stats["tracking_start_time"] = time.time()
@@ -499,6 +557,7 @@ class MemoryTracker:
         self._tracking_thread = threading.Thread(target=self._tracking_loop)
         self._tracking_thread.daemon = True
         self._tracking_thread.start()
+        self._open_session()
 
         # Add initial event
         self._add_event("start", 0, "Memory tracking started")
@@ -517,6 +576,12 @@ class MemoryTracker:
         # Add final event
         self._add_event("stop", 0, "Memory tracking stopped")
         self._close_telemetry_sink()
+        if self._session_summary is not None:
+            self._session_summary = update_session_summary(
+                self._session_summary,
+                status=SESSION_STATUS_COMPLETED,
+                ended_at_ns=now_ns(),
+            )
 
     def _tracking_loop(self) -> None:
         """Main tracking loop running in background thread."""
@@ -553,6 +618,11 @@ class MemoryTracker:
             memory_reserved=current_reserved,
             memory_change=memory_change,
             device_id=snapshot.device_id,
+            session_id=(
+                self._open_session().session_id
+                if self._session_summary is None
+                else self._session_summary.session_id
+            ),
             context=context,
             job_id=self.distributed_identity["job_id"],
             rank=self.distributed_identity["rank"],
@@ -650,6 +720,7 @@ class MemoryTracker:
         return {
             "timestamp": event.timestamp,
             "event_type": event.event_type,
+            "session_id": event.session_id,
             "memory_allocated": event.memory_allocated,
             "memory_reserved": event.memory_reserved,
             "memory_change": event.memory_change,
@@ -672,6 +743,7 @@ class MemoryTracker:
         host = socket.gethostname()
         pid = os.getpid()
         sampling_interval_ms = int(round(self.sampling_interval * 1000))
+        session_id = event.session_id or self._open_session().session_id
         default_collector = str(
             self.collector_capabilities.get(
                 "telemetry_collector", "stormlog.cuda_tracker"
@@ -703,6 +775,7 @@ class MemoryTracker:
         ):
             event_total = self.total_memory
         legacy = {
+            "session_id": session_id,
             "timestamp": event.timestamp,
             "event_type": event.event_type,
             "memory_allocated": event.memory_allocated,
@@ -730,6 +803,7 @@ class MemoryTracker:
             legacy,
             default_collector=default_collector,
             default_sampling_interval_ms=sampling_interval_ms,
+            default_session_id=session_id,
         )
         return telemetry_event_to_dict(telemetry_event)
 
@@ -753,7 +827,10 @@ class MemoryTracker:
         if self._telemetry_sink is None:
             return
         try:
-            self._telemetry_sink.close()
+            self._close_sink_with_status(
+                self._telemetry_sink,
+                SESSION_STATUS_COMPLETED,
+            )
         except Exception as exc:
             self._disable_telemetry_sink("close", exc)
         else:
@@ -769,12 +846,25 @@ class MemoryTracker:
             operation,
             exc,
         )
+        if self._session_summary is not None:
+            self._session_summary = update_session_summary(
+                self._session_summary,
+                status=SESSION_STATUS_INCOMPLETE,
+                ended_at_ns=now_ns(),
+            )
         try:
-            sink.close()
+            self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
         except Exception as close_exc:
             logger.debug(
                 "Telemetry sink close failed after %s error: %s", operation, close_exc
             )
+
+    @staticmethod
+    def _close_sink_with_status(sink: Any, status: str) -> None:
+        try:
+            sink.close(session_status=status)
+        except TypeError:
+            sink.close()
 
     def handle_exception(
         self,
@@ -789,11 +879,15 @@ class MemoryTracker:
         if not self._oom_flight_recorder.config.enabled:
             return None
 
+        session_summary = getattr(self, "_session_summary", None)
         dump_metadata: Dict[str, Any] = {
             "tracker_stats": self.get_statistics(),
             "collector_capabilities": dict(self.collector_capabilities),
             "total_memory_bytes": self.total_memory,
             "sampling_interval_s": self.sampling_interval,
+            "session_id": (
+                session_summary.session_id if session_summary is not None else None
+            ),
             "job_id": self.distributed_identity["job_id"],
             "rank": self.distributed_identity["rank"],
             "local_rank": self.distributed_identity["local_rank"],
@@ -828,6 +922,7 @@ class MemoryTracker:
                 context=context,
                 backend=self.backend,
                 metadata=dump_metadata,
+                session_summary=session_summary,
             )
         except Exception as dump_exc:
             logger.debug("OOM flight recorder dump failed: %s", dump_exc)
@@ -1033,6 +1128,16 @@ class MemoryTracker:
                 "backend": self.backend,
                 "oom_flight_recorder_enabled": self._oom_flight_recorder.config.enabled,
                 "last_oom_dump_path": self.last_oom_dump_path,
+                "session_id": (
+                    self._session_summary.session_id
+                    if self._session_summary is not None
+                    else None
+                ),
+                "session_status": (
+                    self._session_summary.status
+                    if self._session_summary is not None
+                    else None
+                ),
                 "current_memory_allocated": (
                     sample.allocated_bytes if sample is not None else None
                 ),

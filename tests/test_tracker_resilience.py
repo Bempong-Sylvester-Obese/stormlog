@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -123,7 +124,7 @@ class _FailingFlushSink:
 def _build_tracker(
     monkeypatch: pytest.MonkeyPatch,
     collector: _SequencedCollector,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> tracker_mod.MemoryTracker:
     monkeypatch.setattr(
         tracker_mod.MemoryTracker,
@@ -363,8 +364,8 @@ def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
     )
     tracker = _build_tracker(monkeypatch, collector)
     sink = _FailingFlushSink()
-    tracker._telemetry_sink = sink
-    tracker._stop_event = _SequencedStopEvent([False, False, True])
+    tracker._telemetry_sink = cast(Any, sink)
+    tracker._stop_event = cast(Any, _SequencedStopEvent([False, False, True]))
     iteration_inputs: list[int] = []
 
     def _run_iteration(last_allocated: int) -> int:

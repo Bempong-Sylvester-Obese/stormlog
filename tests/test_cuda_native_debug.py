@@ -181,14 +181,18 @@ def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
         "collect",
         lambda: calls.append(("gc.collect", None)),
     )
+
+    def _snapshot(device: object = None) -> dict[str, object]:
+        calls.append(("snapshot", device))
+        return {"segments": [], "device_traces": []}
+
     monkeypatch.setattr(
         native_debug,
         "torch",
         SimpleNamespace(
             cuda=SimpleNamespace(
                 memory=SimpleNamespace(
-                    _snapshot=lambda device=None: calls.append(("snapshot", device))
-                    or {"segments": [], "device_traces": []}
+                    _snapshot=_snapshot,
                 )
             )
         ),
