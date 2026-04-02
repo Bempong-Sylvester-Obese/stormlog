@@ -252,6 +252,20 @@ def select_default_session(
     return ordered[0]
 
 
+def select_default_loaded_session(
+    sessions: Iterable[Any],
+) -> Any | None:
+    """Pick the default loaded session, preferring non-empty event groups."""
+    session_list = list(sessions)
+    if not session_list:
+        return None
+
+    non_empty = [loaded for loaded in session_list if len(loaded.events) > 0]
+    if non_empty:
+        return select_default_session(non_empty)
+    return select_default_session(session_list)
+
+
 __all__ = [
     "SESSION_STATUS_COMPLETED",
     "SESSION_STATUS_INCOMPLETE",
@@ -264,6 +278,7 @@ __all__ = [
     "new_session_id",
     "normalize_session_status",
     "now_ns",
+    "select_default_loaded_session",
     "select_default_session",
     "session_summary_from_dict",
     "session_summary_to_dict",

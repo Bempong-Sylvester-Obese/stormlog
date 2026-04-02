@@ -266,24 +266,82 @@ def test_load_distributed_artifacts_merges_json_and_csv_inputs(
     )
 
     json_path = tmp_path / "events.json"
-    json_path.write_text(
-        json.dumps([telemetry_event_to_dict(json_event)]), encoding="utf-8"
-    )
+    json_record = telemetry_event_to_dict(json_event)
+    json_record.pop("session_id")
+    json_path.write_text(json.dumps([json_record]), encoding="utf-8")
 
     csv_path = tmp_path / "events.csv"
-    _write_csv_events(csv_path, [csv_event])
+    csv_record = telemetry_event_to_dict(csv_event)
+    csv_record.pop("session_id")
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(csv_record.keys()))
+        writer.writeheader()
+        writer.writerow(
+            {
+                key: (
+                    json.dumps(value)
+                    if isinstance(value, dict)
+                    else ("" if value is None else str(value))
+                )
+                for key, value in csv_record.items()
+            }
+        )
 
     result = load_distributed_artifacts([json_path, csv_path])
     all_events = _flatten_result_events(result)
-    assert len(result.events) == 1
-    assert len(result.sessions) == 2
+    assert len(result.events) == 2
+    assert len(result.sessions) == 1
     assert len(all_events) == 2
-    assert result.selected_session_id in {
-        session.summary.session_id for session in result.sessions
-    }
+    assert result.selected_session_id == result.sessions[0].summary.session_id
     assert result.warnings == []
     assert str(json_path) in result.sources_loaded
     assert str(csv_path) in result.sources_loaded
+
+
+def test_load_distributed_artifacts_keeps_session_aware_json_inputs_separate(
+    tmp_path: Path,
+) -> None:
+    first_event = telemetry_event_to_dict(
+        _make_event(
+            timestamp=1.0,
+            rank=0,
+            world_size=2,
+            allocated=10,
+            reserved=12,
+            used=12,
+            total=100,
+        )
+    )
+    first_event["session_id"] = "session-a"
+    second_event = telemetry_event_to_dict(
+        _make_event(
+            timestamp=2.0,
+            rank=1,
+            world_size=2,
+            allocated=20,
+            reserved=24,
+            used=24,
+            total=100,
+        )
+    )
+    second_event["session_id"] = "session-b"
+
+    first_path = tmp_path / "first.json"
+    first_path.write_text(json.dumps([first_event]), encoding="utf-8")
+    second_path = tmp_path / "second.json"
+    second_path.write_text(json.dumps([second_event]), encoding="utf-8")
+
+    result = load_distributed_artifacts([first_path, second_path])
+    all_events = _flatten_result_events(result)
+
+    assert len(result.events) == 1
+    assert len(result.sessions) == 2
+    assert len(all_events) == 2
+    assert {session.summary.session_id for session in result.sessions} == {
+        "session-a",
+        "session-b",
+    }
+    assert result.selected_session_id in {"session-a", "session-b"}
 
 
 def test_load_distributed_artifacts_reads_directory_event_payloads(

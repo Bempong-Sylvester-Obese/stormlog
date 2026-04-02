@@ -6,7 +6,7 @@ import csv
 import json
 import logging
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence, cast
@@ -23,7 +23,7 @@ from stormlog.session import (
     SessionSummary,
     create_session_summary,
     normalize_session_status,
-    select_default_session,
+    select_default_loaded_session,
     session_summary_from_dict,
     sort_session_summaries,
     stable_legacy_session_id,
@@ -236,6 +236,105 @@ def _merge_session_summaries(
     return sort_session_summaries([existing, incoming])[0]
 
 
+def _legacy_flat_file_default_session_id(path: Path) -> str:
+    suffix = path.suffix.lower()
+    kind = "csv" if suffix == ".csv" else "json"
+    return stable_legacy_session_id(str(path.resolve()), kind)
+
+
+def _is_legacy_sessionless_flat_file(
+    path: Path,
+    loaded_sessions: Sequence[LoadedTelemetrySession],
+) -> bool:
+    if path.suffix.lower() not in {".json", ".jsonl", ".csv"}:
+        return False
+    if not loaded_sessions:
+        return False
+    default_session_id = _legacy_flat_file_default_session_id(path)
+    return all(
+        loaded.summary.session_id == default_session_id for loaded in loaded_sessions
+    )
+
+
+def _collect_common_optional_string(values: Iterable[str | None]) -> str | None:
+    distinct = {value for value in values if value is not None}
+    if len(distinct) == 1:
+        return next(iter(distinct))
+    return None
+
+
+def _merge_legacy_flat_sessions(
+    loaded_sessions: Sequence[LoadedTelemetrySession],
+) -> LoadedTelemetrySession:
+    if not loaded_sessions:
+        raise ValueError("legacy flat session merge requires at least one session")
+
+    source_paths = sorted(
+        {source for loaded in loaded_sessions for source in loaded.sources_loaded}
+    )
+    merged_session_id = stable_legacy_session_id(
+        "distributed.legacy",
+        *source_paths,
+    )
+    merged_events = _dedupe_events(
+        replace(event, session_id=merged_session_id)
+        for loaded in loaded_sessions
+        for event in loaded.events
+    )
+    merged_events.sort(key=lambda event: event.timestamp_ns)
+
+    summaries = [loaded.summary for loaded in loaded_sessions]
+    all_completed = all(
+        summary.status == SESSION_STATUS_COMPLETED for summary in summaries
+    )
+    host = _collect_common_optional_string(summary.host for summary in summaries)
+    started_at_ns = min(summary.started_at_ns for summary in summaries)
+    ended_at_candidates = [
+        summary.ended_at_ns for summary in summaries if summary.ended_at_ns is not None
+    ]
+    ended_at_ns = (
+        max(ended_at_candidates) if all_completed and ended_at_candidates else None
+    )
+    summary = create_session_summary(
+        source="stormlog.diagnostics.legacy",
+        status=(
+            SESSION_STATUS_COMPLETED if all_completed else SESSION_STATUS_INCOMPLETE
+        ),
+        session_id=merged_session_id,
+        started_at_ns=started_at_ns,
+        ended_at_ns=ended_at_ns,
+        host=host or "multiple",
+        pid=(
+            summaries[0].pid if len({summary.pid for summary in summaries}) == 1 else -1
+        ),
+        job_id=_collect_common_optional_string(summary.job_id for summary in summaries),
+        rank=min(summary.rank for summary in summaries),
+        local_rank=min(summary.local_rank for summary in summaries),
+        world_size=max(summary.world_size for summary in summaries),
+    )
+    return LoadedTelemetrySession(
+        summary=summary,
+        events=merged_events,
+        sources_loaded=source_paths,
+        warnings=_unique_strings(
+            warning for loaded in loaded_sessions for warning in loaded.warnings
+        ),
+    )
+
+
+def _accumulate_path_loaded_sessions(
+    accumulators: dict[str, _LoadedSessionAccumulator],
+    legacy_flat_sessions: list[LoadedTelemetrySession],
+    *,
+    source_path: Path,
+    loaded_sessions: Sequence[LoadedTelemetrySession],
+) -> None:
+    if _is_legacy_sessionless_flat_file(source_path, loaded_sessions):
+        legacy_flat_sessions.extend(loaded_sessions)
+        return
+    _accumulate_loaded_sessions(accumulators, loaded_sessions)
+
+
 def _load_sessions_from_events(
     events: list[TelemetryEvent],
     *,
@@ -356,6 +455,7 @@ def load_distributed_artifacts(
     warnings: list[str] = []
     sources_loaded: set[str] = set()
     accumulators: dict[str, _LoadedSessionAccumulator] = {}
+    legacy_flat_sessions: list[LoadedTelemetrySession] = []
     rank_allocator = _TimelineRankAllocator()
 
     for input_path in paths:
@@ -369,7 +469,12 @@ def load_distributed_artifacts(
                 path,
                 rank_allocator=rank_allocator,
             )
-            _accumulate_loaded_sessions(accumulators, loaded_sessions)
+            _accumulate_path_loaded_sessions(
+                accumulators,
+                legacy_flat_sessions,
+                source_path=path,
+                loaded_sessions=loaded_sessions,
+            )
             warnings.extend(file_warnings)
             for loaded in loaded_sessions:
                 sources_loaded.update(loaded.sources_loaded)
@@ -388,6 +493,11 @@ def load_distributed_artifacts(
 
         warnings.append(f"Unsupported path type: {path}")
 
+    if legacy_flat_sessions:
+        merged_legacy = _merge_legacy_flat_sessions(legacy_flat_sessions)
+        _accumulate_loaded_sessions(accumulators, [merged_legacy])
+        sources_loaded.update(merged_legacy.sources_loaded)
+
     sessions = _finalize_loaded_sessions(accumulators)
     selected: LoadedTelemetrySession | None = None
     if session_id is not None:
@@ -398,7 +508,7 @@ def load_distributed_artifacts(
         if selected is None:
             raise ValueError(f"Requested session_id not found: {session_id}")
     else:
-        selected = select_default_session(sessions)
+        selected = select_default_loaded_session(sessions)
 
     selected_events = list(selected.events) if selected is not None else []
     combined_warnings = _unique_strings(
@@ -811,6 +921,7 @@ def _load_artifact_directory(
 ) -> tuple[list[LoadedTelemetrySession], list[str]]:
     warnings: list[str] = []
     accumulators: dict[str, _LoadedSessionAccumulator] = {}
+    legacy_flat_sessions: list[LoadedTelemetrySession] = []
     allocator = rank_allocator or _TimelineRankAllocator()
 
     sink_segment_paths = resolve_telemetry_sink_segment_paths(directory)
@@ -833,7 +944,12 @@ def _load_artifact_directory(
             file_path,
             rank_allocator=allocator,
         )
-        _accumulate_loaded_sessions(accumulators, loaded_sessions)
+        _accumulate_path_loaded_sessions(
+            accumulators,
+            legacy_flat_sessions,
+            source_path=file_path,
+            loaded_sessions=loaded_sessions,
+        )
         warnings.extend(file_warnings)
 
     timeline_files = sorted(directory.rglob("telemetry_timeline.json"))
@@ -844,6 +960,12 @@ def _load_artifact_directory(
         )
         _accumulate_loaded_sessions(accumulators, synthesized_sessions)
         warnings.extend(synth_warnings)
+
+    if legacy_flat_sessions:
+        _accumulate_loaded_sessions(
+            accumulators,
+            [_merge_legacy_flat_sessions(legacy_flat_sessions)],
+        )
 
     sessions = _finalize_loaded_sessions(accumulators)
     if not sessions:

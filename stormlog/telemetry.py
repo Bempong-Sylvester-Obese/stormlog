@@ -11,7 +11,7 @@ from .session import (
     SESSION_STATUS_INCOMPLETE,
     SessionSummary,
     infer_session_summary_from_events,
-    select_default_session,
+    select_default_loaded_session,
     sort_session_summaries,
     stable_legacy_session_id,
 )
@@ -1138,7 +1138,7 @@ def load_telemetry_events(
                 return list(loaded.events)
         raise ValueError(f"Requested session_id not found: {session_id}")
 
-    selected = select_default_session(sessions)
+    selected = select_default_loaded_session(sessions)
     return list(selected.events) if selected is not None else []
 
 

@@ -419,6 +419,82 @@ def test_load_telemetry_events_reads_unlisted_sink_segments(tmp_path: Path) -> N
     assert events[1].timestamp_ns == second["timestamp_ns"]
 
 
+def test_load_telemetry_events_prefers_non_empty_session_over_empty_completed_summary(
+    tmp_path: Path,
+) -> None:
+    sink_dir = tmp_path / "sink"
+    sink_dir.mkdir()
+
+    record = telemetry_event_to_dict(_make_valid_event())
+    payload = json.dumps(record) + "\n"
+    segment_path = sink_dir / "segment-000001.jsonl"
+    segment_path.write_text(payload, encoding="utf-8")
+    (sink_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "format": "stormlog.append_only_telemetry_sink",
+                "sessions": [
+                    {
+                        "session_id": "completed-empty",
+                        "status": "completed",
+                        "started_at_ns": record["timestamp_ns"] - 100,
+                        "ended_at_ns": record["timestamp_ns"] - 50,
+                        "host": record["host"],
+                        "pid": record["pid"],
+                        "job_id": record["job_id"],
+                        "rank": record["rank"],
+                        "local_rank": record["local_rank"],
+                        "world_size": record["world_size"],
+                        "source": "stormlog.telemetry_sink",
+                    },
+                    {
+                        "session_id": "running-live",
+                        "status": "running",
+                        "started_at_ns": record["timestamp_ns"],
+                        "ended_at_ns": None,
+                        "host": record["host"],
+                        "pid": record["pid"],
+                        "job_id": record["job_id"],
+                        "rank": record["rank"],
+                        "local_rank": record["local_rank"],
+                        "world_size": record["world_size"],
+                        "source": "stormlog.telemetry_sink",
+                    },
+                ],
+                "segments": [
+                    {
+                        "filename": segment_path.name,
+                        "event_count": 1,
+                        "size_bytes": len(payload.encode("utf-8")),
+                        "closed": False,
+                        "session_id": "running-live",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    sessions = load_telemetry_sessions(sink_dir)
+    assert [session.summary.session_id for session in sessions] == [
+        "completed-empty",
+        "running-live",
+    ]
+    assert sessions[0].events == []
+    assert len(sessions[1].events) == 1
+
+    events = load_telemetry_events(sink_dir)
+    assert len(events) == 1
+    assert events[0].session_id == "running-live"
+
+    assert load_telemetry_events(sink_dir, session_id="completed-empty") == []
+    targeted = load_telemetry_events(sink_dir, session_id="running-live")
+    assert len(targeted) == 1
+    assert targeted[0].session_id == "running-live"
+
+
 def test_append_only_sink_truncates_partial_segment_tail_on_resume(
     tmp_path: Path,
 ) -> None:

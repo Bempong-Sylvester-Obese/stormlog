@@ -35,7 +35,7 @@ from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_RUNNING,
     create_session_summary,
-    select_default_session,
+    select_default_loaded_session,
 )
 from stormlog.telemetry import LoadedTelemetrySession, TelemetryEvent
 from stormlog.utils import format_bytes, get_gpu_info, get_system_info
@@ -1540,7 +1540,7 @@ class GPUMemoryProfilerTUI(App):
                         f"Requested session not found: {requested}"
                     ]
             if selected is None:
-                selected = select_default_session(sessions)
+                selected = select_default_loaded_session(sessions)
         self._diagnostics_selected_session_id = (
             selected.summary.session_id if selected is not None else None
         )
