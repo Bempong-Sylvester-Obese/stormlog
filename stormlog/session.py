@@ -124,6 +124,24 @@ def update_session_summary(
     return replace(summary, **updates)
 
 
+def finalize_session_summary(
+    summary: SessionSummary,
+    *,
+    ended_at_ns: int | None = None,
+) -> SessionSummary:
+    """Finalize a session without overwriting degraded terminal states."""
+    final_status = (
+        SESSION_STATUS_COMPLETED
+        if summary.status == SESSION_STATUS_RUNNING
+        else summary.status
+    )
+    return update_session_summary(
+        summary,
+        status=final_status,
+        ended_at_ns=now_ns() if ended_at_ns is None else ended_at_ns,
+    )
+
+
 def normalize_session_status(value: object) -> str:
     """Validate and normalize a session status string."""
     if not isinstance(value, str) or not value.strip():
@@ -274,6 +292,7 @@ __all__ = [
     "SESSION_STATUSES",
     "SessionSummary",
     "create_session_summary",
+    "finalize_session_summary",
     "infer_session_summary_from_events",
     "new_session_id",
     "normalize_session_status",

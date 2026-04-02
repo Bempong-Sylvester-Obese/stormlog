@@ -557,6 +557,15 @@ class TestCPUMemoryTracker:
         assert sink.close_calls == 1
         assert tracker._telemetry_sink is None
 
+        tracker.is_tracking = True
+        tracker.stop_tracking()
+
+        assert tracker.events[-1].event_type == "stop"
+        summary = tracker.get_session_summary()
+        assert summary is not None
+        assert summary.status == "incomplete"
+        assert tracker.get_statistics()["session_status"] == "incomplete"
+
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_tracker_disables_sink_after_flush_failure(self, mock_cls: Any) -> None:
         mock_cls.return_value = _make_mock_process(rss=2048)
@@ -585,6 +594,10 @@ class TestCPUMemoryTracker:
         assert tracker.events[-1].event_type == "stop"
         assert sink.close_calls >= 1
         assert tracker._telemetry_sink is None
+        summary = tracker.get_session_summary()
+        assert summary is not None
+        assert summary.status == "incomplete"
+        assert tracker.get_statistics()["session_status"] == "incomplete"
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_export_events_with_timestamp(self, mock_cls: Any, tmp_path: Path) -> None:

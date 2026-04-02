@@ -389,6 +389,14 @@ def test_tf_tracker_disables_sink_after_append_failure(
     assert tracker._telemetry_sink is None
     assert sink.append_calls == 1
 
+    tracker.tracking = True
+    result = tracker.stop_tracking()
+
+    assert [event["event_type"] for event in result.events] == ["sample", "stop"]
+    assert tracker._session_summary is not None
+    assert tracker._session_summary.status == "incomplete"
+    assert tracker.get_statistics()["session_status"] == "incomplete"
+
 
 def test_tf_tracker_disables_sink_after_flush_failure(
     monkeypatch: pytest.MonkeyPatch,
@@ -429,6 +437,9 @@ def test_tf_tracker_stop_tracking_disables_sink_after_close_failure(
     assert [event["event_type"] for event in result.events] == ["start", "stop"]
     assert tracker._telemetry_sink is None
     assert sink.close_calls >= 1
+    assert tracker._session_summary is not None
+    assert tracker._session_summary.status == "incomplete"
+    assert tracker.get_statistics()["session_status"] == "incomplete"
 
 
 def test_tf_tracker_persistent_failure_preserves_status_events_without_samples(

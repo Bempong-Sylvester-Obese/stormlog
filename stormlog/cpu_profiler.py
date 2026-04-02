@@ -22,6 +22,7 @@ from stormlog.session import (
     SESSION_STATUS_RUNNING,
     SessionSummary,
     create_session_summary,
+    finalize_session_summary,
     now_ns,
     update_session_summary,
 )
@@ -327,9 +328,8 @@ class CPUMemoryTracker:
         self._add_event("stop", 0, "CPU memory tracking stopped")
         self._close_telemetry_sink()
         if self._session_summary is not None:
-            self._session_summary = update_session_summary(
+            self._session_summary = finalize_session_summary(
                 self._session_summary,
-                status=SESSION_STATUS_COMPLETED,
                 ended_at_ns=now_ns(),
             )
 
