@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -14,6 +14,7 @@ from stormlog.oom_flight_recorder import (
     OOMFlightRecorderConfig,
     classify_oom_exception,
 )
+from stormlog.session import SessionSummary, create_session_summary
 from stormlog.tracker import MemoryTracker
 
 
@@ -41,12 +42,15 @@ class _TrackerHarness:
         self.enable_native_cuda_history = enable_native_cuda_history
         self.native_history_max_entries = 256
         self.last_oom_dump_path: str | None = None
+        self.session_source = "stormlog.cuda_tracker"
         self.distributed_identity = {
             "job_id": "test-job",
             "rank": 0,
             "local_rank": 0,
             "world_size": 1,
         }
+        self._session_summary: SessionSummary | None = None
+        self._telemetry_sink = None
         self._oom_flight_recorder = OOMFlightRecorder(
             OOMFlightRecorderConfig(
                 enabled=enabled,
@@ -59,6 +63,17 @@ class _TrackerHarness:
 
     def get_statistics(self) -> dict[str, int]:
         return {"total_events": len(self._oom_flight_recorder.snapshot_events())}
+
+    def _open_session(self) -> SessionSummary:
+        if self._session_summary is None:
+            self._session_summary = create_session_summary(
+                source=self.session_source,
+                job_id=cast(str | None, self.distributed_identity["job_id"]),
+                rank=cast(int, self.distributed_identity["rank"]),
+                local_rank=cast(int, self.distributed_identity["local_rank"]),
+                world_size=cast(int, self.distributed_identity["world_size"]),
+            )
+        return self._session_summary
 
     def _safe_sample(self) -> DeviceMemorySample:
         return DeviceMemorySample(
@@ -81,10 +96,12 @@ class _TrackerHarness:
         sample: object = None,
     ) -> None:
         _ = sample
+        session_summary = self._open_session()
         payload = {
             "event_type": event_type,
             "memory_change": memory_change,
             "context": context,
+            "session_id": session_summary.session_id,
             "metadata": dict(metadata or {}),
             "backend": self.backend,
         }
@@ -284,6 +301,13 @@ def test_capture_oom_context_triggers_dump_then_reraises(tmp_path: Path) -> None
 
     assert harness.last_oom_dump_path is not None  # type: ignore[unreachable, unused-ignore]
     assert Path(harness.last_oom_dump_path).exists()  # type: ignore[unreachable, unused-ignore]
+    bundle = Path(harness.last_oom_dump_path)
+    manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    metadata = json.loads((bundle / "metadata.json").read_text(encoding="utf-8"))
+    assert harness._session_summary is not None
+    assert manifest["session_id"] == harness._session_summary.session_id
+    assert metadata["session_id"] == harness._session_summary.session_id
+    assert metadata["session"]["session_id"] == harness._session_summary.session_id
 
 
 def test_capture_oom_with_native_history_adds_snapshot_files(

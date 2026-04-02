@@ -879,15 +879,12 @@ class MemoryTracker:
         if not self._oom_flight_recorder.config.enabled:
             return None
 
-        session_summary = getattr(self, "_session_summary", None)
         dump_metadata: Dict[str, Any] = {
             "tracker_stats": self.get_statistics(),
             "collector_capabilities": dict(self.collector_capabilities),
             "total_memory_bytes": self.total_memory,
             "sampling_interval_s": self.sampling_interval,
-            "session_id": (
-                session_summary.session_id if session_summary is not None else None
-            ),
+            "session_id": None,
             "job_id": self.distributed_identity["job_id"],
             "rank": self.distributed_identity["rank"],
             "local_rank": self.distributed_identity["local_rank"],
@@ -913,6 +910,11 @@ class MemoryTracker:
             f"OOM detected ({classification.reason})",
             metadata={"oom_reason": classification.reason},
             sample=sample,
+        )
+        session_summary = getattr(self, "_session_summary", None)
+        dump_metadata["tracker_stats"] = self.get_statistics()
+        dump_metadata["session_id"] = (
+            session_summary.session_id if session_summary is not None else None
         )
 
         try:
