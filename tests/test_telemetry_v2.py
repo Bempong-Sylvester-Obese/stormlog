@@ -11,10 +11,12 @@ import pytest
 
 from stormlog.telemetry import (
     SCHEMA_VERSION_V2,
+    SCHEMA_VERSION_V3,
     UNKNOWN_HOST,
     UNKNOWN_PID,
     TelemetryEventV2,
     load_telemetry_events,
+    load_telemetry_sessions,
     resolve_distributed_identity,
     telemetry_event_from_record,
     telemetry_event_to_dict,
@@ -23,12 +25,12 @@ from stormlog.telemetry import (
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 
-def _schema() -> dict[str, object]:
+def _schema(version: int) -> dict[str, object]:
     schema_path = (
         Path(__file__).resolve().parents[1]
         / "docs"
         / "schemas"
-        / "telemetry_event_v2.schema.json"
+        / f"telemetry_event_v{version}.schema.json"
     )
     result: dict[str, object] = json.loads(schema_path.read_text(encoding="utf-8"))
     return result
@@ -66,7 +68,7 @@ def test_telemetry_event_v2_serialization_validates_against_schema() -> None:
     record = telemetry_event_to_dict(event)
 
     validate_telemetry_record(record)
-    jsonschema.validate(instance=record, schema=_schema())
+    jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V2))
 
 
 def test_validate_telemetry_record_rejects_missing_fields() -> None:
@@ -101,7 +103,7 @@ def test_validate_telemetry_record_rejects_non_dict_metadata() -> None:
         validate_telemetry_record(record)
 
 
-def test_legacy_gpumemprof_record_converts_to_v2() -> None:
+def test_legacy_gpumemprof_record_converts_to_v3() -> None:
     legacy = {
         "timestamp": 1700000000.25,
         "event_type": "allocation",
@@ -120,13 +122,15 @@ def test_legacy_gpumemprof_record_converts_to_v2() -> None:
     )
     record = telemetry_event_to_dict(event)
 
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == SCHEMA_VERSION_V3
+    assert isinstance(record["session_id"], str)
+    assert record["session_id"]
     assert record["collector"] == "stormlog.cuda_tracker"
     assert record["allocator_allocated_bytes"] == 10_000
     assert record["allocator_reserved_bytes"] == 15_000
     assert record["allocator_change_bytes"] == 512
     assert record["metadata"]["usage_percent"] == 75.5
-    jsonschema.validate(instance=record, schema=_schema())
+    jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))
 
 
 def test_legacy_cpu_record_converts_with_defaults() -> None:
@@ -155,7 +159,9 @@ def test_legacy_cpu_record_converts_with_defaults() -> None:
     assert record["rank"] == 0
     assert record["local_rank"] == 0
     assert record["world_size"] == 1
-    jsonschema.validate(instance=record, schema=_schema())
+    assert isinstance(record["session_id"], str)
+    assert record["session_id"]
+    jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))
 
 
 def test_legacy_record_uses_backend_metadata_for_collector() -> None:
@@ -197,7 +203,9 @@ def test_legacy_tf_record_converts_with_defaults() -> None:
     assert record["device_id"] == 0
     assert record["allocator_allocated_bytes"] == 2 * 1024 * 1024
     assert record["device_used_bytes"] == 2 * 1024 * 1024
-    jsonschema.validate(instance=record, schema=_schema())
+    assert isinstance(record["session_id"], str)
+    assert record["session_id"]
+    jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))
 
 
 def test_resolve_distributed_identity_uses_torchrun_env() -> None:
@@ -349,7 +357,7 @@ def test_load_telemetry_events_reads_dict_events_payload(tmp_path: Path) -> None
     events = load_telemetry_events(path, events_key="events")
 
     assert len(events) == 1
-    assert events[0].schema_version == SCHEMA_VERSION_V2
+    assert events[0].schema_version == SCHEMA_VERSION_V3
 
 
 def test_load_telemetry_events_reads_append_only_sink_directory(tmp_path: Path) -> None:
@@ -406,10 +414,85 @@ def test_load_telemetry_events_reads_unlisted_sink_segments(tmp_path: Path) -> N
     )
 
     events = load_telemetry_events(sink_dir)
-
     assert len(events) == 2
     assert events[0].timestamp_ns == first["timestamp_ns"]
     assert events[1].timestamp_ns == second["timestamp_ns"]
+
+
+def test_load_telemetry_events_prefers_non_empty_session_over_empty_completed_summary(
+    tmp_path: Path,
+) -> None:
+    sink_dir = tmp_path / "sink"
+    sink_dir.mkdir()
+
+    record = telemetry_event_to_dict(_make_valid_event())
+    payload = json.dumps(record) + "\n"
+    segment_path = sink_dir / "segment-000001.jsonl"
+    segment_path.write_text(payload, encoding="utf-8")
+    (sink_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "format": "stormlog.append_only_telemetry_sink",
+                "sessions": [
+                    {
+                        "session_id": "completed-empty",
+                        "status": "completed",
+                        "started_at_ns": record["timestamp_ns"] - 100,
+                        "ended_at_ns": record["timestamp_ns"] - 50,
+                        "host": record["host"],
+                        "pid": record["pid"],
+                        "job_id": record["job_id"],
+                        "rank": record["rank"],
+                        "local_rank": record["local_rank"],
+                        "world_size": record["world_size"],
+                        "source": "stormlog.telemetry_sink",
+                    },
+                    {
+                        "session_id": "running-live",
+                        "status": "running",
+                        "started_at_ns": record["timestamp_ns"],
+                        "ended_at_ns": None,
+                        "host": record["host"],
+                        "pid": record["pid"],
+                        "job_id": record["job_id"],
+                        "rank": record["rank"],
+                        "local_rank": record["local_rank"],
+                        "world_size": record["world_size"],
+                        "source": "stormlog.telemetry_sink",
+                    },
+                ],
+                "segments": [
+                    {
+                        "filename": segment_path.name,
+                        "event_count": 1,
+                        "size_bytes": len(payload.encode("utf-8")),
+                        "closed": False,
+                        "session_id": "running-live",
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    sessions = load_telemetry_sessions(sink_dir)
+    assert [session.summary.session_id for session in sessions] == [
+        "completed-empty",
+        "running-live",
+    ]
+    assert sessions[0].events == []
+    assert len(sessions[1].events) == 1
+
+    events = load_telemetry_events(sink_dir)
+    assert len(events) == 1
+    assert events[0].session_id == "running-live"
+
+    assert load_telemetry_events(sink_dir, session_id="completed-empty") == []
+    targeted = load_telemetry_events(sink_dir, session_id="running-live")
+    assert len(targeted) == 1
+    assert targeted[0].session_id == "running-live"
 
 
 def test_append_only_sink_truncates_partial_segment_tail_on_resume(
@@ -460,11 +543,18 @@ def test_append_only_sink_truncates_partial_segment_tail_on_resume(
     sink.append(second)
     sink.close()
 
-    events = load_telemetry_events(sink_dir)
+    sessions = load_telemetry_sessions(sink_dir)
+    assert len(sessions) == 2
+    assert [session.summary.status for session in sessions] == [
+        "completed",
+        "incomplete",
+    ]
+    assert sessions[0].events[0].timestamp_ns == second["timestamp_ns"]
+    assert sessions[1].events[0].timestamp_ns == first["timestamp_ns"]
 
-    assert len(events) == 2
-    assert events[0].timestamp_ns == first["timestamp_ns"]
-    assert events[1].timestamp_ns == second["timestamp_ns"]
+    events = load_telemetry_events(sink_dir)
+    assert len(events) == 1
+    assert events[0].timestamp_ns == second["timestamp_ns"]
 
 
 def test_load_telemetry_events_ignores_truncated_jsonl_tail(tmp_path: Path) -> None:
@@ -531,13 +621,13 @@ def test_schema_version_bool_is_rejected_when_present() -> None:
 
 def test_unsupported_schema_version_is_rejected_without_legacy_fallback() -> None:
     legacy = {
-        "schema_version": 3,
+        "schema_version": 4,
         "timestamp": 1700000001.0,
         "event_type": "allocation",
         "memory_allocated": 8_192,
     }
 
-    with pytest.raises(ValueError, match="Unsupported schema_version: 3"):
+    with pytest.raises(ValueError, match="Unsupported schema_version: 4"):
         telemetry_event_from_record(legacy, permissive_legacy=True)
 
 
@@ -546,7 +636,7 @@ def test_load_telemetry_events_rejects_unsupported_schema_version(
 ) -> None:
     payload = [
         {
-            "schema_version": 3,
+            "schema_version": 4,
             "timestamp": 1700000005.0,
             "event_type": "allocation",
             "memory_allocated": 1024,
@@ -555,7 +645,7 @@ def test_load_telemetry_events_rejects_unsupported_schema_version(
     path = tmp_path / "unsupported_schema.json"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Unsupported schema_version: 3"):
+    with pytest.raises(ValueError, match="Unsupported schema_version: 4"):
         load_telemetry_events(path, permissive_legacy=True)
 
 
@@ -577,7 +667,9 @@ def test_legacy_total_memory_null_is_accepted() -> None:
     )
     record = telemetry_event_to_dict(event)
 
-    assert record["schema_version"] == 2
+    assert record["schema_version"] == SCHEMA_VERSION_V3
+    assert isinstance(record["session_id"], str)
+    assert record["session_id"]
     assert record["device_total_bytes"] is None
     assert record["device_free_bytes"] is None
-    jsonschema.validate(instance=record, schema=_schema())
+    jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))

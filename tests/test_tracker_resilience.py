@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import deque
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -120,10 +121,28 @@ class _FailingFlushSink:
         self.close_calls += 1
 
 
+class _FailingAppendSink:
+    def __init__(self) -> None:
+        self.append_calls = 0
+        self.close_calls = 0
+
+    def append(self, record: dict[str, object]) -> None:
+        _ = record
+        self.append_calls += 1
+        raise OSError("disk full")
+
+    def flush(self, *, force: bool = False) -> None:
+        _ = force
+        return None
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
 def _build_tracker(
     monkeypatch: pytest.MonkeyPatch,
     collector: _SequencedCollector,
-    **kwargs: object,
+    **kwargs: Any,
 ) -> tracker_mod.MemoryTracker:
     monkeypatch.setattr(
         tracker_mod.MemoryTracker,
@@ -363,8 +382,8 @@ def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
     )
     tracker = _build_tracker(monkeypatch, collector)
     sink = _FailingFlushSink()
-    tracker._telemetry_sink = sink
-    tracker._stop_event = _SequencedStopEvent([False, False, True])
+    tracker._telemetry_sink = cast(Any, sink)
+    tracker._stop_event = cast(Any, _SequencedStopEvent([False, False, True]))
     iteration_inputs: list[int] = []
 
     def _run_iteration(last_allocated: int) -> int:
@@ -380,6 +399,32 @@ def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
     assert sink.flush_calls == 1
     assert sink.close_calls == 1
     assert tracker._telemetry_sink is None
+
+
+def test_memory_tracker_preserves_incomplete_session_after_sink_failure_on_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    sink = _FailingAppendSink()
+    tracker._telemetry_sink = cast(Any, sink)
+
+    tracker._add_event("allocation", 10, "sink_failure")
+
+    assert sink.append_calls == 1
+    assert sink.close_calls == 1
+    assert tracker._telemetry_sink is None
+
+    tracker.is_tracking = True
+    tracker.stop_tracking()
+
+    assert tracker.get_events()[-1].event_type == "stop"
+    summary = tracker.get_session_summary()
+    assert summary is not None
+    assert summary.status == "incomplete"
+    assert tracker.get_statistics()["session_status"] == "incomplete"
 
 
 def test_memory_tracker_start_tracking_resets_collector_session_state(

@@ -8,7 +8,8 @@ import socket
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 
-from stormlog.telemetry import TelemetryEventV2, telemetry_event_from_record
+from stormlog.session import SessionSummary
+from stormlog.telemetry import TelemetryEvent, telemetry_event_from_record
 from stormlog.telemetry_sink import TelemetrySinkConfig
 
 from ..utils import format_bytes
@@ -205,7 +206,7 @@ class TrackerSession:
             Dict[str, Any], self._tracker.get_memory_timeline(interval=interval)
         )
 
-    def get_telemetry_events(self) -> list[TelemetryEventV2]:
+    def get_telemetry_events(self) -> list[TelemetryEvent]:
         """Return normalized telemetry events from the active tracker session."""
         tracker = self._tracker
         if not tracker:
@@ -234,7 +235,7 @@ class TrackerSession:
         elif hasattr(tracker, "events"):
             raw_events = list(getattr(tracker, "events", []))
 
-        normalized: list[TelemetryEventV2] = []
+        normalized: list[TelemetryEvent] = []
         for raw_event in raw_events:
             timestamp = getattr(raw_event, "timestamp", None)
             if timestamp is None:
@@ -251,6 +252,12 @@ class TrackerSession:
             metadata = dict(getattr(raw_event, "metadata", {}) or {})
             metadata.setdefault("backend", backend_name)
             partial_fields = set(metadata.get("collector_partial_fields", []) or [])
+            session_id = getattr(raw_event, "session_id", None)
+            if session_id is None:
+                session_summary = self.get_session_summary()
+                session_id = (
+                    session_summary.session_id if session_summary is not None else None
+                )
 
             device_total = getattr(raw_event, "device_total", None)
             if device_total is None and "device_total_bytes" not in partial_fields:
@@ -258,6 +265,7 @@ class TrackerSession:
                 device_total = int(tracker_total) if tracker_total is not None else None
 
             record = {
+                "session_id": session_id,
                 "timestamp": float(timestamp),
                 "event_type": event_type,
                 "collector": collector,
@@ -287,6 +295,7 @@ class TrackerSession:
                         permissive_legacy=True,
                         default_collector=collector,
                         default_sampling_interval_ms=sampling_interval_ms,
+                        default_session_id=session_id,
                     )
                 )
             except Exception as exc:
@@ -296,6 +305,21 @@ class TrackerSession:
                 )
 
         return normalized
+
+    def get_session_summary(self) -> Optional[SessionSummary]:
+        """Return the underlying tracker session summary when available."""
+        tracker = self._tracker
+        if tracker is None or not hasattr(tracker, "get_session_summary"):
+            return None
+        try:
+            summary = tracker.get_session_summary()
+        except Exception as exc:
+            logger.debug(
+                "TrackerSession.get_session_summary failed: %s",
+                exc,
+            )
+            return None
+        return cast(Optional[SessionSummary], summary)
 
     def get_device_label(self) -> Optional[str]:
         """Return the CUDA device label, if tracking."""

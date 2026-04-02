@@ -16,6 +16,10 @@
 
 Stormlog is a memory-profiling toolkit for day-to-day PyTorch and TensorFlow work. It combines Python APIs, CLI commands, and a Textual TUI so you can move from "what is using memory?" to saved artifacts and shareable diagnostics without switching tools.
 
+Long-running `track` and `diagnose` flows are session-aware, so one capture can
+be reconstructed deterministically across sink segments, diagnose bundles, and
+OOM flight-recorder artifacts.
+
 ## Why use this tool
 
 - Catch memory growth before it becomes an OOM.
@@ -86,6 +90,9 @@ tfmemprof info
 tfmemprof diagnose --duration 0 --output /tmp/tf_diag
 ```
 
+If you reuse a sink directory across multiple runs, Stormlog separates those
+captures by `session_id` and defaults analysis to the newest clean session.
+
 ### PyTorch API workflow
 
 `GPUMemoryProfiler` currently targets PyTorch runtimes exposed through
@@ -142,6 +149,7 @@ print(f"Snapshots captured: {len(results.snapshots)}")
 - capture `track` output or a `diagnose` bundle
 - open the same artifacts in the TUI diagnostics and visualizations tabs
 - compare growth, gaps, and per-rank behavior before changing model code
+- switch between discovered sessions instead of merging multiple captures from the same sink
 
 ### CI or release owner
 

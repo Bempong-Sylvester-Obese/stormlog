@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from .session import SessionSummary, session_summary_to_dict
 from .utils import get_system_info
 
 logger = logging.getLogger(__name__)
@@ -100,6 +101,11 @@ class OOMFlightRecorder:
         with self._events_lock:
             return [dict(event) for event in self._events]
 
+    def clear(self) -> None:
+        """Discard buffered events for the next session/run."""
+        with self._events_lock:
+            self._events.clear()
+
     def dump(
         self,
         *,
@@ -108,6 +114,7 @@ class OOMFlightRecorder:
         context: Optional[str],
         backend: str,
         metadata: Optional[dict[str, Any]] = None,
+        session_summary: SessionSummary | None = None,
     ) -> Optional[str]:
         """Write an OOM diagnostic bundle and enforce retention constraints."""
         if not self.config.enabled:
@@ -128,6 +135,17 @@ class OOMFlightRecorder:
             "context": context,
             "backend": backend,
             "captured_event_count": len(events_payload),
+            "session_id": (
+                session_summary.session_id if session_summary is not None else None
+            ),
+            "session_status": (
+                session_summary.status if session_summary is not None else None
+            ),
+            "session": (
+                session_summary_to_dict(session_summary)
+                if session_summary is not None
+                else None
+            ),
             "custom_metadata": dict(metadata or {}),
         }
         environment_payload = {
@@ -141,12 +159,23 @@ class OOMFlightRecorder:
         self._write_json(bundle_dir / "environment.json", environment_payload)
 
         manifest_payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "bundle_name": bundle_dir.name,
             "created_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "reason": reason,
             "backend": backend,
             "event_count": len(events_payload),
+            "session_id": (
+                session_summary.session_id if session_summary is not None else None
+            ),
+            "session_status": (
+                session_summary.status if session_summary is not None else None
+            ),
+            "session": (
+                session_summary_to_dict(session_summary)
+                if session_summary is not None
+                else None
+            ),
             "files": [
                 "manifest.json",
                 "events.json",
