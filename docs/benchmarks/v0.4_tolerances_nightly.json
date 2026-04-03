@@ -1,6 +1,6 @@
 {
   "version": "v0.4",
-  "description": "Allowed positive regression deltas for the v0.4 nightly operability profile.",
+  "description": "Allowed positive regression deltas for the v0.4 nightly benchmark profile.",
   "tolerances": {
     "gpumemprof_cpu.artifact_growth_bytes": 2000000.0,
     "gpumemprof_cpu.collector_failure_event_count": 0.0,

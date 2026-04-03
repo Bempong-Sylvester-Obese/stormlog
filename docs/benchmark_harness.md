@@ -6,21 +6,22 @@
 > the repository `examples/` package and `docs/benchmarks/`. It is not shipped
 > in the PyPI package.
 
-The v0.4 harness qualifies always-on monitoring as an operability budget, not
-just a point-in-time benchmark. It runs the default `track` mode for:
+The v0.4 benchmark harness measures always-on monitoring as a benchmarked
+operability budget, not just as a point-in-time benchmark.
+
+It still supports the same two gate modes:
+
+- `budget`: compare current metrics to absolute max thresholds
+- `regression`: compare current metrics to a checked-in baseline plus allowed deltas
+
+On top of that, v0.4 extends the benchmark coverage to:
 
 - `gpumemprof` CPU fallback (`gpumemprof_cpu`)
 - `tfmemprof --device /CPU:0` (`tfmemprof_cpu`)
-
-and reports:
-
-- default-interval runtime overhead
-- CPU overhead
-- soak-time RSS drift
-- append-only artifact growth
-- rollover and retention behavior
-- history truncation counters
-- actionable failure diagnostics
+- accelerated soak qualification
+- rollover and retention validation
+- history truncation diagnostics
+- actionable failure reporting
 
 ## Default operating assumptions
 
@@ -62,7 +63,7 @@ python -m examples.cli.benchmark_harness \
   --output artifacts/benchmarks/latest_v0.4.json
 ```
 
-## Pull-request regression gate
+## Enforce Regression Gate
 
 ```bash
 python -m examples.cli.benchmark_harness \
@@ -71,12 +72,28 @@ python -m examples.cli.benchmark_harness \
   --mode all \
   --gate-mode regression \
   --iterations 5000 \
-  --baseline docs/benchmarks/v0.4_pr_baseline.json \
-  --tolerances docs/benchmarks/v0.4_pr_tolerances.json \
-  --output artifacts/benchmarks/latest_v0.4_pr.json
+  --baseline docs/benchmarks/v0.4_baseline.json \
+  --tolerances docs/benchmarks/v0.4_tolerances.json \
+  --output artifacts/benchmarks/latest_v0.4_regression.json
 ```
 
 This is the policy used by the pull-request memory gate in CI.
+
+## Enforce Budgets
+
+```bash
+python -m examples.cli.benchmark_harness \
+  --check \
+  --profile pr \
+  --mode all \
+  --gate-mode budget \
+  --iterations 5000 \
+  --budgets docs/benchmarks/v0.4_operating_budget.json \
+  --output artifacts/benchmarks/latest_v0.4_budget.json
+```
+
+Use budget mode when you want a short benchmark run checked against absolute
+operating thresholds rather than baseline deltas.
 
 ## Nightly operating-budget gate
 
@@ -91,7 +108,8 @@ python -m examples.cli.benchmark_harness \
   --output artifacts/benchmarks/latest_v0.4_nightly.json
 ```
 
-This is the scheduled CI policy that enforces the declared operating budget.
+This keeps budget enforcement in place for the longer nightly soak profile, so
+the short-run checks and long-run checks use the same benchmark policy model.
 
 ## What it measures
 
@@ -152,10 +170,10 @@ When a run fails, adjust knobs in this order:
 The v0.4 harness reads:
 
 - `docs/benchmarks/v0.4_operating_budget.json`
-- `docs/benchmarks/v0.4_pr_baseline.json`
-- `docs/benchmarks/v0.4_pr_tolerances.json`
-- `docs/benchmarks/v0.4_nightly_baseline.json`
-- `docs/benchmarks/v0.4_nightly_tolerances.json`
+- `docs/benchmarks/v0.4_baseline.json`
+- `docs/benchmarks/v0.4_tolerances.json`
+- `docs/benchmarks/v0.4_baseline_nightly.json`
+- `docs/benchmarks/v0.4_tolerances_nightly.json`
 
 Update these files only with an intentional benchmark refresh. Run the harness
 with the same profile and config as CI, inspect the new metrics, then commit the

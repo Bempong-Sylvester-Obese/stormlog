@@ -84,6 +84,21 @@ class TrackingResult:
         return (self.memory_usage[-1] - self.memory_usage[0]) / self.duration
 
 
+@dataclass(frozen=True)
+class _TrackingResultData:
+    retained_memory_usage: List[float]
+    retained_timestamps: List[float]
+    retained_events: List[Dict[str, Any]]
+    retained_alerts: List[Dict[str, Any]]
+    total_samples_observed: int
+    peak_memory: float
+    min_memory: float
+    sum_memory: float
+    dropped_samples: int
+    dropped_events: int
+    dropped_alerts: int
+
+
 class MemoryTracker:
     """Real-time TensorFlow GPU memory tracker."""
 
@@ -146,6 +161,7 @@ class MemoryTracker:
         self._history_dropped_samples = 0
         self._history_dropped_events = 0
         self._history_dropped_alerts = 0
+        self._collector_failure_event_count = 0
         self._total_samples_observed = 0
         self._peak_memory_mb = 0.0
         self._min_memory_mb = float("inf")
@@ -203,11 +219,27 @@ class MemoryTracker:
         self._history_dropped_samples = 0
         self._history_dropped_events = 0
         self._history_dropped_alerts = 0
+        self._collector_failure_event_count = 0
         self._total_samples_observed = 0
         self._peak_memory_mb = 0.0
         self._min_memory_mb = float("inf")
         self._sum_memory_mb = 0.0
         self._last_sink_diagnostics = self._empty_sink_diagnostics()
+
+    def _tracking_result_data(self) -> _TrackingResultData:
+        return _TrackingResultData(
+            retained_memory_usage=list(self._memory_usage),
+            retained_timestamps=list(self._timestamps),
+            retained_events=list(self._events),
+            retained_alerts=list(self._alerts),
+            total_samples_observed=self._total_samples_observed,
+            peak_memory=self._peak_memory_mb,
+            min_memory=self._min_memory_mb,
+            sum_memory=self._sum_memory_mb,
+            dropped_samples=self._history_dropped_samples,
+            dropped_events=self._history_dropped_events,
+            dropped_alerts=self._history_dropped_alerts,
+        )
 
     def _append_sample_locked(self, memory_mb: float, timestamp: float) -> None:
         if len(self._memory_usage) == self.max_history:
@@ -397,6 +429,7 @@ class MemoryTracker:
             next_retry_epoch_s=next_retry_epoch_s,
         )
         if previous_health.status == COLLECTOR_HEALTH_HEALTHY:
+            self._collector_failure_event_count += 1
             self._append_event(
                 timestamp=timestamp,
                 memory_mb=self._status_memory_value(),
@@ -421,6 +454,7 @@ class MemoryTracker:
                 status=COLLECTOR_HEALTH_HEALTHY,
                 telemetry_partial=False,
             )
+            self._collector_failure_event_count += 1
             self._append_event(
                 timestamp=timestamp,
                 memory_mb=self._status_memory_value(),
@@ -584,21 +618,11 @@ class MemoryTracker:
     def _create_tracking_result(self) -> TrackingResult:
         """Create tracking result from collected data."""
         with self._lock:
-            retained_memory_usage = list(self._memory_usage)
-            retained_timestamps = list(self._timestamps)
-            retained_events = list(self._events)
-            retained_alerts = list(self._alerts)
-            total_samples_observed = self._total_samples_observed
-            peak_memory = self._peak_memory_mb
-            min_memory = self._min_memory_mb
-            sum_memory = self._sum_memory_mb
-            dropped_samples = self._history_dropped_samples
-            dropped_events = self._history_dropped_events
-            dropped_alerts = self._history_dropped_alerts
+            result_data = self._tracking_result_data()
             if (
-                not retained_memory_usage
-                and not retained_events
-                and not retained_alerts
+                not result_data.retained_memory_usage
+                and not result_data.retained_events
+                and not result_data.retained_alerts
             ):
                 return self._create_empty_result()
 
@@ -606,34 +630,46 @@ class MemoryTracker:
             session_end = self._session_end_time
             if session_start is None:
                 session_start = (
-                    retained_timestamps[0] if retained_timestamps else time.time()
+                    result_data.retained_timestamps[0]
+                    if result_data.retained_timestamps
+                    else time.time()
                 )
             if session_end is None:
                 session_end = (
-                    retained_timestamps[-1] if retained_timestamps else time.time()
+                    result_data.retained_timestamps[-1]
+                    if result_data.retained_timestamps
+                    else time.time()
                 )
 
             return TrackingResult(
                 start_time=session_start,
                 end_time=session_end,
-                memory_usage=retained_memory_usage,
-                timestamps=retained_timestamps,
-                events=retained_events,
-                alerts_triggered=retained_alerts,
-                peak_memory=peak_memory if total_samples_observed else 0.0,
-                average_memory=(
-                    sum_memory / total_samples_observed
-                    if total_samples_observed
+                memory_usage=result_data.retained_memory_usage,
+                timestamps=result_data.retained_timestamps,
+                events=result_data.retained_events,
+                alerts_triggered=result_data.retained_alerts,
+                peak_memory=(
+                    result_data.peak_memory
+                    if result_data.total_samples_observed
                     else 0.0
                 ),
-                min_memory=min_memory if total_samples_observed else 0.0,
+                average_memory=(
+                    result_data.sum_memory / result_data.total_samples_observed
+                    if result_data.total_samples_observed
+                    else 0.0
+                ),
+                min_memory=(
+                    result_data.min_memory
+                    if result_data.total_samples_observed
+                    else 0.0
+                ),
                 history_window_limit=self.max_history,
-                history_retained_samples=len(retained_memory_usage),
-                history_dropped_samples=dropped_samples,
-                history_retained_events=len(retained_events),
-                history_dropped_events=dropped_events,
-                history_retained_alerts=len(retained_alerts),
-                history_dropped_alerts=dropped_alerts,
+                history_retained_samples=len(result_data.retained_memory_usage),
+                history_dropped_samples=result_data.dropped_samples,
+                history_retained_events=len(result_data.retained_events),
+                history_dropped_events=result_data.dropped_events,
+                history_retained_alerts=len(result_data.retained_alerts),
+                history_dropped_alerts=result_data.dropped_alerts,
             )
 
     def _create_empty_result(self) -> TrackingResult:
@@ -680,6 +716,10 @@ class MemoryTracker:
                 else 0.0
             )
             min_memory = self._min_memory_mb if self._total_samples_observed else 0.0
+            collector_failure_event_count = self._collector_failure_event_count
+            dropped_samples = self._history_dropped_samples
+            dropped_events = self._history_dropped_events
+            dropped_alerts = self._history_dropped_alerts
             tracking_start = self._session_start_time
             tracking_end = self._session_end_time
 
@@ -698,15 +738,16 @@ class MemoryTracker:
             "peak_memory_mb": peak_memory,
             "average_memory_mb": average_memory,
             "min_memory_mb": min_memory,
+            "collector_failure_event_count": collector_failure_event_count,
             "total_events": retained_events,
             "tracking_duration_seconds": tracking_duration,
             "history_window_limit": self.max_history,
             "history_retained_samples": retained_samples,
-            "history_dropped_samples": self._history_dropped_samples,
+            "history_dropped_samples": dropped_samples,
             "history_retained_events": retained_events,
-            "history_dropped_events": self._history_dropped_events,
+            "history_dropped_events": dropped_events,
             "history_retained_alerts": retained_alerts,
-            "history_dropped_alerts": self._history_dropped_alerts,
+            "history_dropped_alerts": dropped_alerts,
             **self._last_sink_diagnostics,
             "session_id": (
                 self._session_summary.session_id

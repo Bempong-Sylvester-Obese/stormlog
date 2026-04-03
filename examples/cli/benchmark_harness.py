@@ -63,11 +63,19 @@ class SinkOverrides(TypedDict, total=False):
 
 
 def _runtime_baseline_path(profile: str) -> Path:
-    return REPO_ROOT / "docs" / "benchmarks" / f"v0.4_{profile}_baseline.json"
+    if profile == DEFAULT_PROFILE:
+        filename = "v0.4_baseline.json"
+    else:
+        filename = f"v0.4_baseline_{profile}.json"
+    return REPO_ROOT / "docs" / "benchmarks" / filename
 
 
 def _runtime_tolerances_path(profile: str) -> Path:
-    return REPO_ROOT / "docs" / "benchmarks" / f"v0.4_{profile}_tolerances.json"
+    if profile == DEFAULT_PROFILE:
+        filename = "v0.4_tolerances.json"
+    else:
+        filename = f"v0.4_tolerances_{profile}.json"
+    return REPO_ROOT / "docs" / "benchmarks" / filename
 
 
 def _directory_size_bytes(directory: Path) -> int:
@@ -140,6 +148,22 @@ class RuntimeSession:
 
     def finish(self) -> dict[str, Any]:
         raise NotImplementedError
+
+
+def _finalize_scenario_summary(
+    scenario_dir: Path,
+    summary: dict[str, Any],
+) -> dict[str, Any]:
+    summary_path = scenario_dir / "summary.json"
+    artifact_size_bytes = 0
+
+    while True:
+        summary["artifact_size_bytes"] = artifact_size_bytes
+        _write_json(summary_path, summary)
+        final_size = _directory_size_bytes(scenario_dir)
+        if final_size == artifact_size_bytes:
+            return summary
+        artifact_size_bytes = final_size
 
 
 def _telemetry_sink_config(
@@ -281,16 +305,14 @@ class TensorFlowRuntimeSession(RuntimeSession):
             json.dumps(payload, indent=2, sort_keys=True),
             encoding="utf-8",
         )
-        collector_failure_event_count = sum(
-            1
-            for event in result.events
-            if event.get("event_type") in {"collector_degraded", "collector_recovered"}
-        )
+        stats = self.tracker.get_statistics()
         return {
-            "stats": self.tracker.get_statistics(),
+            "stats": stats,
             "event_count": result.history_retained_events
             + result.history_dropped_events,
-            "collector_failure_event_count": collector_failure_event_count,
+            "collector_failure_event_count": int(
+                stats.get("collector_failure_event_count", 0)
+            ),
             "output_path": str(output_path),
         }
 
@@ -347,11 +369,8 @@ def _run_unprofiled_scenario(
         "cpu_seconds": cpu_seconds,
         "checksum": checksum,
         "artifact_dir": str(scenario_dir),
-        "artifact_size_bytes": _directory_size_bytes(scenario_dir),
     }
-    _write_json(scenario_dir / "summary.json", summary)
-    summary["artifact_size_bytes"] = _directory_size_bytes(scenario_dir)
-    return summary
+    return _finalize_scenario_summary(scenario_dir, summary)
 
 
 def _run_tracked_scenario(
@@ -409,9 +428,7 @@ def _run_tracked_scenario(
         "artifact_dir": str(scenario_dir),
         "output_path": str(session_report["output_path"]),
     }
-    _write_json(scenario_dir / "summary.json", summary)
-    summary["artifact_size_bytes"] = _directory_size_bytes(scenario_dir)
-    return summary
+    return _finalize_scenario_summary(scenario_dir, summary)
 
 
 def _run_soak_scenario(
@@ -472,9 +489,7 @@ def _run_soak_scenario(
         "artifact_dir": str(scenario_dir),
         "output_path": str(session_report["output_path"]),
     }
-    _write_json(scenario_dir / "summary.json", summary)
-    summary["artifact_size_bytes"] = _directory_size_bytes(scenario_dir)
-    return summary
+    return _finalize_scenario_summary(scenario_dir, summary)
 
 
 def _run_retention_validation(
@@ -531,8 +546,7 @@ def _run_retention_validation(
         "artifact_dir": str(scenario_dir),
         "output_path": str(session_report["output_path"]),
     }
-    _write_json(scenario_dir / "summary.json", result)
-    return result
+    return _finalize_scenario_summary(scenario_dir, result)
 
 
 def _runtime_metric_key(runtime_name: str, metric_name: str) -> str:

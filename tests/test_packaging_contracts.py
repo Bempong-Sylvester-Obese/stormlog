@@ -73,8 +73,10 @@ def test_ci_wires_memory_regression_gate_job() -> None:
     assert "--profile pr" in job_block
     assert "--mode all" in job_block
     assert "--gate-mode regression" in job_block
-    assert "docs/benchmarks/v0.4_pr_baseline.json" in job_block
-    assert "docs/benchmarks/v0.4_pr_tolerances.json" in job_block
+    assert "docs/benchmarks/v0.4_baseline.json" in job_block
+    assert "docs/benchmarks/v0.4_tolerances.json" in job_block
+    assert "artifacts/benchmarks/ci_regression.json" in job_block
+    assert "artifacts/benchmarks/ci_scenarios" in job_block
     assert "--iterations 5000" in job_block
     assert "actions/upload-artifact@v4" in job_block
 

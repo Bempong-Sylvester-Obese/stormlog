@@ -1,5 +1,7 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Literal
 
 import pytest
 
@@ -249,6 +251,38 @@ def test_runtime_config_uses_equivalent_time_profile(
     assert config["tfmemprof_cpu"]["default_interval"] == 1.0
     assert config["tfmemprof_cpu"]["overhead_sample_count"] == 3
     assert config["tfmemprof_cpu"]["soak_sample_count"] == 1
+
+
+def test_runtime_asset_paths_follow_benchmark_naming() -> None:
+    assert benchmark_harness._runtime_baseline_path("pr").name == "v0.4_baseline.json"
+    assert (
+        benchmark_harness._runtime_tolerances_path("pr").name == "v0.4_tolerances.json"
+    )
+    assert (
+        benchmark_harness._runtime_baseline_path("nightly").name
+        == "v0.4_baseline_nightly.json"
+    )
+    assert (
+        benchmark_harness._runtime_tolerances_path("nightly").name
+        == "v0.4_tolerances_nightly.json"
+    )
+
+
+def test_unprofiled_scenario_summary_persists_final_artifact_size(
+    tmp_path: Path,
+) -> None:
+    summary = benchmark_harness._run_unprofiled_scenario(
+        tmp_path / "unprofiled",
+        iterations=4,
+        allocation_kb=16,
+    )
+
+    summary_path = Path(summary["artifact_dir"]) / "summary.json"
+    persisted = json.loads(summary_path.read_text(encoding="utf-8"))
+    final_size = benchmark_harness._directory_size_bytes(summary_path.parent)
+
+    assert summary["artifact_size_bytes"] == final_size
+    assert persisted["artifact_size_bytes"] == final_size
 
 
 def test_benchmark_harness_writes_v04_report_with_expected_shape(
@@ -716,6 +750,108 @@ def test_failure_diagnostics_include_runtime_context_for_budget_failures() -> No
     assert "rollover_count=3" in failures[0]
     assert "pruned_segment_count=2" in failures[0]
     assert "history_dropped_samples=11" in failures[0]
+
+
+def test_tensorflow_runtime_session_uses_monotonic_failure_counter(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _FakeStopEvent:
+        def clear(self) -> None:
+            return None
+
+    class _FakeLock:
+        def __enter__(self) -> "_FakeLock":
+            return self
+
+        def __exit__(
+            self,
+            exc_type: object,
+            exc: BaseException | None,
+            traceback: object,
+        ) -> Literal[False]:
+            _ = exc_type, exc, traceback
+            return False
+
+    class _FakeTensorFlowTracker:
+        def __init__(
+            self,
+            *,
+            sampling_interval: float,
+            device: str,
+            enable_logging: bool,
+            telemetry_sink_config: object,
+        ) -> None:
+            _ = sampling_interval, device, enable_logging, telemetry_sink_config
+            self._stop_event = _FakeStopEvent()
+            self._lock = _FakeLock()
+            self._session_start_time = None
+            self._session_end_time = None
+            self._session_summary = None
+            self._last_successful_memory_mb = None
+            self.tracking = False
+
+        def _reset_history(self) -> None:
+            return None
+
+        def _set_collector_health(
+            self,
+            *,
+            status: str,
+            telemetry_partial: bool,
+        ) -> None:
+            _ = status, telemetry_partial
+
+        def _ensure_session_summary(self) -> None:
+            return None
+
+        def _append_event(self, **kwargs: object) -> None:
+            _ = kwargs
+
+        def _status_memory_value(self) -> float:
+            return 0.0
+
+        def _run_tracking_iteration(self) -> None:
+            return None
+
+        def stop_tracking(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                peak_memory=32.0,
+                average_memory=24.0,
+                duration=1.0,
+                memory_usage=[24.0, 32.0],
+                timestamps=[1.0, 2.0],
+                alerts_triggered=[],
+                events=[{"type": "sample"}],
+                history_window_limit=4,
+                history_retained_samples=2,
+                history_dropped_samples=0,
+                history_retained_events=1,
+                history_dropped_events=5,
+                history_retained_alerts=0,
+                history_dropped_alerts=0,
+            )
+
+        def get_statistics(self) -> dict[str, int]:
+            return {"collector_failure_event_count": 2}
+
+    monkeypatch.setattr(
+        benchmark_harness.importlib,
+        "import_module",
+        lambda name: (
+            SimpleNamespace(MemoryTracker=_FakeTensorFlowTracker)
+            if name == "stormlog.tensorflow.tracker"
+            else None
+        ),
+    )
+
+    session = benchmark_harness.TensorFlowRuntimeSession(tmp_path, 1.0)
+    session.start()
+    report = session.finish()
+
+    assert report["collector_failure_event_count"] == 2
+    assert report["event_count"] == 6
+    assert Path(report["output_path"]).exists()
 
 
 def test_run_benchmark_harness_cpu_runtime_integration(

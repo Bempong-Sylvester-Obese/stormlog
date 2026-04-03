@@ -263,10 +263,10 @@ jobs:
                     --mode all \
                     --gate-mode regression \
                     --iterations 5000 \
-                    --baseline docs/benchmarks/v0.4_pr_baseline.json \
-                    --tolerances docs/benchmarks/v0.4_pr_tolerances.json \
-                    --output artifacts/benchmarks/ci_pr_regression.json \
-                    --artifact-root artifacts/benchmarks/ci_pr_scenarios
+                    --baseline docs/benchmarks/v0.4_baseline.json \
+                    --tolerances docs/benchmarks/v0.4_tolerances.json \
+                    --output artifacts/benchmarks/ci_regression.json \
+                    --artifact-root artifacts/benchmarks/ci_scenarios
 
             - name: Upload benchmark regression artifacts
               if: always()

@@ -1,6 +1,6 @@
 {
   "version": "v0.4",
-  "description": "Baseline metrics for the v0.4 nightly operability profile. gpumemprof_cpu values were recorded from a local .venv run on 2026-04-02; tfmemprof_cpu values are interval-scaled seed baselines paired with explicit tolerances until CI refreshes them.",
+  "description": "Baseline metrics for the v0.4 nightly benchmark profile.",
   "config": {
     "allocation_kb": 512,
     "iterations": 5000,

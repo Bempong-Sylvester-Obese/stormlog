@@ -1,6 +1,6 @@
 {
   "version": "v0.4",
-  "description": "Allowed positive regression deltas for the v0.4 pull-request operability gate.",
+  "description": "Allowed positive regression deltas for the v0.4 pull-request benchmark gate.",
   "tolerances": {
     "gpumemprof_cpu.artifact_growth_bytes": 2000000.0,
     "gpumemprof_cpu.collector_failure_event_count": 0.0,
