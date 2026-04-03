@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess
@@ -39,6 +40,7 @@ def test_run_benchmark_check_uses_absolute_artifact_paths(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
 
     observed_cmd: list[str] = []
 
@@ -59,6 +61,27 @@ def test_run_benchmark_check_uses_absolute_artifact_paths(
     assert output_path.is_absolute()
     assert artifact_root.is_absolute()
     assert result["output"] == str(output_path)
+    assert "--profile" in observed_cmd
+    assert observed_cmd[observed_cmd.index("--profile") + 1] == "pr"
+    assert "--mode" in observed_cmd
+    assert observed_cmd[observed_cmd.index("--mode") + 1] == "overhead"
+    assert observed_cmd[observed_cmd.index("--budgets") + 1] == str(
+        capability_matrix.REPO_ROOT
+        / "docs"
+        / "benchmarks"
+        / "v0.4_operating_budget.json"
+    )
+
+
+def test_run_benchmark_check_skips_when_tensorflow_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+
+    result = capability_matrix._run_benchmark_check(Path("relative-artifacts"), "smoke")
+
+    assert result["status"] == "SKIP"
+    assert "tensorflow" in str(result["reason"]).lower()
 
 
 def test_run_tui_smoke_skips_when_tui_extras_are_missing(

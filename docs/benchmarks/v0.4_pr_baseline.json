@@ -1,0 +1,62 @@
+{
+  "version": "v0.4",
+  "description": "Baseline metrics for the v0.4 pull-request operability gate. gpumemprof_cpu values were recorded from a local .venv run on 2026-04-02; tfmemprof_cpu values are interval-scaled seed baselines paired with explicit tolerances until CI refreshes them.",
+  "config": {
+    "allocation_kb": 512,
+    "iterations": 5000,
+    "mode": "all",
+    "profile": "pr",
+    "profile_equivalent_hours": 6.0,
+    "retention_validation": {
+      "flush_every_events": 50,
+      "flush_every_seconds": 2.0,
+      "retention_max_files": 2,
+      "retention_max_total_bytes": 24576,
+      "rollover_max_bytes": 8192,
+      "rollover_max_events": 200,
+      "sample_limit": 2048
+    },
+    "runtimes": {
+      "gpumemprof_cpu": {
+        "default_interval": 0.1,
+        "overhead_sample_count": 5000,
+        "soak_sample_count": 216000
+      },
+      "tfmemprof_cpu": {
+        "default_interval": 1.0,
+        "overhead_sample_count": 500,
+        "soak_sample_count": 21600
+      }
+    }
+  },
+  "metrics": {
+    "gpumemprof_cpu.artifact_growth_bytes": 6956990.0,
+    "gpumemprof_cpu.collector_failure_event_count": 0.0,
+    "gpumemprof_cpu.cpu_overhead_pct": 366.5726713111429,
+    "gpumemprof_cpu.final_retained_bytes": 49249296.0,
+    "gpumemprof_cpu.final_retained_files": 8.0,
+    "gpumemprof_cpu.history_dropped_alerts": 0.0,
+    "gpumemprof_cpu.history_dropped_events": 206002.0,
+    "gpumemprof_cpu.history_dropped_samples": 0.0,
+    "gpumemprof_cpu.max_rss_delta_bytes": 0.0,
+    "gpumemprof_cpu.pruned_bytes": 90608889.0,
+    "gpumemprof_cpu.pruned_segment_count": 14.0,
+    "gpumemprof_cpu.rollover_count": 21.0,
+    "gpumemprof_cpu.rss_growth_per_24h_equiv": -246153216.0,
+    "gpumemprof_cpu.runtime_overhead_pct": 369.23107601942377,
+    "tfmemprof_cpu.artifact_growth_bytes": 6956990.0,
+    "tfmemprof_cpu.collector_failure_event_count": 0.0,
+    "tfmemprof_cpu.cpu_overhead_pct": 366.5726713111429,
+    "tfmemprof_cpu.final_retained_bytes": 20000000.0,
+    "tfmemprof_cpu.final_retained_files": 3.0,
+    "tfmemprof_cpu.history_dropped_alerts": 0.0,
+    "tfmemprof_cpu.history_dropped_events": 11602.0,
+    "tfmemprof_cpu.history_dropped_samples": 11600.0,
+    "tfmemprof_cpu.max_rss_delta_bytes": 0.0,
+    "tfmemprof_cpu.pruned_bytes": 0.0,
+    "tfmemprof_cpu.pruned_segment_count": 0.0,
+    "tfmemprof_cpu.rollover_count": 2.0,
+    "tfmemprof_cpu.rss_growth_per_24h_equiv": 0.0,
+    "tfmemprof_cpu.runtime_overhead_pct": 369.23107601942377
+  }
+}
