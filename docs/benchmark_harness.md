@@ -1,89 +1,162 @@
 [← Back to main docs](index.md)
 
-# Benchmark Harness (v0.3)
+# Benchmark Harness (v0.4)
 
 > **Source checkout only.** `python -m examples.cli.benchmark_harness` requires
 > the repository `examples/` package and `docs/benchmarks/`. It is not shipped
 > in the PyPI package.
 
-This benchmark harness measures CPU tracker overhead and artifact growth. In v0.3
-it supports two gate modes:
+The v0.4 harness qualifies always-on monitoring as an operability budget, not
+just a point-in-time benchmark. It runs the default `track` mode for:
 
-- `budget`: compare current metrics to absolute max thresholds
-- `regression`: compare current metrics to a checked-in baseline plus allowed deltas
+- `gpumemprof` CPU fallback (`gpumemprof_cpu`)
+- `tfmemprof --device /CPU:0` (`tfmemprof_cpu`)
 
-## Run the Harness
+and reports:
+
+- default-interval runtime overhead
+- CPU overhead
+- soak-time RSS drift
+- append-only artifact growth
+- rollover and retention behavior
+- history truncation counters
+- actionable failure diagnostics
+
+## Default operating assumptions
+
+The harness models the always-on default runtime mode as:
+
+- `track` with append-only sink enabled
+- `flush_every_seconds=2.0`
+- `rollover_max_bytes=64 MB`
+- `retention_max_files=8`
+- `retention_max_total_bytes=512 MB`
+
+Retention validation also runs a forced-churn subtest with tighter limits so
+rollover and pruning are exercised even in fast local runs.
+
+## Profiles
+
+- `pr`: accelerated `6h`-equivalent soak plus default-interval overhead checks
+- `nightly`: accelerated `24h`-equivalent soak plus the same overhead checks
+
+“24h-equivalent” means the harness does not sleep between samples. Instead, it
+collects the same number of samples that a 24-hour run would emit at the
+runtime’s default interval:
+
+- `gpumemprof_cpu`: `864000` samples at `0.1s`
+- `tfmemprof_cpu`: `86400` samples at `1.0s`
+
+## Modes
+
+- `overhead`: run only the unprofiled vs tracked overhead comparison
+- `soak`: run only the accelerated soak and retention validation
+- `all`: run both
+
+## Run the harness
 
 ```bash
 python -m examples.cli.benchmark_harness \
-  --iterations 200 \
-  --output artifacts/benchmarks/latest.json
+  --profile pr \
+  --mode all \
+  --output artifacts/benchmarks/latest_v0.4.json
 ```
 
-## Enforce Regression Gate
+## Pull-request regression gate
 
 ```bash
 python -m examples.cli.benchmark_harness \
   --check \
+  --profile pr \
+  --mode all \
   --gate-mode regression \
   --iterations 5000 \
-  --baseline docs/benchmarks/v0.3_baseline.json \
-  --tolerances docs/benchmarks/v0.3_tolerances.json \
-  --output artifacts/benchmarks/latest.json
+  --baseline docs/benchmarks/v0.4_pr_baseline.json \
+  --tolerances docs/benchmarks/v0.4_pr_tolerances.json \
+  --output artifacts/benchmarks/latest_v0.4_pr.json
 ```
 
-Use this mode for the v0.3 CI memory regression gate. The regression check uses
-`--iterations 5000` so the baseline signal is less noisy than the lighter v0.2
-budget check.
+This is the policy used by the pull-request memory gate in CI.
 
-## Enforce Budgets
+## Nightly operating-budget gate
 
 ```bash
 python -m examples.cli.benchmark_harness \
   --check \
+  --profile nightly \
+  --mode all \
   --gate-mode budget \
-  --iterations 200 \
-  --budgets docs/benchmarks/v0.2_budgets.json \
-  --output artifacts/benchmarks/latest.json
+  --iterations 5000 \
+  --budgets docs/benchmarks/v0.4_operating_budget.json \
+  --output artifacts/benchmarks/latest_v0.4_nightly.json
 ```
 
-Use `--check` in budget mode when you want the older absolute-threshold policy.
+This is the scheduled CI policy that enforces the declared operating budget.
 
-## What It Measures
+## What it measures
 
-- `runtime_overhead_pct`: wall-time overhead of a tracked run vs an unprofiled run.
-- `cpu_overhead_pct`: CPU-time overhead of a tracked run vs an unprofiled run.
-- `sampling_impact_pct`: extra wall-time cost of default sampling vs lower-frequency sampling.
-- `artifact_growth_bytes`: additional artifact size from the tracked run vs the unprofiled run.
+- `runtime_overhead_pct`: wall-clock overhead of the tracked default mode vs the unprofiled workload.
+- `cpu_overhead_pct`: CPU-time overhead of the tracked default mode vs the unprofiled workload.
+- `artifact_growth_bytes`: tracked-output size minus the unprofiled output size.
+- `rss_growth_per_24h_equiv`: RSS delta normalized to a 24-hour-equivalent run.
+- `max_rss_delta_bytes`: largest observed RSS increase above the soak baseline.
+- `final_retained_files`: retained append-only segment count after pruning.
+- `final_retained_bytes`: retained append-only bytes after pruning.
+- `rollover_count`, `pruned_segment_count`, `pruned_bytes`: sink churn under sustained load.
+- `history_dropped_*`: bounded-history eviction counts surfaced by the runtime.
+- `collector_failure_event_count`: degraded/recovered collector transitions seen during the run.
 
-The current implementation uses `CPUMemoryTracker` and a deterministic CPU workload in `examples/cli/benchmark_harness.py`. Treat it as a budget harness for tracking overhead, not as a full-framework performance benchmark.
+## Output format
 
-## Output Format
+The v0.4 report includes:
 
-The JSON report includes:
+- `profile`, `mode`, `gate_mode`
+- `config`: comparison config plus runtime-specific sample counts
+- `runtimes`: per-runtime overhead, soak, retention-validation, and diagnostic data
+- `metrics`: flattened per-runtime metrics used for gating
+- `budget_checks` or `regression_checks`
+- `failure_diagnostics`: actionable failures with collector, sink, and history context
+- `passed`
 
-- `gate_mode`: which policy was evaluated (`budget` or `regression`).
-- `config`: benchmark configuration and paths.
-- `scenarios`: per-scenario runtime, CPU time, event count, and artifact size.
-- `metrics`: computed deltas used for gating.
-- `budget_checks`: per-metric value/max/passed results in budget mode.
-- `baseline`: checked-in baseline config and metrics in regression mode.
-- `tolerances`: allowed positive deltas in regression mode.
-- `regression_checks`: per-metric current/baseline/delta/allowed/passed results.
-- `passed`: overall gate status.
+## Interpreting failures
 
-## Baseline And Tolerance Files
+Failure lines are intentionally verbose. A budget or regression failure includes:
 
-The v0.3 regression gate reads:
+- the failing metric and threshold
+- the runtime name
+- collector health state
+- collector failure count
+- rollover and prune counts
+- retained file and byte totals
+- retained and dropped history counters
 
-- `docs/benchmarks/v0.3_baseline.json`
-- `docs/benchmarks/v0.3_tolerances.json`
+Typical examples:
 
-Update these files in versioned commits when the accepted performance envelope
-changes. Keep baseline updates explicit: run the harness with the same config as
-the CI job, inspect the new metrics, then commit the baseline or tolerance
-change separately from unrelated code.
+- overhead regression: runtime or CPU overhead jumped materially above baseline
+- retention failure: retained files or bytes exceeded the configured sink budget
+- collector failure: degraded-mode transitions occurred during the soak
+- history drift: dropped-event or dropped-sample counts grew beyond the expected envelope
 
-The older absolute thresholds still live in:
+## Tuning order
 
-`docs/benchmarks/v0.2_budgets.json`
+When a run fails, adjust knobs in this order:
+
+1. sampling interval
+2. sink flush cadence
+3. rollover size or rollover event count
+4. retention file and byte limits
+5. TensorFlow `max_history` if sample/event windows are too large for the deployment
+
+## Versioned assets
+
+The v0.4 harness reads:
+
+- `docs/benchmarks/v0.4_operating_budget.json`
+- `docs/benchmarks/v0.4_pr_baseline.json`
+- `docs/benchmarks/v0.4_pr_tolerances.json`
+- `docs/benchmarks/v0.4_nightly_baseline.json`
+- `docs/benchmarks/v0.4_nightly_tolerances.json`
+
+Update these files only with an intentional benchmark refresh. Run the harness
+with the same profile and config as CI, inspect the new metrics, then commit the
+asset update separately from unrelated code.

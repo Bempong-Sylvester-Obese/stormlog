@@ -540,7 +540,7 @@ def _runtime_metric_key(runtime_name: str, metric_name: str) -> str:
 
 
 def _flatten_metrics(
-    runtime_reports: Mapping[str, Mapping[str, Any]]
+    runtime_reports: Mapping[str, Mapping[str, Any]],
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for runtime_name, runtime_report in runtime_reports.items():

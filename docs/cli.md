@@ -99,6 +99,24 @@ Useful sink options:
 - `--telemetry-retention-files`
 - `--telemetry-retention-total-mb`
 
+The always-on qualification harness assumes the default sink settings:
+
+- flush every `2.0s`
+- roll segments at `64 MB`
+- retain at most `8` files
+- retain at most `512 MB` total
+
+When you inspect `track` output after a long run, look for these diagnostics in
+the JSON or CLI summary:
+
+- `rollover_count`
+- `pruned_segment_count`
+- `pruned_bytes`
+- `final_retained_files`
+- `final_retained_bytes`
+- `history_retained_*`
+- `history_dropped_*`
+
 Optional OOM flight-recorder support:
 
 ```bash
@@ -198,6 +216,11 @@ collector failures pause new sample emission, status events remain visible in th
 artifact stream, and normal sampling resumes automatically after recovery.
 The same append-only sink options are available when you need bounded,
 interrupt-tolerant TensorFlow telemetry during a long-running session.
+
+TensorFlow tracking also keeps only a bounded recent history in memory. The
+current CLI output and JSON exports surface the retained vs dropped sample,
+event, and alert counts so long-running jobs can distinguish expected eviction
+from a silent memory-growth regression.
 
 The same session rules apply to TensorFlow tracking:
 

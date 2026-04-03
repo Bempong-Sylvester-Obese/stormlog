@@ -65,13 +65,32 @@ def test_ci_triggers_include_release_dev() -> None:
 def test_ci_wires_memory_regression_gate_job() -> None:
     content = _ci_workflow_content()
     start = content.index("memory-regression-gate:")
+    end = content.index("memory-operability-budget:", start)
+    job_block = content[start:end]
+
+    assert "runs-on: ubuntu-24.04" in job_block
+    assert "tensorflow-cpu==2.15.0" in job_block
+    assert "--profile pr" in job_block
+    assert "--mode all" in job_block
+    assert "--gate-mode regression" in job_block
+    assert "docs/benchmarks/v0.4_pr_baseline.json" in job_block
+    assert "docs/benchmarks/v0.4_pr_tolerances.json" in job_block
+    assert "--iterations 5000" in job_block
+    assert "actions/upload-artifact@v4" in job_block
+
+
+def test_ci_wires_memory_operability_budget_job() -> None:
+    content = _ci_workflow_content()
+    start = content.index("memory-operability-budget:")
     end = content.index("artifact-cli-smoke:", start)
     job_block = content[start:end]
 
     assert "runs-on: ubuntu-24.04" in job_block
-    assert "--gate-mode regression" in job_block
-    assert "docs/benchmarks/v0.3_baseline.json" in job_block
-    assert "docs/benchmarks/v0.3_tolerances.json" in job_block
+    assert "tensorflow-cpu==2.15.0" in job_block
+    assert "--profile nightly" in job_block
+    assert "--mode all" in job_block
+    assert "--gate-mode budget" in job_block
+    assert "docs/benchmarks/v0.4_operating_budget.json" in job_block
     assert "--iterations 5000" in job_block
     assert "actions/upload-artifact@v4" in job_block
 
