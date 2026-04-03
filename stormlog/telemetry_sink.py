@@ -99,6 +99,9 @@ class AppendOnlyTelemetrySink:
         self._flush_thread: threading.Thread | None = None
         self._last_flush_monotonic = time.monotonic()
         self._closed = False
+        self._rollover_count = 0
+        self._pruned_segment_count = 0
+        self._pruned_bytes = 0
         self._load_existing_state()
 
     def start_session(self, summary: SessionSummary | None = None) -> SessionSummary:
@@ -166,6 +169,11 @@ class AppendOnlyTelemetrySink:
             self._closed = True
         self._stop_flush_thread()
 
+    def get_diagnostics(self) -> dict[str, int]:
+        """Return runtime retention and rollover diagnostics."""
+        with self._lock:
+            return self._diagnostics_locked()
+
     def _ensure_active_session_locked(self, record: Mapping[str, Any]) -> None:
         record_session_id = record.get("session_id")
         if record_session_id is not None and not isinstance(record_session_id, str):
@@ -226,6 +234,7 @@ class AppendOnlyTelemetrySink:
         ):
             return
         current.closed = True
+        self._rollover_count += 1
         if self._handle is not None:
             self._handle.close()
             self._handle = None
@@ -249,6 +258,8 @@ class AppendOnlyTelemetrySink:
             if path.exists():
                 path.unlink()
             self._segments.remove(removable)
+            self._pruned_segment_count += 1
+            self._pruned_bytes += removable.size_bytes
 
     def _current_segment(self) -> TelemetrySinkSegment | None:
         if not self._segments:
@@ -384,6 +395,16 @@ class AppendOnlyTelemetrySink:
         temp_path = self._manifest_path.with_suffix(".tmp")
         temp_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
         temp_path.replace(self._manifest_path)
+
+    def _diagnostics_locked(self) -> dict[str, int]:
+        retained_bytes = sum(segment.size_bytes for segment in self._segments)
+        return {
+            "rollover_count": self._rollover_count,
+            "pruned_segment_count": self._pruned_segment_count,
+            "pruned_bytes": self._pruned_bytes,
+            "final_retained_files": len(self._segments),
+            "final_retained_bytes": retained_bytes,
+        }
 
     @staticmethod
     def _count_records(path: Path) -> int:

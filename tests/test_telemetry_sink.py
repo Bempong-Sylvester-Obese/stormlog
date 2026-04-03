@@ -92,6 +92,34 @@ def test_append_only_sink_prunes_oldest_closed_segments(tmp_path: Path) -> None:
     assert not (tmp_path / "segment-000001.jsonl").exists()
 
 
+def test_append_only_sink_exposes_rollover_and_prune_diagnostics(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            rollover_max_events=1,
+            rollover_max_bytes=1024,
+            retention_max_files=2,
+            retention_max_total_bytes=1024 * 1024,
+        )
+    )
+
+    sink.append({"seq": 1})
+    sink.append({"seq": 2})
+    sink.append({"seq": 3})
+    sink.close()
+
+    diagnostics = sink.get_diagnostics()
+    assert diagnostics["rollover_count"] == 3
+    assert diagnostics["pruned_segment_count"] == 1
+    assert diagnostics["pruned_bytes"] > 0
+    assert diagnostics["final_retained_files"] == 2
+    assert diagnostics["final_retained_bytes"] > 0
+
+
 def test_append_only_sink_flushes_without_new_events(tmp_path: Path) -> None:
     sink = AppendOnlyTelemetrySink(
         TelemetrySinkConfig(

@@ -171,11 +171,13 @@ class MemoryTracker:
 
         # Tracking state
         self.events: deque[TrackingEvent] = deque(maxlen=max_events)
+        self._history_dropped_events = 0
         self.is_tracking = False
         self._tracking_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._collector_health = CollectorHealthState()
         self._last_observed_sample: Optional[DeviceMemorySample] = None
+        self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
         self._collector_retry_backoff_initial_s = 1.0
         self._collector_retry_backoff_factor = 2.0
         self._collector_retry_backoff_cap_s = 30.0
@@ -219,6 +221,16 @@ class MemoryTracker:
             )
         self.total_memory = int(total_memory)
 
+    @staticmethod
+    def _empty_sink_diagnostics() -> Dict[str, int]:
+        return {
+            "rollover_count": 0,
+            "pruned_segment_count": 0,
+            "pruned_bytes": 0,
+            "final_retained_files": 0,
+            "final_retained_bytes": 0,
+        }
+
     def _reset_collector_session_state(self) -> None:
         """Reset per-session collector state before a fresh tracking run."""
         self._set_collector_health(
@@ -231,6 +243,8 @@ class MemoryTracker:
     def _reset_tracking_state_for_new_session(self) -> None:
         """Clear per-session in-memory state before starting a new run."""
         self.events.clear()
+        self._history_dropped_events = 0
+        self._last_sink_diagnostics = self._empty_sink_diagnostics()
         self.last_oom_dump_path = None
         self.stats.update(
             {
@@ -637,6 +651,8 @@ class MemoryTracker:
             backend=self.backend,
         )
 
+        if len(self.events) == self.max_events:
+            self._history_dropped_events += 1
         self.events.append(event)
         self._oom_flight_recorder.record_event(self._tracking_event_payload(event))
         self._append_to_telemetry_sink(event)
@@ -812,6 +828,7 @@ class MemoryTracker:
             return
         try:
             self._telemetry_sink.append(self._telemetry_record_from_event(event))
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("append", exc)
 
@@ -820,6 +837,7 @@ class MemoryTracker:
             return
         try:
             self._telemetry_sink.flush(force=force)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("flush", exc)
 
@@ -831,6 +849,7 @@ class MemoryTracker:
                 self._telemetry_sink,
                 SESSION_STATUS_COMPLETED,
             )
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("close", exc)
         else:
@@ -854,6 +873,8 @@ class MemoryTracker:
             )
         try:
             self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
+            if hasattr(sink, "get_diagnostics"):
+                self._last_sink_diagnostics = sink.get_diagnostics()
         except Exception as close_exc:
             logger.debug(
                 "Telemetry sink close failed after %s error: %s", operation, close_exc
@@ -1127,6 +1148,9 @@ class MemoryTracker:
             {
                 "total_events": len(self.events),
                 "events_last_hour": len(recent_events),
+                "history_window_limit_events": self.max_events,
+                "history_retained_events": len(self.events),
+                "history_dropped_events": self._history_dropped_events,
                 "backend": self.backend,
                 "oom_flight_recorder_enabled": self._oom_flight_recorder.config.enabled,
                 "last_oom_dump_path": self.last_oom_dump_path,
@@ -1158,6 +1182,7 @@ class MemoryTracker:
             }
         )
         current_stats.update(self._collector_health.to_dict())
+        current_stats.update(self._last_sink_diagnostics)
 
         if self.stats["tracking_start_time"]:
             tracking_duration = time.time() - self.stats["tracking_start_time"]
@@ -1203,6 +1228,7 @@ class MemoryTracker:
     def clear_events(self) -> None:
         """Clear all tracking events."""
         self.events.clear()
+        self._history_dropped_events = 0
 
         # Reset statistics
         self.stats.update(

@@ -243,6 +243,7 @@ class CPUMemoryTracker:
 
         self.process = psutil.Process()
         self.sampling_interval = sampling_interval
+        self.max_events = max_events
         self.events: deque[TrackingEvent] = deque(maxlen=max_events)
         self._events_lock = threading.Lock()
         self.is_tracking = False
@@ -263,12 +264,24 @@ class CPUMemoryTracker:
         )
         self.session_source = "stormlog.cpu_profiler"
         self._session_summary: Optional[SessionSummary] = None
+        self._history_dropped_events = 0
+        self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
 
         self.stats: Dict[str, Any] = {
             "tracking_start_time": None,
             "peak_memory": 0,
             "total_events": 0,
             "alert_count": 0,
+        }
+
+    @staticmethod
+    def _empty_sink_diagnostics() -> Dict[str, int]:
+        return {
+            "rollover_count": 0,
+            "pruned_segment_count": 0,
+            "pruned_bytes": 0,
+            "final_retained_files": 0,
+            "final_retained_bytes": 0,
         }
 
     def _current_rss(self) -> int:
@@ -311,6 +324,8 @@ class CPUMemoryTracker:
             self.stats["total_events"] = 0
             self.stats["alert_count"] = 0
             self.stats["tracking_start_time"] = time.time()
+            self._history_dropped_events = 0
+        self._last_sink_diagnostics = self._empty_sink_diagnostics()
         self._tracking_thread = threading.Thread(
             target=self._tracking_loop, daemon=True
         )
@@ -395,6 +410,8 @@ class CPUMemoryTracker:
             world_size=self.distributed_identity["world_size"],
         )
         with self._events_lock:
+            if len(self.events) == self.max_events:
+                self._history_dropped_events += 1
             self.events.append(event)
         self._append_to_telemetry_sink(event)
 
@@ -438,6 +455,7 @@ class CPUMemoryTracker:
             return
         try:
             self._telemetry_sink.append(self._telemetry_record_from_event(event))
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("append", exc)
 
@@ -446,6 +464,7 @@ class CPUMemoryTracker:
             return
         try:
             self._telemetry_sink.flush(force=force)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("flush", exc)
 
@@ -457,6 +476,7 @@ class CPUMemoryTracker:
                 self._telemetry_sink,
                 SESSION_STATUS_COMPLETED,
             )
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("close", exc)
         else:
@@ -480,6 +500,8 @@ class CPUMemoryTracker:
             )
         try:
             self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
+            if hasattr(sink, "get_diagnostics"):
+                self._last_sink_diagnostics = sink.get_diagnostics()
         except Exception as close_exc:
             logger.debug(
                 "CPU telemetry sink close failed after %s error: %s",
@@ -537,12 +559,18 @@ class CPUMemoryTracker:
         duration = 0.0
         if isinstance(tracking_start_time, (int, float)):
             duration = time.time() - float(tracking_start_time)
+        with self._events_lock:
+            retained_events = len(self.events)
         return {
             "mode": "cpu",
             "total_events": total_events,
             "peak_memory": peak_memory,
             "current_memory_allocated": rss,
             "tracking_duration_seconds": duration,
+            "history_window_limit_events": self.max_events,
+            "history_retained_events": retained_events,
+            "history_dropped_events": self._history_dropped_events,
+            **self._last_sink_diagnostics,
             "session_id": (
                 self._session_summary.session_id
                 if self._session_summary is not None
@@ -575,6 +603,7 @@ class CPUMemoryTracker:
             self.events.clear()
             self.stats["peak_memory"] = 0
             self.stats["total_events"] = 0
+            self._history_dropped_events = 0
 
     def export_events(self, filename: str, format: str = "csv") -> None:
         with self._events_lock:
