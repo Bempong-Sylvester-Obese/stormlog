@@ -78,6 +78,8 @@ python -m examples.cli.benchmark_harness \
 ```
 
 This is the policy used by the pull-request memory gate in CI.
+The checked-in regression assets intentionally cover only the default `pr`
+profile.
 
 ## Enforce Budgets
 
@@ -172,8 +174,6 @@ The v0.4 harness reads:
 - `docs/benchmarks/v0.4_operating_budget.json`
 - `docs/benchmarks/v0.4_baseline.json`
 - `docs/benchmarks/v0.4_tolerances.json`
-- `docs/benchmarks/v0.4_baseline_nightly.json`
-- `docs/benchmarks/v0.4_tolerances_nightly.json`
 
 Update these files only with an intentional benchmark refresh. Run the harness
 with the same profile and config as CI, inspect the new metrics, then commit the

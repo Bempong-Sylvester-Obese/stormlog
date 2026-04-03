@@ -254,18 +254,28 @@ def test_runtime_config_uses_equivalent_time_profile(
 
 
 def test_runtime_asset_paths_follow_benchmark_naming() -> None:
-    assert benchmark_harness._runtime_baseline_path("pr").name == "v0.4_baseline.json"
     assert (
-        benchmark_harness._runtime_tolerances_path("pr").name == "v0.4_tolerances.json"
+        benchmark_harness._default_runtime_baseline_path().name == "v0.4_baseline.json"
     )
     assert (
-        benchmark_harness._runtime_baseline_path("nightly").name
-        == "v0.4_baseline_nightly.json"
+        benchmark_harness._default_runtime_tolerances_path().name
+        == "v0.4_tolerances.json"
     )
-    assert (
-        benchmark_harness._runtime_tolerances_path("nightly").name
-        == "v0.4_tolerances_nightly.json"
-    )
+
+
+def test_main_requires_explicit_regression_assets_for_non_default_profiles() -> None:
+    with pytest.raises(
+        ValueError,
+        match="Regression defaults are only checked in for the pr profile",
+    ):
+        benchmark_harness.main(
+            [
+                "--profile",
+                "nightly",
+                "--gate-mode",
+                "regression",
+            ]
+        )
 
 
 def test_unprofiled_scenario_summary_persists_final_artifact_size(

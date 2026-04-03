@@ -62,20 +62,12 @@ class SinkOverrides(TypedDict, total=False):
     retention_max_total_bytes: int
 
 
-def _runtime_baseline_path(profile: str) -> Path:
-    if profile == DEFAULT_PROFILE:
-        filename = "v0.4_baseline.json"
-    else:
-        filename = f"v0.4_baseline_{profile}.json"
-    return REPO_ROOT / "docs" / "benchmarks" / filename
+def _default_runtime_baseline_path() -> Path:
+    return REPO_ROOT / "docs" / "benchmarks" / "v0.4_baseline.json"
 
 
-def _runtime_tolerances_path(profile: str) -> Path:
-    if profile == DEFAULT_PROFILE:
-        filename = "v0.4_tolerances.json"
-    else:
-        filename = f"v0.4_tolerances_{profile}.json"
-    return REPO_ROOT / "docs" / "benchmarks" / filename
+def _default_runtime_tolerances_path() -> Path:
+    return REPO_ROOT / "docs" / "benchmarks" / "v0.4_tolerances.json"
 
 
 def _directory_size_bytes(directory: Path) -> int:
@@ -1243,8 +1235,18 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    baseline_path = args.baseline or _runtime_baseline_path(args.profile)
-    tolerances_path = args.tolerances or _runtime_tolerances_path(args.profile)
+    if (
+        args.gate_mode == "regression"
+        and args.profile != DEFAULT_PROFILE
+        and (args.baseline is None or args.tolerances is None)
+    ):
+        raise ValueError(
+            "Regression defaults are only checked in for the pr profile; "
+            "pass --baseline and --tolerances explicitly for other profiles."
+        )
+
+    baseline_path = args.baseline or _default_runtime_baseline_path()
+    tolerances_path = args.tolerances or _default_runtime_tolerances_path()
     report = run_benchmark_harness(
         profile=args.profile,
         mode=args.mode,
