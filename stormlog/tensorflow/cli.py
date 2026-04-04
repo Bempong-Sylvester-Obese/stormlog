@@ -206,6 +206,9 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         print(f"Average Memory: {results.average_memory:.1f} MB")
         print(f"Duration: {results.duration:.1f} seconds")
         print(f"Samples Collected: {len(results.memory_usage)}")
+        dropped_samples = int(getattr(results, "history_dropped_samples", 0))
+        if dropped_samples:
+            print(f"Dropped Samples: {dropped_samples}")
 
         if results.alerts_triggered:
             print(f"Alerts Triggered: {len(results.alerts_triggered)}")
@@ -219,6 +222,27 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 "memory_usage": results.memory_usage,
                 "timestamps": results.timestamps,
                 "alerts": results.alerts_triggered,
+                "history_window_limit": int(
+                    getattr(results, "history_window_limit", len(results.memory_usage))
+                ),
+                "history_retained_samples": int(
+                    getattr(
+                        results, "history_retained_samples", len(results.memory_usage)
+                    )
+                ),
+                "history_dropped_samples": int(
+                    getattr(results, "history_dropped_samples", 0)
+                ),
+                "history_retained_alerts": int(
+                    getattr(
+                        results,
+                        "history_retained_alerts",
+                        len(results.alerts_triggered),
+                    )
+                ),
+                "history_dropped_alerts": int(
+                    getattr(results, "history_dropped_alerts", 0)
+                ),
             }
 
             output_path = Path(args.output)
@@ -305,6 +329,33 @@ def cmd_track(args: argparse.Namespace) -> int:
                     results.events,
                     sampling_interval_ms=sampling_interval_ms,
                 ),
+                "history_window_limit": int(
+                    getattr(results, "history_window_limit", len(results.memory_usage))
+                ),
+                "history_retained_samples": int(
+                    getattr(
+                        results, "history_retained_samples", len(results.memory_usage)
+                    )
+                ),
+                "history_dropped_samples": int(
+                    getattr(results, "history_dropped_samples", 0)
+                ),
+                "history_retained_events": int(
+                    getattr(results, "history_retained_events", len(results.events))
+                ),
+                "history_dropped_events": int(
+                    getattr(results, "history_dropped_events", 0)
+                ),
+                "history_retained_alerts": int(
+                    getattr(
+                        results,
+                        "history_retained_alerts",
+                        len(results.alerts_triggered),
+                    )
+                ),
+                "history_dropped_alerts": int(
+                    getattr(results, "history_dropped_alerts", 0)
+                ),
             }
 
             output_path = Path(args.output)
@@ -316,6 +367,13 @@ def cmd_track(args: argparse.Namespace) -> int:
 
         final_stats = tracker.get_statistics()
         print(f"\nTracking completed. Peak memory: {results.peak_memory:.1f} MB")
+        dropped_samples = int(final_stats.get("history_dropped_samples", 0))
+        dropped_events = int(final_stats.get("history_dropped_events", 0))
+        if dropped_samples or dropped_events:
+            print(
+                "History truncation: "
+                f"samples={dropped_samples}, events={dropped_events}"
+            )
         if "collector_health_status" in final_stats:
             print(
                 "Collector health: "

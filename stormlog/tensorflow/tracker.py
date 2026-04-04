@@ -10,6 +10,7 @@ import os
 import socket
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -62,6 +63,13 @@ class TrackingResult:
     peak_memory: float = 0.0
     average_memory: float = 0.0
     min_memory: float = float("inf")
+    history_window_limit: int = 0
+    history_retained_samples: int = 0
+    history_dropped_samples: int = 0
+    history_retained_events: int = 0
+    history_dropped_events: int = 0
+    history_retained_alerts: int = 0
+    history_dropped_alerts: int = 0
 
     @property
     def duration(self) -> float:
@@ -76,6 +84,21 @@ class TrackingResult:
         return (self.memory_usage[-1] - self.memory_usage[0]) / self.duration
 
 
+@dataclass(frozen=True)
+class _TrackingResultData:
+    retained_memory_usage: List[float]
+    retained_timestamps: List[float]
+    retained_events: List[Dict[str, Any]]
+    retained_alerts: List[Dict[str, Any]]
+    total_samples_observed: int
+    peak_memory: float
+    min_memory: float
+    sum_memory: float
+    dropped_samples: int
+    dropped_events: int
+    dropped_alerts: int
+
+
 class MemoryTracker:
     """Real-time TensorFlow GPU memory tracker."""
 
@@ -85,6 +108,7 @@ class MemoryTracker:
         alert_threshold_mb: Optional[float] = None,
         device: Optional[str] = None,
         enable_logging: bool = True,
+        max_history: int = 10_000,
         job_id: Optional[str] = None,
         rank: Optional[int] = None,
         local_rank: Optional[int] = None,
@@ -104,11 +128,14 @@ class MemoryTracker:
             raise ImportError("TensorFlow not available. Please install TensorFlow.")
         if sampling_interval <= 0:
             raise ValueError("sampling_interval must be > 0")
+        if max_history <= 0:
+            raise ValueError("max_history must be >= 1")
 
         self.sampling_interval = sampling_interval
         self.alert_threshold_mb = alert_threshold_mb
         self.device = device or self._get_default_device()
         self.enable_logging = enable_logging
+        self.max_history = max_history
         self._telemetry_sink = (
             AppendOnlyTelemetrySink(telemetry_sink_config)
             if telemetry_sink_config is not None
@@ -127,10 +154,19 @@ class MemoryTracker:
         # Tracking state
         self.tracking = False
         self.tracking_thread: Optional[threading.Thread] = None
-        self.memory_usage: List[float] = []
-        self.timestamps: List[float] = []
-        self.events: List[Dict[str, Any]] = []
-        self.alerts: List[Dict[str, Any]] = []
+        self._memory_usage: deque[float] = deque(maxlen=max_history)
+        self._timestamps: deque[float] = deque(maxlen=max_history)
+        self._events: deque[Dict[str, Any]] = deque(maxlen=max_history)
+        self._alerts: deque[Dict[str, Any]] = deque(maxlen=max_history)
+        self._history_dropped_samples = 0
+        self._history_dropped_events = 0
+        self._history_dropped_alerts = 0
+        self._collector_failure_event_count = 0
+        self._total_samples_observed = 0
+        self._peak_memory_mb = 0.0
+        self._min_memory_mb = float("inf")
+        self._sum_memory_mb = 0.0
+        self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
 
         # Thread synchronization
         self._lock = threading.Lock()
@@ -148,6 +184,82 @@ class MemoryTracker:
 
         if enable_logging:
             logging.info(f"TensorFlow Memory Tracker initialized for {self.device}")
+
+    @staticmethod
+    def _empty_sink_diagnostics() -> Dict[str, int]:
+        return {
+            "rollover_count": 0,
+            "pruned_segment_count": 0,
+            "pruned_bytes": 0,
+            "final_retained_files": 0,
+            "final_retained_bytes": 0,
+        }
+
+    @property
+    def memory_usage(self) -> List[float]:
+        return list(self._memory_usage)
+
+    @property
+    def timestamps(self) -> List[float]:
+        return list(self._timestamps)
+
+    @property
+    def events(self) -> List[Dict[str, Any]]:
+        return list(self._events)
+
+    @property
+    def alerts(self) -> List[Dict[str, Any]]:
+        return list(self._alerts)
+
+    def _reset_history(self) -> None:
+        self._memory_usage.clear()
+        self._timestamps.clear()
+        self._events.clear()
+        self._alerts.clear()
+        self._history_dropped_samples = 0
+        self._history_dropped_events = 0
+        self._history_dropped_alerts = 0
+        self._collector_failure_event_count = 0
+        self._total_samples_observed = 0
+        self._peak_memory_mb = 0.0
+        self._min_memory_mb = float("inf")
+        self._sum_memory_mb = 0.0
+        self._last_sink_diagnostics = self._empty_sink_diagnostics()
+
+    def _tracking_result_data(self) -> _TrackingResultData:
+        return _TrackingResultData(
+            retained_memory_usage=list(self._memory_usage),
+            retained_timestamps=list(self._timestamps),
+            retained_events=list(self._events),
+            retained_alerts=list(self._alerts),
+            total_samples_observed=self._total_samples_observed,
+            peak_memory=self._peak_memory_mb,
+            min_memory=self._min_memory_mb,
+            sum_memory=self._sum_memory_mb,
+            dropped_samples=self._history_dropped_samples,
+            dropped_events=self._history_dropped_events,
+            dropped_alerts=self._history_dropped_alerts,
+        )
+
+    def _append_sample_locked(self, memory_mb: float, timestamp: float) -> None:
+        if len(self._memory_usage) == self.max_history:
+            self._history_dropped_samples += 1
+        self._memory_usage.append(memory_mb)
+        self._timestamps.append(timestamp)
+        self._total_samples_observed += 1
+        self._peak_memory_mb = max(self._peak_memory_mb, memory_mb)
+        self._min_memory_mb = min(self._min_memory_mb, memory_mb)
+        self._sum_memory_mb += memory_mb
+
+    def _append_event_locked(self, record: Dict[str, Any]) -> None:
+        if len(self._events) == self.max_history:
+            self._history_dropped_events += 1
+        self._events.append(record)
+
+    def _append_alert_locked(self, alert: Dict[str, Any]) -> None:
+        if len(self._alerts) == self.max_history:
+            self._history_dropped_alerts += 1
+        self._alerts.append(alert)
 
     def _ensure_session_summary(self) -> SessionSummary:
         """Create the active tracking session summary if needed."""
@@ -295,7 +407,7 @@ class MemoryTracker:
             metadata=metadata,
         )
         with self._lock:
-            self.events.append(record)
+            self._append_event_locked(record)
         self._append_to_telemetry_sink(record)
 
     def _transition_to_failure(self, timestamp: float, exc: BaseException) -> None:
@@ -317,6 +429,7 @@ class MemoryTracker:
             next_retry_epoch_s=next_retry_epoch_s,
         )
         if previous_health.status == COLLECTOR_HEALTH_HEALTHY:
+            self._collector_failure_event_count += 1
             self._append_event(
                 timestamp=timestamp,
                 memory_mb=self._status_memory_value(),
@@ -341,6 +454,7 @@ class MemoryTracker:
                 status=COLLECTOR_HEALTH_HEALTHY,
                 telemetry_partial=False,
             )
+            self._collector_failure_event_count += 1
             self._append_event(
                 timestamp=timestamp,
                 memory_mb=self._status_memory_value(),
@@ -375,8 +489,7 @@ class MemoryTracker:
         self._transition_to_success(current_time)
 
         with self._lock:
-            self.memory_usage.append(current_memory)
-            self.timestamps.append(current_time)
+            self._append_sample_locked(current_memory, current_time)
         self._append_event(
             timestamp=current_time,
             memory_mb=current_memory,
@@ -409,7 +522,7 @@ class MemoryTracker:
         }
 
         with self._lock:
-            self.alerts.append(alert)
+            self._append_alert_locked(alert)
 
         # Log alert
         if self.enable_logging:
@@ -442,10 +555,7 @@ class MemoryTracker:
 
         # Reset tracking data
         with self._lock:
-            self.memory_usage.clear()
-            self.timestamps.clear()
-            self.events.clear()
-            self.alerts.clear()
+            self._reset_history()
         self._last_successful_memory_mb = None
         self._set_collector_health(
             status=COLLECTOR_HEALTH_HEALTHY,
@@ -508,30 +618,58 @@ class MemoryTracker:
     def _create_tracking_result(self) -> TrackingResult:
         """Create tracking result from collected data."""
         with self._lock:
-            if not self.memory_usage and not self.events and not self.alerts:
+            result_data = self._tracking_result_data()
+            if (
+                not result_data.retained_memory_usage
+                and not result_data.retained_events
+                and not result_data.retained_alerts
+            ):
                 return self._create_empty_result()
 
             session_start = self._session_start_time
             session_end = self._session_end_time
             if session_start is None:
-                session_start = self.timestamps[0] if self.timestamps else time.time()
+                session_start = (
+                    result_data.retained_timestamps[0]
+                    if result_data.retained_timestamps
+                    else time.time()
+                )
             if session_end is None:
-                session_end = self.timestamps[-1] if self.timestamps else time.time()
+                session_end = (
+                    result_data.retained_timestamps[-1]
+                    if result_data.retained_timestamps
+                    else time.time()
+                )
 
             return TrackingResult(
                 start_time=session_start,
                 end_time=session_end,
-                memory_usage=self.memory_usage.copy(),
-                timestamps=self.timestamps.copy(),
-                events=self.events.copy(),
-                alerts_triggered=self.alerts.copy(),
-                peak_memory=max(self.memory_usage) if self.memory_usage else 0.0,
-                average_memory=(
-                    sum(self.memory_usage) / len(self.memory_usage)
-                    if self.memory_usage
+                memory_usage=result_data.retained_memory_usage,
+                timestamps=result_data.retained_timestamps,
+                events=result_data.retained_events,
+                alerts_triggered=result_data.retained_alerts,
+                peak_memory=(
+                    result_data.peak_memory
+                    if result_data.total_samples_observed
                     else 0.0
                 ),
-                min_memory=min(self.memory_usage) if self.memory_usage else 0.0,
+                average_memory=(
+                    result_data.sum_memory / result_data.total_samples_observed
+                    if result_data.total_samples_observed
+                    else 0.0
+                ),
+                min_memory=(
+                    result_data.min_memory
+                    if result_data.total_samples_observed
+                    else 0.0
+                ),
+                history_window_limit=self.max_history,
+                history_retained_samples=len(result_data.retained_memory_usage),
+                history_dropped_samples=result_data.dropped_samples,
+                history_retained_events=len(result_data.retained_events),
+                history_dropped_events=result_data.dropped_events,
+                history_retained_alerts=len(result_data.retained_alerts),
+                history_dropped_alerts=result_data.dropped_alerts,
             )
 
     def _create_empty_result(self) -> TrackingResult:
@@ -549,6 +687,13 @@ class MemoryTracker:
             peak_memory=0.0,
             average_memory=0.0,
             min_memory=0.0,
+            history_window_limit=self.max_history,
+            history_retained_samples=0,
+            history_dropped_samples=0,
+            history_retained_events=0,
+            history_dropped_events=0,
+            history_retained_alerts=0,
+            history_dropped_alerts=0,
         )
 
     def get_current_memory(self) -> float:
@@ -561,8 +706,20 @@ class MemoryTracker:
     def get_statistics(self) -> dict[str, Any]:
         """Return current tracker health and latest successful memory sample."""
         with self._lock:
-            total_events = len(self.events)
-            peak_memory = max(self.memory_usage) if self.memory_usage else 0.0
+            retained_events = len(self._events)
+            retained_samples = len(self._memory_usage)
+            retained_alerts = len(self._alerts)
+            peak_memory = self._peak_memory_mb if self._total_samples_observed else 0.0
+            average_memory = (
+                self._sum_memory_mb / self._total_samples_observed
+                if self._total_samples_observed
+                else 0.0
+            )
+            min_memory = self._min_memory_mb if self._total_samples_observed else 0.0
+            collector_failure_event_count = self._collector_failure_event_count
+            dropped_samples = self._history_dropped_samples
+            dropped_events = self._history_dropped_events
+            dropped_alerts = self._history_dropped_alerts
             tracking_start = self._session_start_time
             tracking_end = self._session_end_time
 
@@ -579,8 +736,19 @@ class MemoryTracker:
         return {
             "current_memory_mb": current_memory_mb,
             "peak_memory_mb": peak_memory,
-            "total_events": total_events,
+            "average_memory_mb": average_memory,
+            "min_memory_mb": min_memory,
+            "collector_failure_event_count": collector_failure_event_count,
+            "total_events": retained_events,
             "tracking_duration_seconds": tracking_duration,
+            "history_window_limit": self.max_history,
+            "history_retained_samples": retained_samples,
+            "history_dropped_samples": dropped_samples,
+            "history_retained_events": retained_events,
+            "history_dropped_events": dropped_events,
+            "history_retained_alerts": retained_alerts,
+            "history_dropped_alerts": dropped_alerts,
+            **self._last_sink_diagnostics,
             "session_id": (
                 self._session_summary.session_id
                 if self._session_summary is not None
@@ -599,6 +767,7 @@ class MemoryTracker:
             return
         try:
             self._telemetry_sink.append(record)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("append", exc)
 
@@ -607,6 +776,7 @@ class MemoryTracker:
             return
         try:
             self._telemetry_sink.flush(force=force)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("flush", exc)
 
@@ -618,6 +788,7 @@ class MemoryTracker:
                 self._telemetry_sink,
                 SESSION_STATUS_COMPLETED,
             )
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
         except Exception as exc:
             self._disable_telemetry_sink("close", exc)
         else:
@@ -641,6 +812,8 @@ class MemoryTracker:
             )
         try:
             self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
+            if hasattr(sink, "get_diagnostics"):
+                self._last_sink_diagnostics = sink.get_diagnostics()
         except Exception as close_exc:
             logging.debug(
                 "TensorFlow telemetry sink close failed after %s error: %s",
@@ -667,7 +840,7 @@ class MemoryTracker:
             # Check for alerts in the last 10 seconds
             recent_alerts = [
                 alert
-                for alert in self.alerts
+                for alert in self._alerts
                 if time.time() - alert["timestamp"] < 10.0
             ]
             return len(recent_alerts) > 0

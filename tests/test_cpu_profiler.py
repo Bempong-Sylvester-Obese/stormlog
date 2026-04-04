@@ -541,6 +541,9 @@ class TestCPUMemoryTracker:
         assert payload["collector"] == "stormlog.cpu_tracker"
         assert payload["event_type"] == "allocation"
         assert payload["context"] == "sink_test"
+        stats = tracker.get_statistics()
+        assert stats["final_retained_files"] == 1
+        assert stats["rollover_count"] == 0
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_tracker_disables_sink_after_append_failure(self, mock_cls: Any) -> None:
@@ -630,6 +633,10 @@ class TestCPUMemoryTracker:
         # Oldest events should have been evicted
         contexts = [e.context for e in tracker.events]
         assert contexts == [f"ev_{i}" for i in range(5, 10)]
+        stats = tracker.get_statistics()
+        assert stats["history_window_limit_events"] == 5
+        assert stats["history_retained_events"] == 5
+        assert stats["history_dropped_events"] == 5
 
     # ------------------------------------------------------------------
     # Thread-safety tests

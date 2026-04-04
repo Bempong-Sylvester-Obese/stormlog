@@ -195,6 +195,16 @@ The tracker session lifecycle is:
 - recovered append-only runs are marked `interrupted`
 - partial artifacts without provable shutdown remain `incomplete`
 
+For always-on deployments, treat the tracker as an operating-budgeted service:
+
+- keep the default sink retention enabled so artifacts stay bounded
+- watch `rollover_count`, `pruned_segment_count`, and `final_retained_*`
+- watch `history_dropped_*` to confirm bounded in-memory windows are evicting as expected
+- treat any non-zero `collector_failure_event_count` or non-`healthy` collector state as actionable
+
+The maintained source-checkout qualification path for those guarantees is the
+v0.4 operability harness in `examples/cli/benchmark_harness.py`.
+
 For CUDA-only OOM debugging, enable native allocator-history capture and wrap
 the risky block with `capture_oom()`:
 
@@ -224,7 +234,10 @@ tracker = CPUMemoryTracker(sampling_interval=0.5)
 tracker.start_tracking()
 # run workload here
 tracker.stop_tracking()
-print(tracker.get_statistics()["total_events"])
+stats = tracker.get_statistics()
+print(stats["total_events"])
+print(stats["final_retained_files"])
+print(stats["history_dropped_events"])
 ```
 
 ## Reusing a sink directory across runs

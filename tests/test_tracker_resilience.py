@@ -357,7 +357,7 @@ def test_memory_tracker_streams_events_to_append_only_sink(
             root_dir=tmp_path / "sink",
             flush_every_events=1,
             flush_every_seconds=1.0,
-            rollover_max_bytes=1024,
+            rollover_max_bytes=1024 * 1024,
             retention_max_total_bytes=1024 * 1024,
         ),
     )
@@ -372,6 +372,28 @@ def test_memory_tracker_streams_events_to_append_only_sink(
     assert payload["collector"] == "stormlog.cuda_tracker"
     assert payload["event_type"] == "allocation"
     assert payload["allocator_allocated_bytes"] == 128
+    stats = tracker.get_statistics()
+    assert stats["final_retained_files"] == 1
+    assert stats["rollover_count"] == 0
+
+
+def test_memory_tracker_records_bounded_history_drops(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector, max_events=3)
+
+    for index in range(5):
+        tracker._add_event("allocation", index, f"event-{index}")
+
+    events = tracker.get_events()
+    assert [event.context for event in events] == ["event-2", "event-3", "event-4"]
+    stats = tracker.get_statistics()
+    assert stats["history_window_limit_events"] == 3
+    assert stats["history_retained_events"] == 3
+    assert stats["history_dropped_events"] == 2
 
 
 def test_memory_tracker_disables_failing_sink_and_keeps_tracking(

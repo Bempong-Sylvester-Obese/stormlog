@@ -336,6 +336,55 @@ def test_tf_tracker_records_degrade_and_recover_events(
     assert tracker.get_statistics()["collector_health_status"] == "healthy"
 
 
+def test_tf_tracker_bounds_history_and_reports_truncation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+        max_history=3,
+    )
+    samples: Iterator[float] = iter([8.0, 16.0, 24.0, 32.0, 40.0])
+    current_time = {"value": 0.0}
+    monkeypatch.setattr(tf_tracker.time, "time", lambda: current_time["value"])
+
+    def _next_sample() -> float:
+        return next(samples)
+
+    monkeypatch.setattr(tracker, "_get_current_memory", _next_sample)
+
+    for index in range(5):
+        current_time["value"] = float(index + 1)
+        tracker._run_tracking_iteration()
+
+    stats = tracker.get_statistics()
+    assert tracker.memory_usage == [24.0, 32.0, 40.0]
+    assert len(tracker.timestamps) == 3
+    assert stats["history_window_limit"] == 3
+    assert stats["history_retained_samples"] == 3
+    assert stats["history_dropped_samples"] == 2
+    assert stats["history_retained_events"] == 3
+    assert stats["history_dropped_events"] == 2
+    assert stats["peak_memory_mb"] == 40.0
+    assert stats["average_memory_mb"] == pytest.approx(
+        (8.0 + 16.0 + 24.0 + 32.0 + 40.0) / 5
+    )
+    assert stats["min_memory_mb"] == 8.0
+
+    result = tracker.get_tracking_results()
+    assert result.memory_usage == [24.0, 32.0, 40.0]
+    assert result.history_window_limit == 3
+    assert result.history_retained_samples == 3
+    assert result.history_dropped_samples == 2
+    assert result.history_retained_events == 3
+    assert result.history_dropped_events == 2
+    assert result.peak_memory == 40.0
+    assert result.average_memory == pytest.approx((8.0 + 16.0 + 24.0 + 32.0 + 40.0) / 5)
+    assert result.min_memory == 8.0
+
+
 def test_tf_tracker_streams_events_to_append_only_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -364,6 +413,9 @@ def test_tf_tracker_streams_events_to_append_only_sink(
     assert payload["collector"] == "stormlog.tensorflow.memory_tracker"
     assert payload["event_type"] == "sample"
     assert payload["allocator_allocated_bytes"] == 32 * 1024 * 1024
+    stats = tracker.get_statistics()
+    assert stats["final_retained_files"] == 1
+    assert stats["rollover_count"] == 0
 
 
 def test_tf_tracker_disables_sink_after_append_failure(
@@ -473,6 +525,7 @@ def test_tf_tracker_persistent_failure_preserves_status_events_without_samples(
     assert result.events
     assert [event["event_type"] for event in result.events] == ["collector_degraded"]
     assert result.memory_usage == []
+    assert result.history_window_limit == 10_000
     assert tracker.get_statistics()["collector_health_status"] == (
         COLLECTOR_HEALTH_UNHEALTHY
     )
