@@ -12,12 +12,15 @@ Difficulty: intermediate.
 
 - install the package first with [Installation](../installation.md)
 - use `pip install "stormlog[torch]"` for the PyTorch CLI and tracker paths
+- on a fresh GPU host, check the framework build before using GPU recipes:
+  `python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"`
 - use `pip install "stormlog[tui,torch]"` if you want the TUI diagnostics flow
 - use a PyTorch runtime when you need `GPUMemoryProfiler` or CUDA-specific OOM evidence
 - use the [Usage Guide](../usage.md) if you need API-level reference instead of CLI-first triage
 
 Success signal:
 
+- the first workload-backed recipe records non-zero GPU memory
 - you leave the incident with at least one saved artifact or report
 - the chosen workflow ends in a concrete next step, not just console output
 
@@ -25,12 +28,42 @@ Success signal:
 
 | If the main goal is... | Start with... |
 | --- | --- |
+| check a small in-process workload first | profile a single GPU step |
 | capture a short, shareable timeline | bounded `track` |
 | save a portable diagnostic bundle fast | `diagnose --duration 0` |
 | capture CUDA allocator-history evidence | `diagnose --native-history` |
 | rehearse the OOM flow safely in a checkout | `examples.scenarios.oom_flight_recorder_scenario` |
 
-## Recipe: capture a bounded telemetry window
+## Recipe: profile a single GPU step
+
+```python
+import torch
+from stormlog import GPUMemoryProfiler
+
+profiler = GPUMemoryProfiler(track_tensors=True)
+device = profiler.device
+model = torch.nn.Linear(1024, 256).to(device)
+
+def train_step() -> torch.Tensor:
+    x = torch.randn(64, 1024, device=device)
+    y = model(x)
+    return y.sum()
+
+profile = profiler.profile_function(train_step)
+summary = profiler.get_summary()
+
+print(profile.function_name)
+print(f"Peak memory: {summary['peak_memory_usage'] / (1024**2):.2f} MB")
+```
+
+Use this when you want a small in-process CUDA workload before moving to CLI
+artifact flows.
+
+If `torch.cuda.is_available()` is `False` on a GPU host, fix the PyTorch build
+before continuing. The [Installation Guide](../installation.md) and
+[GPU Setup Guide](../gpu_setup.md) are the right references there.
+
+## Recipe: capture a bounded CLI artifact window
 
 ```bash
 gpumemprof track \
@@ -42,6 +75,10 @@ gpumemprof track \
 
 Use this when you want a short capture that you can archive, share, or analyze
 without keeping a sink directory around.
+
+Treat this as an artifact-flow command after the runtime is already known-good.
+On an otherwise idle CLI process it can record little or no meaningful GPU
+activity by itself.
 
 ## Recipe: export a diagnose bundle
 
@@ -107,6 +144,14 @@ This is source-checkout only. Pip installs do not include `examples/`.
 Likely cause: the runtime is not CUDA-backed.
 Fix: use the standard diagnose bundle instead.
 Verify: the regular diagnose command completes and writes a manifest.
+
+### Symptom: `torch.cuda.is_available()` is `False` on a GPU host
+
+Likely cause: the installed PyTorch wheel does not match the host driver/runtime.
+Fix: install a PyTorch build that matches the current CUDA stack, then rerun the
+minimal `GPUMemoryProfiler` snippet above.
+Verify: the version check in prerequisites prints `True` for
+`torch.cuda.is_available()`.
 
 ### Symptom: the report suggests hidden memory but not a leak
 
