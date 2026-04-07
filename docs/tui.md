@@ -134,6 +134,11 @@ The screenshot above reflects the shipped Diagnostics tab. Older distributed
 diagnostics mockups have been removed from the docs because they no longer
 match the current product surface.
 
+For incident playbooks and rank-aware operational workflows that start in the
+TUI Diagnostics tab, use
+[Distributed Diagnostics Recipes](cookbook/distributed.md) and
+[Incident Playbooks](cookbook/incidents.md).
+
 ## Keyboard shortcuts
 
 | Key | Action |

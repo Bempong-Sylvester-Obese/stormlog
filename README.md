@@ -20,6 +20,14 @@ Long-running `track` and `diagnose` flows are session-aware, so one capture can
 be reconstructed deterministically across sink segments, diagnose bundles, and
 OOM flight-recorder artifacts.
 
+For task-oriented operational guidance, use the
+[Production Cookbook](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/index.md).
+The highest-signal entry points are the
+[Always-on Tracking recipe](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/always_on.md),
+[Incident Playbooks](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/incidents.md),
+and
+[CI and Release Qualification](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/ci_release.md).
+
 ## Why use this tool
 
 - Catch memory growth before it becomes an OOM.
@@ -202,6 +210,10 @@ For screen-by-screen details, see the [TUI Guide](https://github.com/Silas-Asamo
 - [Installation guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/installation.md)
 - [Usage guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/usage.md)
 - [CLI guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cli.md)
+- [Production cookbook](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/index.md)
+- [Always-on tracking](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/always_on.md)
+- [Incident playbooks](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/incidents.md)
+- [CI and release qualification](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/cookbook/ci_release.md)
 - [Examples guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/examples.md)
 - [Testing guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/testing.md)
 - [PyTorch guide](https://github.com/Silas-Asamoah/stormlog/blob/main/docs/pytorch_testing_guide.md)
