@@ -11,18 +11,6 @@ shortest path to a reliable operational workflow.
 Audience: operators, ML engineers, release owners.
 Difficulty: intermediate.
 
-```{toctree}
-:maxdepth: 1
-:caption: Cookbook Recipes
-
-always_on
-pytorch
-tensorflow
-distributed
-incidents
-ci_release
-```
-
 ## Before you choose a recipe
 
 - Read the [Installation Guide](../installation.md) first if the environment is

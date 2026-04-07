@@ -32,6 +32,12 @@ usage
 cli
 tui
 cookbook/index
+cookbook/always_on
+cookbook/pytorch
+cookbook/tensorflow
+cookbook/distributed
+cookbook/incidents
+cookbook/ci_release
 examples
 testing
 troubleshooting
