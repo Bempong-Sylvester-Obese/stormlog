@@ -150,6 +150,9 @@ Examples:
   gpumemprof track --output tracking.csv   # Track with CSV output
   gpumemprof analyze results.json          # Analyze profiling results
   gpumemprof diagnose --output ./diag     # Produce diagnostic bundle
+
+Cookbook:
+  https://stormlog.readthedocs.io/en/latest/cookbook/index.html
         """,
     )
 
