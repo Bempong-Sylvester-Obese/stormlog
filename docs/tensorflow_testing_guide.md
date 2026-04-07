@@ -10,12 +10,15 @@ Validate the environment:
 
 ```bash
 tfmemprof info
-python -m examples.basic.tensorflow_demo
 ```
 
-`python -m examples.basic.tensorflow_demo` is source-checkout only. If you
-installed from PyPI, validate with `tfmemprof info`, the CLI commands below,
-and the TensorFlow snippets in the [Usage Guide](usage.md).
+If you are bringing up a GPU runtime, start with the workload-backed matmul
+recipe in [TensorFlow Production Recipes](cookbook/tensorflow.md) before using
+training-backed examples.
+
+`python -m examples.basic.tensorflow_demo` is source-checkout only and exercises
+TensorFlow's training path. Use it after the runtime is aligned for training-
+backed ops, not as the first GPU smoke test.
 
 These checks work on CPU-backed TensorFlow installs as well as GPU-backed ones.
 
@@ -95,17 +98,17 @@ The current TUI startup path imports PyTorch immediately, so TensorFlow-only env
 
 Use this when you need a compact TensorFlow confidence pass:
 
-> **Source checkout only.** Replace `python -m examples.basic.tensorflow_demo`
-> with `tfmemprof monitor --interval 0.5 --duration 15 --device /CPU:0 --output tf_monitor.json`
-> if you installed from PyPI on a CPU-backed TensorFlow setup.
-
 ```bash
 tfmemprof info
-python -m examples.basic.tensorflow_demo
 tfmemprof monitor --interval 0.5 --duration 15 --output tf_monitor.json
 tfmemprof analyze --input tf_monitor.json --detect-leaks --optimize --report tf_report.txt
 tfmemprof diagnose --duration 0 --output ./tf_diag
 ```
+
+If you are validating a GPU-backed runtime, run the `/GPU:0` matmul recipe from
+[TensorFlow Production Recipes](cookbook/tensorflow.md) before this sequence.
+If you want the source-checkout training-backed example after that, run
+`python -m examples.basic.tensorflow_demo`.
 
 ## Common issues
 

@@ -72,6 +72,11 @@ This demo shows:
 - TensorFlow result summaries
 - snapshot-driven reporting
 
+This example exercises TensorFlow's training-backed path. When you are bringing
+up a new GPU stack, start with the workload-backed `/GPU:0` matmul recipe in
+[TensorFlow Production Recipes](cookbook/tensorflow.md) before using this demo
+as a deeper source-checkout example.
+
 ### Advanced tracking
 
 ```bash
@@ -111,10 +116,15 @@ Run:
 
 ```bash
 python -m examples.basic.pytorch_demo
-python -m examples.basic.tensorflow_demo
 ```
 
-Then move to the [Usage Guide](usage.md) if you want the same patterns embedded inside your own code.
+For TensorFlow, start with the `/GPU:0` matmul recipe in
+[TensorFlow Production Recipes](cookbook/tensorflow.md) when you are bringing
+up a GPU runtime, then run `python -m examples.basic.tensorflow_demo` once the
+training-backed path is aligned.
+
+Then move to the [Usage Guide](usage.md) if you want the same patterns embedded
+inside your own code.
 
 ### Researcher or debugger
 
