@@ -126,6 +126,7 @@ def _process_snapshot(
     cumulative = 0
     peak = 0
     live_allocs: Dict[int, Dict[str, Any]] = {}  # addr -> event info
+    addr_to_frames = {}
 
     for t in traces:
         action = t.get("action", "")
@@ -159,6 +160,7 @@ def _process_snapshot(
                 "dtype": dtype,
                 "frames": _format_frames(t.get("frames", [])),
             }
+            addr_to_frames[addr] = ev["frames"]
             if not ev["name"] and ev["frames"]:
                 ev["name"] = _get_fallback_name(ev["frames"])
             elif not ev["name"]:
@@ -203,15 +205,8 @@ def _process_snapshot(
             )
 
     # Build "top offenders" from segments at OOM time
-    segments = snapshot.get("segments", [])
+    raw_segments = snapshot.get("segments", [])
     offenders: List[Dict[str, Any]] = []
-
-    # We want to match un-named tensors to their alloc frames
-    # Let's create an inverse mapping of addr to frames
-    addr_to_frames = {}
-    for ev in events:
-        if ev["action"] == "alloc" and ev.get("frames"):
-            addr_to_frames[ev["addr"]] = ev["frames"]
 
     for entry in tensor_index.get("attributed_storage_pointers", []):
         names = entry.get("names", [])
@@ -242,9 +237,71 @@ def _process_snapshot(
             }
         )
     offenders.sort(key=lambda x: x["size"], reverse=True)
+    
+    # Process Segments and embed block address/name lookups
+    formatted_segments = []
+    active_memory_table = []
+    
+    for s in raw_segments:
+        formatted_blocks = []
+        current_offset = s.get("address", 0)
+        
+        for b in s.get("blocks", []):
+            block_size = b.get("size", 0)
+            state = b.get("state", "")
+            frames_fmt = _format_frames(b.get("frames", []))
+            
+            name = ""
+            shape = ""
+            dtype = ""
+            
+            if state == "active_allocated":
+                entry = ptr_map.get(current_offset)
+                if entry:
+                    name = _best_name(entry)
+                    shape = _shape_str(entry)
+                    dtype = _dtype_str(entry)
+                
+                if not name and frames_fmt:
+                    name = _get_fallback_name(frames_fmt)
+                elif not name:
+                    name = "Unnamed Tensor"
+                    
+                active_memory_table.append({
+                    "address": current_offset,
+                    "size": block_size,
+                    "size_h": _sz(block_size),
+                    "name": name,
+                    "shape": shape,
+                    "dtype": dtype,
+                    "frames": frames_fmt,
+                    "pool": s.get("segment_type", "unknown")
+                })
+                
+            formatted_blocks.append({
+                "address": current_offset,
+                "size": block_size,
+                "size_h": _sz(block_size),
+                "state": state,
+                "name": name,
+                "frames": frames_fmt
+            })
+            current_offset += block_size
+            
+        formatted_segments.append({
+            "segment_type": s.get("segment_type", "large"),
+            "address": s.get("address", 0),
+            "total_size": s.get("total_size", 0),
+            "total_size_h": _sz(s.get("total_size", 0)),
+            "allocated_size": s.get("allocated_size", 0),
+            "active_size": s.get("active_size", 0),
+            "blocks": formatted_blocks,
+        })
+        
+    active_memory_table.sort(key=lambda x: x["size"], reverse=True)
 
     # Summary of current segments
-    total_reserved = sum(s.get("total_size", 0) for s in segments)
+    total_reserved = sum(s.get("total_size", 0) for s in raw_segments)
 
     return {
         "events": events,
@@ -254,8 +311,10 @@ def _process_snapshot(
         "total_reserved": total_reserved,
         "total_reserved_h": _sz(total_reserved),
         "num_events": len(events),
-        "num_segments": len(segments),
+        "num_segments": len(raw_segments),
         "attribution_count": tensor_index.get("storage_pointer_count", 0),
+        "segments": formatted_segments,
+        "active_table": active_memory_table
     }
 
 
@@ -297,7 +356,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);
 
 /* Chart area */
 .chart-area{grid-column:1;grid-row:2;display:flex;flex-direction:column;
-  overflow:hidden;border-right:1px solid var(--border)}
+  overflow:hidden;border-right:1px solid var(--border);z-index:10}
 .chart-container{flex:1;position:relative;padding:16px 24px 8px}
 .chart-container svg{width:100%;height:100%}
 .detail-panel{height:220px;border-top:1px solid var(--border);padding:12px 24px;
@@ -346,12 +405,44 @@ html,body{height:100%;background:var(--bg);color:var(--text);
 
 /* Crosshair */
 .crosshair{stroke:var(--text2);stroke-width:1;stroke-dasharray:3 3;opacity:.5}
+
+/* Tabs */
+.tabs-bar{grid-column:1/-1;display:flex;gap:12px;padding:0 24px;border-bottom:1px solid var(--border);background:var(--surface)}
+.tab-btn{background:transparent;border:none;color:var(--text2);font-weight:600;font-size:13px;padding:12px 4px;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
+.tab-btn:hover{color:var(--text)}
+.tab-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
+
+/* Tab Content */
+.tab-content{display:none;grid-column:1/-1;grid-row:3;height:100%;overflow:hidden;flex-direction:column}
+.tab-content.active{display:flex}
+.app{grid-template-rows:auto auto 1fr;grid-template-columns:1fr;height:100vh}
+
+/* Layout for Timeline Tab */
+.timeline-layout{display:grid;grid-template-columns:1fr 380px;height:100%;width:100%;overflow:hidden}
+
+/* Segments Tab */
+.segments-pane{padding:24px;overflow-y:auto;flex:1}
+.pool-title{font-weight:600;font-size:16px;color:var(--text);margin-bottom:12px;margin-top:24px;display:flex;align-items:center;gap:8px}
+.segment-bar{display:flex;height:24px;border-radius:4px;overflow:hidden;margin-bottom:8px;background:rgba(255,255,255,0.05);border:1px solid var(--border)}
+.seg-block{height:100%;cursor:pointer;transition:opacity .15s;min-width:1px}
+.seg-block:hover{opacity:.8}
+.seg-meta{font-size:12px;color:var(--text2);margin-bottom:4px;font-family:'JetBrains Mono',monospace;display:flex;justify-content:space-between}
+
+/* Active Memory Table */
+.active-pane{display:flex;flex-direction:column;height:100%;overflow:hidden}
+.active-tbl-container{flex:1;overflow:auto;padding:0 24px 24px}
+.active-tbl{width:100%;border-collapse:collapse;font-family:'JetBrains Mono',monospace;font-size:12px}
+.active-tbl th{position:sticky;top:0;background:var(--surface);padding:10px 8px;text-align:left;color:var(--text2);font-weight:600;border-bottom:1px solid var(--border);z-index:5}
+.active-tbl td{padding:8px;border-bottom:1px solid var(--border)}
+.active-tbl tbody tr:hover{background:rgba(88,166,255,.05)}
+.active-tbl .t-name{font-family:'Inter',sans-serif;font-weight:600;color:var(--text)}
+.active-badge{display:inline-block;padding:2px 6px;border-radius:4px;background:rgba(88,166,255,.15);color:var(--accent);font-size:10px}
 </style>
 </head>
 <body>
 <div class="app">
   <div class="header">
-    <h1>⚡ Stormlog Memory Attribution</h1>
+    <h1>⚡ Stormlog GPU Attribution</h1>
     <div class="stats">
       <div class="stat"><div class="val" id="stat-peak">—</div><div class="lbl">Peak Alloc</div></div>
       <div class="stat"><div class="val" id="stat-events">—</div><div class="lbl">Events</div></div>
@@ -359,18 +450,48 @@ html,body{height:100%;background:var(--bg);color:var(--text);
       <div class="stat"><div class="val" id="stat-segments">—</div><div class="lbl">Segments</div></div>
     </div>
   </div>
-  <div class="chart-area">
-    <div class="chart-container" id="chart-container">
-      <svg id="chart"></svg>
-      <div class="tooltip" id="tooltip"></div>
-    </div>
-    <div class="detail-panel" id="detail-panel">
-      <div class="detail-title">Click an allocation in the chart or offender list to inspect</div>
+  <div class="tabs-bar">
+    <button class="tab-btn active" onclick="switchTab('tab-timeline', this)">Timeline Trace</button>
+    <button class="tab-btn" onclick="switchTab('tab-segments', this)">Segment Explorer</button>
+    <button class="tab-btn" onclick="switchTab('tab-active', this)">Active Memory Table</button>
+  </div>
+  
+  <div id="tab-timeline" class="tab-content active">
+    <div class="timeline-layout">
+      <div class="chart-area">
+        <div class="chart-container" id="chart-container">
+          <svg id="chart"></svg>
+          <div class="tooltip" id="tooltip"></div>
+        </div>
+        <div class="detail-panel" id="detail-panel">
+          <div class="detail-title">Click an allocation in the chart or offender list to inspect</div>
+        </div>
+      </div>
+      <div class="right-panel">
+        <div class="panel-header">🔥 Top Memory Offenders</div>
+        <div class="offender-list" id="offender-list"></div>
+      </div>
     </div>
   </div>
-  <div class="right-panel">
-    <div class="panel-header">🔥 Top Memory Offenders</div>
-    <div class="offender-list" id="offender-list"></div>
+
+  <div id="tab-segments" class="tab-content">
+    <div class="segments-pane" id="segments-pane"></div>
+  </div>
+
+  <div id="tab-active" class="tab-content">
+    <div class="active-pane">
+      <div style="padding:16px 24px;border-bottom:1px solid var(--border)">
+        <input type="text" id="active-search" placeholder="Filter active allocations by name or dtype..." style="width:100%;padding:8px 12px;border-radius:6px;border:1px solid var(--border);background:#0d1117;color:#fff;font-family:'Inter',sans-serif">
+      </div>
+      <div class="active-tbl-container">
+        <table class="active-tbl">
+          <thead>
+            <tr><th>Name</th><th>Size</th><th>Address</th><th>Shape</th><th>DType</th><th>Pool</th></tr>
+          </thead>
+          <tbody id="active-tbl-body"></tbody>
+        </table>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -586,8 +707,8 @@ if (oomEvent) {
   oomLine.setAttribute('class', 'oom-line');
   svg.appendChild(oomLine);
   const oomLbl = document.createElementNS('http://www.w3.org/2000/svg', 'text');
-  oomLbl.setAttribute('x', ox); oomLbl.setAttribute('y', margin.top - 4);
-  oomLbl.setAttribute('text-anchor', 'middle'); oomLbl.setAttribute('class', 'oom-label');
+  oomLbl.setAttribute('x', ox - 4); oomLbl.setAttribute('y', margin.top - 4);
+  oomLbl.setAttribute('text-anchor', 'end'); oomLbl.setAttribute('class', 'oom-label');
   oomLbl.textContent = '⚠ OOM — requested ' + oomEvent.size_h;
   svg.appendChild(oomLbl);
 }
@@ -683,6 +804,106 @@ function showEventDetail(e) {
     </div>
   `;
 }
+
+// === TABS & UI ===
+function switchTab(tabId, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById(tabId).classList.add('active');
+  if (tabId === 'tab-timeline') {
+    svg.setAttribute('viewBox', `0 0 ${container.getBoundingClientRect().width - 48} ${container.getBoundingClientRect().height - 24}`);
+  }
+}
+
+// === SEGMENTS EXPLORER ===
+const segPane = document.getElementById('segments-pane');
+
+function buildSegments() {
+  const segments = DATA.segments || [];
+  if (!segments.length) {
+    segPane.innerHTML = '<div style="color:var(--text2)">No segment data available in snapshot.</div>';
+    return;
+  }
+  
+  const pools = { 'large': [], 'small': [], 'unknown': [] };
+  segments.forEach(s => {
+    if(pools[s.segment_type]) pools[s.segment_type].push(s);
+    else pools['unknown'].push(s);
+  });
+  
+  let html = '';
+  Object.entries(pools).forEach(([type, segs]) => {
+    if (!segs.length) return;
+    
+    html += `<div class="pool-title">
+        <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--accent)"></span>
+        ${type.toUpperCase()} POOL
+        <span class="active-badge">${segs.length} Segments</span>
+      </div>`;
+    
+    segs.sort((a,b) => b.total_size - a.total_size).forEach(s => {
+      const total = s.total_size;
+      const allocated = s.allocated_size;
+      const active = s.active_size;
+      const pctAlloc = (allocated / total * 100).toFixed(1);
+      
+      html += `<div style="margin-bottom:24px">`;
+      html += `<div class="seg-meta">
+        <span><b>0x${s.address.toString(16)}</b> — ${s.total_size_h} Total</span>
+        <span>${fmtSize(allocated)} Alloc (${pctAlloc}%) · ${fmtSize(active)} Active</span>
+      </div>`;
+      
+      html += `<div class="segment-bar">`;
+      s.blocks.forEach(b => {
+        const pct = b.size / total * 100;
+        let color = 'var(--border)'; // free
+        if (b.state === 'active_allocated') color = colorFor(b.name);
+        else if (b.state.includes('inactive')) color = '#d29922'; // yellow for fragmented
+        
+        const title = `${b.state} | ${b.size_h} | ${b.name || ''}`;
+        html += `<div class="seg-block" style="width:${pct}%; background:${color}" title="${title}"></div>`;
+      });
+      html += `</div></div>`;
+    });
+  });
+  segPane.innerHTML = html;
+}
+
+// === ACTIVE MEMORY TABLE ===
+const tblBody = document.getElementById('active-tbl-body');
+const searchInput = document.getElementById('active-search');
+
+function renderActiveTable(query = '') {
+  const activeTable = DATA.active_table || [];
+  const q = query.toLowerCase();
+  
+  let html = '';
+  const filtered = activeTable.filter(r => 
+    !q || r.name.toLowerCase().includes(q) || (r.dtype && r.dtype.toLowerCase().includes(q))
+  );
+  
+  filtered.forEach(r => {
+    html += `<tr>
+      <td><div class="t-name" style="color:${colorFor(r.name)}">${r.name}</div></td>
+      <td>${r.size_h}</td>
+      <td>0x${r.address.toString(16)}</td>
+      <td>${r.shape || '—'}</td>
+      <td>${r.dtype || '—'}</td>
+      <td><span class="active-badge">${r.pool}</span></td>
+    </tr>`;
+  });
+  tblBody.innerHTML = html;
+}
+
+if (searchInput) {
+  searchInput.addEventListener('input', (e) => renderActiveTable(e.target.value));
+}
+
+// Init
+buildSegments();
+renderActiveTable();
+
 </script>
 </body>
 </html>"""
