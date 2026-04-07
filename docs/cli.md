@@ -10,6 +10,12 @@ Stormlog currently exposes three console scripts:
 
 Use `gpumemprof` and `tfmemprof` for automation. Use `stormlog` when you want the Textual TUI.
 
+If you want task-oriented operational recipes instead of option-by-option
+guidance, use the [Production Cookbook](cookbook/index.md), especially
+[Always-on Tracking](cookbook/always_on.md),
+[Incident Playbooks](cookbook/incidents.md), and
+[Distributed Diagnostics Recipes](cookbook/distributed.md).
+
 ## Verify the installed commands
 
 ```bash
@@ -150,6 +156,10 @@ When multiple sessions are present, `gpumemprof analyze` selects:
 
 Use `--session-id` to analyze a specific capture instead of the default one.
 
+For always-on deployment posture and incident response checklists, continue with
+[Always-on Tracking](cookbook/always_on.md) and
+[Incident Playbooks](cookbook/incidents.md).
+
 ### Produce a diagnose bundle
 
 ```bash
@@ -159,6 +169,11 @@ gpumemprof diagnose --native-history --duration 0 --output ./diag_bundle_native
 ```
 
 Use `--duration 0` when you want a fast artifact bundle without a new tracking window.
+
+For task-oriented recipes that combine `track`, `analyze`, `diagnose`, and the
+TUI into one workflow, continue with
+[Incident Playbooks](cookbook/incidents.md) and
+[Distributed Diagnostics Recipes](cookbook/distributed.md).
 
 Each standalone diagnose bundle also owns its own session id. The bundle
 manifest records whether the run finished `completed` or was left

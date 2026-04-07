@@ -1,0 +1,160 @@
+[← Back to Production Cookbook](index.md)
+
+# TensorFlow Production Recipes
+
+Use these recipes when the runtime is TensorFlow and you need production-safe
+capture, analysis, and diagnosis flows that match the current `tfmemprof`
+behavior.
+
+Audience: ML engineers, release owners.
+Difficulty: intermediate.
+
+## Prerequisites
+
+- install the package first with [Installation](../installation.md)
+- use `pip install "stormlog[tf]"` for the TensorFlow CLI paths
+- use [Command Line Guide](../cli.md) if you need per-flag reference
+- pick `/CPU:0` or `/GPU:0` explicitly for the current runtime
+- for GPU recipes, run a small GPU op first instead of relying only on
+  `tf.config.list_physical_devices("GPU")`
+
+Success signal:
+
+- the first workload-backed recipe records non-zero GPU memory
+- a monitor, track, or diagnose artifact is written successfully
+- the analyzer returns a report with a clear next action
+
+## Choose the first TensorFlow recipe
+
+| If the main goal is... | Start with... |
+| --- | --- |
+| check a small in-process workload first | profile a GPU matmul step |
+| capture a bounded sample window | `monitor` |
+| keep an event stream and session status | `track` |
+| get a report with leak and optimization signals | `analyze` |
+| save a portable bundle fast | `diagnose --duration 0` |
+
+## Recipe: profile a GPU matmul step
+
+```python
+import tensorflow as tf
+from stormlog.tensorflow import TFMemoryProfiler
+
+profiler = TFMemoryProfiler(device="/GPU:0", enable_tensor_tracking=True)
+
+with profiler.profile_context("matmul_step"):
+    a = tf.random.normal((4096, 4096))
+    b = tf.random.normal((4096, 4096))
+    c = tf.matmul(a, b)
+    _ = tf.reduce_mean(c).numpy()
+
+results = profiler.get_results()
+print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+print(f"Snapshots captured: {len(results.snapshots)}")
+```
+
+Use this when you want a small TensorFlow workload on `/GPU:0` without
+depending on the cuDNN training path.
+
+## Recipe: capture a bounded CLI timeline
+
+```bash
+tfmemprof monitor --interval 0.5 --duration 30 --device /CPU:0 --output ./tf_monitor.json
+```
+
+Switch to `/GPU:0` when the TensorFlow runtime exposes a GPU device.
+
+Treat this as a CLI artifact-flow command. On an otherwise idle runtime it will
+often record zeros even when the tracker itself is functioning correctly.
+
+## Recipe: track TensorFlow memory over time
+
+```bash
+tfmemprof track \
+  --interval 0.5 \
+  --threshold 4096 \
+  --device /CPU:0 \
+  --output ./tf_track.json
+```
+
+Use `track` when you need retained vs dropped history counters, session status,
+and an event stream you can reload later.
+
+Stop the command cleanly with `Ctrl+C` so the output file is flushed before the
+process exits.
+
+## Recipe: run TensorFlow analysis
+
+```bash
+tfmemprof analyze --input ./tf_monitor.json --detect-leaks --optimize --report ./tf_report.txt
+```
+
+The current TensorFlow analyzer uses `--input`, not the positional-input style
+from `gpumemprof analyze`.
+
+## Recipe: produce a diagnose bundle
+
+```bash
+tfmemprof diagnose --duration 0 --output ./tf_diag_bundle
+```
+
+## Recipe: run the end-to-end TensorFlow flow from a source checkout
+
+```bash
+python -m examples.scenarios.tf_end_to_end_scenario
+```
+
+This is source-checkout only. Pip installs do not include `examples/`.
+
+## What to look for in the results
+
+- leak findings from `--detect-leaks`
+- optimization recommendations from `--optimize`
+- `collector_failure_event_count`
+- `session_status`
+- `gap_analysis` when telemetry events are available
+- `collective_attribution` when cross-rank communication likely explains hidden-memory spikes
+
+## What to do next
+
+- If leak detection reports high-severity issues, move to the memory-growth path
+  in [Incident Playbooks](incidents.md).
+- If `collector_failure_event_count` is non-zero, use the degraded-collector
+  checklist in [Incident Playbooks](incidents.md).
+- If the run is part of a larger distributed job, move to the
+  [Distributed Diagnostics Recipes](distributed.md).
+- If the deployment is long-running, move to [Always-on Tracking](always_on.md).
+
+## Troubleshooting
+
+### Symptom: `track` stops without writing the output file
+
+Likely cause: the process was interrupted before the tracker reached its normal shutdown path.
+Fix: wait until tracking has started, then stop it cleanly with `Ctrl+C`.
+Verify: the output file is written and `session_status` is present.
+
+### Symptom: TensorFlow sees `/GPU:0` but a training step fails with `DNN library initialization failed`
+
+Likely cause: the TensorFlow, CUDA, cuDNN, and driver stack is not aligned for
+training-backed ops.
+Fix: rerun the minimal matmul snippet above first, then repair the TensorFlow
+runtime before moving to Keras or cuDNN-dependent workloads.
+Verify: the matmul snippet records non-zero GPU memory and the training path no
+longer raises a DNN initialization error.
+
+### Symptom: `monitor` or `track` on `/GPU:0` records only zeros
+
+Likely cause: the CLI process is idle and not exercising a TensorFlow workload.
+Fix: use the workload-backed `TFMemoryProfiler` snippet or the source-checkout
+scenario before relying on the artifact for performance conclusions.
+Verify: the workload-backed path records non-zero GPU memory.
+
+### Symptom: `analyze` reports no GPU
+
+Likely cause: the TensorFlow runtime is CPU-only or the selected device is unavailable.
+Fix: rerun with `--device /CPU:0` or fix the runtime environment first.
+Verify: `tfmemprof info` and the chosen capture command agree on the active device.
+
+---
+
+[← Back to Production Cookbook](index.md)

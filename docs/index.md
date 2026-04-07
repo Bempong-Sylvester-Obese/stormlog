@@ -31,6 +31,13 @@ installation
 usage
 cli
 tui
+cookbook/index
+cookbook/always_on
+cookbook/pytorch
+cookbook/tensorflow
+cookbook/distributed
+cookbook/incidents
+cookbook/ci_release
 examples
 testing
 troubleshooting
@@ -60,18 +67,21 @@ examples/test_guides/README
 
 1. [CLI](cli.md)
 2. [TUI](tui.md)
-3. [Troubleshooting](troubleshooting.md)
+3. [Production Cookbook](cookbook/index.md)
+4. [Troubleshooting](troubleshooting.md)
 
 ### Release or CI validation
 
 1. [Testing](testing.md)
-2. [Examples](examples.md)
-3. [Benchmark Harness](benchmark_harness.md)
+2. [CI and Release Qualification](cookbook/ci_release.md)
+3. [Examples](examples.md)
+4. [Benchmark Harness](benchmark_harness.md)
 
 ### Framework-specific workflows
 
 - [PyTorch guide](pytorch_testing_guide.md)
 - [TensorFlow guide](tensorflow_testing_guide.md)
+- [Production Cookbook](cookbook/index.md)
 
 ## Notes
 

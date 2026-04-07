@@ -295,6 +295,118 @@ def test_unprofiled_scenario_summary_persists_final_artifact_size(
     assert persisted["artifact_size_bytes"] == final_size
 
 
+def test_run_overhead_report_uses_low_quantile_wall_overhead_trial(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    trial_wall_seconds = {
+        1: (0.10, 0.20),  # 100%
+        2: (0.10, 0.22),  # 120% selected low quantile
+        3: (0.10, 0.30),  # 200%
+        4: (0.10, 0.90),  # 800% outlier
+        5: (0.10, 1.10),  # 1000% outlier
+    }
+    trial_cpu_seconds = {
+        1: (0.10, 0.18),
+        2: (0.10, 0.19),
+        3: (0.10, 0.17),
+        4: (0.10, 0.21),
+        5: (0.10, 0.22),
+    }
+
+    def _trial_number(scenario_dir: Path) -> int:
+        return int(scenario_dir.parent.name.split("_")[-1])
+
+    def _fake_unprofiled_scenario(
+        scenario_dir: Path,
+        *,
+        iterations: int,
+        allocation_kb: int,
+    ) -> dict[str, object]:
+        _ = iterations, allocation_kb
+        trial_number = _trial_number(scenario_dir)
+        scenario_dir.mkdir(parents=True, exist_ok=True)
+        (scenario_dir / "payload.bin").write_bytes(b"u" * trial_number)
+        return benchmark_harness._finalize_scenario_summary(
+            scenario_dir,
+            {
+                "name": "unprofiled",
+                "wall_seconds": trial_wall_seconds[trial_number][0],
+                "cpu_seconds": trial_cpu_seconds[trial_number][0],
+                "checksum": trial_number,
+                "artifact_dir": str(scenario_dir),
+            },
+        )
+
+    def _fake_tracked_scenario(
+        spec: benchmark_harness.RuntimeSpec,
+        scenario_dir: Path,
+        *,
+        iterations: int,
+        allocation_kb: int,
+        sample_count: int,
+        sink_overrides: benchmark_harness.SinkOverrides | None = None,
+    ) -> dict[str, object]:
+        _ = spec, iterations, allocation_kb, sample_count, sink_overrides
+        trial_number = _trial_number(scenario_dir)
+        scenario_dir.mkdir(parents=True, exist_ok=True)
+        output_path = scenario_dir / "events.json"
+        output_path.write_text("{}", encoding="utf-8")
+        return benchmark_harness._finalize_scenario_summary(
+            scenario_dir,
+            {
+                "name": "gpumemprof_cpu",
+                "wall_seconds": trial_wall_seconds[trial_number][1],
+                "cpu_seconds": trial_cpu_seconds[trial_number][1],
+                "checksum": trial_number,
+                "sample_count": 5,
+                "emitted_samples": 5,
+                "event_count": 7,
+                "collector_failure_event_count": 0,
+                "stats": {},
+                "artifact_dir": str(scenario_dir),
+                "output_path": str(output_path),
+            },
+        )
+
+    monkeypatch.setattr(
+        benchmark_harness,
+        "_run_unprofiled_scenario",
+        _fake_unprofiled_scenario,
+    )
+    monkeypatch.setattr(
+        benchmark_harness,
+        "_run_tracked_scenario",
+        _fake_tracked_scenario,
+    )
+    monkeypatch.setattr(benchmark_harness, "DEFAULT_OVERHEAD_TRIAL_COUNT", 5)
+    monkeypatch.setattr(benchmark_harness, "DEFAULT_OVERHEAD_TRIAL_QUANTILE", 0.25)
+
+    report = benchmark_harness._run_overhead_report(
+        benchmark_harness.RuntimeSpec(
+            name="gpumemprof_cpu",
+            default_interval=0.1,
+            factory=lambda artifact_dir, interval, sink_overrides: _UnusedRuntimeSession(),
+        ),
+        tmp_path / "gpumemprof_cpu",
+        iterations=10,
+        allocation_kb=64,
+    )
+
+    assert report["trial_count"] == 5
+    assert report["trial_quantile"] == pytest.approx(0.25)
+    assert report["selected_trial"] == 2
+    assert report["metrics"]["runtime_overhead_pct"] == pytest.approx(120.0)
+    assert len(report["trial_metrics"]) == 5
+    assert Path(report["scenarios"]["unprofiled"]["artifact_dir"]).name == "unprofiled"
+    assert (
+        Path(report["scenarios"]["tracked_default"]["artifact_dir"]).name
+        == "tracked_default"
+    )
+    assert Path(report["scenarios"]["tracked_default"]["output_path"]).exists()
+    assert not (tmp_path / "gpumemprof_cpu" / ".overhead_trials").exists()
+
+
 def test_benchmark_harness_writes_v04_report_with_expected_shape(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

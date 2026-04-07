@@ -298,7 +298,7 @@ def test_load_distributed_artifacts_merges_json_and_csv_inputs(
     assert str(csv_path) in result.sources_loaded
 
 
-def test_load_distributed_artifacts_keeps_session_aware_json_inputs_separate(
+def test_load_distributed_artifacts_adds_merged_session_for_multi_rank_job_inputs(
     tmp_path: Path,
 ) -> None:
     first_event = telemetry_event_to_dict(
@@ -332,16 +332,30 @@ def test_load_distributed_artifacts_keeps_session_aware_json_inputs_separate(
     second_path.write_text(json.dumps([second_event]), encoding="utf-8")
 
     result = load_distributed_artifacts([first_path, second_path])
-    all_events = _flatten_result_events(result)
-
-    assert len(result.events) == 1
-    assert len(result.sessions) == 2
-    assert len(all_events) == 2
-    assert {session.summary.session_id for session in result.sessions} == {
+    assert len(result.events) == 2
+    assert len(result.sessions) == 3
+    assert {session.summary.session_id for session in result.sessions} >= {
         "session-a",
         "session-b",
     }
-    assert result.selected_session_id in {"session-a", "session-b"}
+    assert result.selected_session_id not in {"session-a", "session-b"}
+
+    selected = next(
+        session
+        for session in result.sessions
+        if session.summary.session_id == result.selected_session_id
+    )
+    assert sorted({event.rank for event in selected.events}) == [0, 1]
+    assert selected.summary.job_id == "job-1"
+    assert selected.summary.world_size == 2
+
+    explicit = load_distributed_artifacts(
+        [first_path, second_path],
+        session_id="session-a",
+    )
+    assert explicit.selected_session_id == "session-a"
+    assert len(explicit.events) == 1
+    assert explicit.events[0].rank == 0
 
 
 def test_load_distributed_artifacts_reads_directory_event_payloads(

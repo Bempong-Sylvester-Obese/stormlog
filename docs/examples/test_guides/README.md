@@ -87,13 +87,18 @@ Both scripts emit summaries, alert counts, and export artifacts under
 > **Source checkout only.** Pip users should use the CLI commands and Python
 > snippets from the [Usage Guide](../../usage.md).
 
+Start with the workload-backed `/GPU:0` matmul recipe in
+[TensorFlow Production Recipes](../../cookbook/tensorflow.md) when you are
+bringing up a GPU runtime. After that succeeds, use the training-backed example
+below:
+
 ```bash
-# Minimal TensorFlow profiling run
 python -m examples.basic.tensorflow_demo
 ```
 
 The demo configures memory growth automatically and prints peak/average memory
-statistics gathered via `TFMemoryProfiler`.
+statistics gathered via `TFMemoryProfiler`, but it is a deeper training-backed
+check than the cookbook bring-up recipe.
 
 ## CLI Smoke Test (PyTorch + TensorFlow)
 
@@ -131,7 +136,8 @@ stormlog
 Ready to profile on GPUs? Follow the [GPU Setup Guide](../../gpu_setup.md) for driver + framework
 installation instructions (PyTorch CUDA wheels, TensorFlow GPU wheel, and
 verification commands). Once complete, unset `CUDA_VISIBLE_DEVICES` (or point
-it to a real GPU) and rerun the PyTorch/TensorFlow checklists above.
+it to a real GPU), run the cookbook GPU bring-up recipes, and then rerun the
+PyTorch/TensorFlow checklists above.
 
 ## Automation Tips
 

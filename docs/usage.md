@@ -9,6 +9,12 @@ This guide focuses on the workflows that are stable in the current codebase:
 - export telemetry and plots
 - move from runtime data to a diagnose bundle or TUI session
 
+If you want task-oriented production recipes instead of a capability guide, use
+the [Production Cookbook](cookbook/index.md), especially
+[Always-on Tracking](cookbook/always_on.md),
+[PyTorch Production Recipes](cookbook/pytorch.md), and
+[TensorFlow Production Recipes](cookbook/tensorflow.md).
+
 Install the distribution as `stormlog`, then import the Python APIs from
 `stormlog` or `stormlog.tensorflow`. The CLI automation commands remain
 `gpumemprof` and `tfmemprof`.
