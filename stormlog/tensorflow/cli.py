@@ -591,6 +591,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="TensorFlow Stormlog CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Cookbook:
+  https://stormlog.readthedocs.io/en/latest/cookbook/index.html
+        """,
     )
 
     parser.add_argument(

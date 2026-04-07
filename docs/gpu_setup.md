@@ -43,10 +43,12 @@ PY
 ## 3. TensorFlow (GPU) Installation
 
 TensorFlow ≥2.11 ships a unified wheel that includes GPU support as long as
-CUDA/cuDNN are present. For this repo we pin 2.15:
+the installed TensorFlow build matches the current driver/CUDA/cuDNN stack.
+Install a TensorFlow version that is compatible with the host you are bringing
+up. Example:
 
 ```bash
-pip install tensorflow==2.15.0
+pip install tensorflow
 ```
 
 ### Verify TensorFlow CUDA
@@ -57,9 +59,13 @@ import tensorflow as tf
 print("TensorFlow:", tf.__version__)
 gpus = tf.config.list_physical_devices("GPU")
 print("GPUs:", gpus)
-if gpus:
-    tf.config.experimental.set_memory_growth(gpus[0], True)
-    print("Memory growth enabled for", gpus[0].name)
+if not gpus:
+    raise SystemExit("No GPU devices detected")
+with tf.device("/GPU:0"):
+    a = tf.random.normal((2048, 2048))
+    b = tf.random.normal((2048, 2048))
+    _ = tf.reduce_mean(tf.matmul(a, b)).numpy()
+print("GPU matmul ok")
 PY
 ```
 
@@ -78,23 +84,38 @@ PY
   `gpumemprof info` may still report the `mps` backend. Treat this as a
   non-CUDA smoke test rather than a strict CPU-only force.
 
-  If you have a source checkout, you can also run `pytest tests/test_utils.py -v`.
-
 - **GPU path:** unset `CUDA_VISIBLE_DEVICES` (or set it to a GPU index) and run
-  the source-checkout PyTorch/TensorFlow demos:
+  one known-good PyTorch workload plus the TensorFlow GPU matmul check:
 
   ```bash
   python -m examples.basic.pytorch_demo
-  python -m examples.basic.tensorflow_demo
-  pytest tests/test_profiler.py
+  python - <<'PY'
+  import tensorflow as tf
+  from stormlog.tensorflow import TFMemoryProfiler
+
+  profiler = TFMemoryProfiler(device="/GPU:0", enable_tensor_tracking=True)
+  with profiler.profile_context("matmul_step"):
+      a = tf.random.normal((4096, 4096))
+      b = tf.random.normal((4096, 4096))
+      c = tf.matmul(a, b)
+      _ = tf.reduce_mean(c).numpy()
+
+  results = profiler.get_results()
+  print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+  print(f"Snapshots captured: {len(results.snapshots)}")
+  PY
   ```
+
+  After this path is clean, you can run `python -m examples.basic.tensorflow_demo`
+  as the training-backed source-checkout example.
 
 ## 5. Common Issues
 
 | Symptom | Fix |
 | --- | --- |
 | `torch.cuda.is_available()` is False | Confirm NVIDIA driver is installed, retry with the correct CUDA wheel, or reboot after driver install. |
-| TensorFlow cannot find cuDNN | Install the CUDA/cuDNN versions listed in the TF release notes or use `tensorflow==2.15.0` (which bundles cuDNN on Windows/Linux). |
+| TensorFlow sees `/GPU:0` but training-backed ops fail | Confirm the GPU matmul check above succeeds first, then align the TensorFlow/CUDA/cuDNN stack before moving to Keras or cuDNN-backed demos. |
+| TensorFlow cannot find cuDNN | Install a TensorFlow build that matches the current CUDA/cuDNN stack and rerun the GPU matmul check before using training-backed examples. |
 | `RuntimeError: CUDA driver not found` | Check that `nvidia-smi` works on the command line; reinstall the driver if necessary. |
 | CI path installing wrong framework | Follow `.github/workflows/ci.yml` logic: install the base deps, then exactly one framework (PyTorch or TensorFlow). |
 

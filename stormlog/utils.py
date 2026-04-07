@@ -562,7 +562,7 @@ def check_memory_fragmentation(
     }
 
     # Add formatted versions
-    for key, value in fragmentation_info.items():
+    for key, value in list(fragmentation_info.items()):
         if key.endswith("_memory") or key == "total_memory":
             fragmentation_info[key + "_formatted"] = format_bytes(value)
 
