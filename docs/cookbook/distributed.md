@@ -94,6 +94,10 @@ tfmemprof track \
 Stop each TensorFlow rank cleanly with `Ctrl+C` after tracking has started so
 the per-rank output file is flushed before exit.
 
+Keep the same `job_id` across every rank-local capture from one distributed
+run. Diagnostics uses that shared job identity to auto-select a merged
+cross-rank session when you load the artifacts together.
+
 ## Recipe: load multiple rank artifacts in the TUI
 
 ```bash
@@ -105,8 +109,11 @@ Then:
 1. Open `Diagnostics`.
 2. Enter the artifact paths as a comma-separated list.
 3. Click `Load Artifacts`.
-4. If more than one session is discovered, target the session you want before refreshing.
-5. Apply a rank filter such as `all` or `0,1`.
+4. Leave session selection on `auto` or `default` first. With a shared `job_id`,
+   Diagnostics selects the merged cross-rank session automatically.
+5. Choose an individual `session_id` only when you want to isolate one raw
+   rank-local artifact.
+6. Apply a rank filter such as `all` or `0,1`.
 
 ## What to look for
 

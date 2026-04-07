@@ -322,6 +322,72 @@ def _merge_legacy_flat_sessions(
     )
 
 
+def _merge_distributed_path_sessions(
+    loaded_sessions: Sequence[LoadedTelemetrySession],
+) -> LoadedTelemetrySession:
+    if not loaded_sessions:
+        raise ValueError("distributed session merge requires at least one session")
+
+    source_paths = sorted(
+        {source for loaded in loaded_sessions for source in loaded.sources_loaded}
+    )
+    summaries = [loaded.summary for loaded in loaded_sessions]
+    job_id = _collect_common_optional_string(summary.job_id for summary in summaries)
+    if job_id is None:
+        raise ValueError("distributed session merge requires a shared job_id")
+
+    world_size = max(summary.world_size for summary in summaries)
+    merged_session_id = stable_legacy_session_id(
+        "distributed.rank_group",
+        job_id,
+        world_size,
+        *sorted(summary.session_id for summary in summaries),
+    )
+    merged_events = _dedupe_events(
+        replace(event, session_id=merged_session_id)
+        for loaded in loaded_sessions
+        for event in loaded.events
+    )
+    merged_events.sort(key=lambda event: event.timestamp_ns)
+
+    all_completed = all(
+        summary.status == SESSION_STATUS_COMPLETED for summary in summaries
+    )
+    host = _collect_common_optional_string(summary.host for summary in summaries)
+    started_at_ns = min(summary.started_at_ns for summary in summaries)
+    ended_at_candidates = [
+        summary.ended_at_ns for summary in summaries if summary.ended_at_ns is not None
+    ]
+    ended_at_ns = (
+        max(ended_at_candidates) if all_completed and ended_at_candidates else None
+    )
+    summary = create_session_summary(
+        source="stormlog.diagnostics.distributed",
+        status=(
+            SESSION_STATUS_COMPLETED if all_completed else SESSION_STATUS_INCOMPLETE
+        ),
+        session_id=merged_session_id,
+        started_at_ns=started_at_ns,
+        ended_at_ns=ended_at_ns,
+        host=host or "multiple",
+        pid=(
+            summaries[0].pid if len({summary.pid for summary in summaries}) == 1 else -1
+        ),
+        job_id=job_id,
+        rank=min(summary.rank for summary in summaries),
+        local_rank=min(summary.local_rank for summary in summaries),
+        world_size=world_size,
+    )
+    return LoadedTelemetrySession(
+        summary=summary,
+        events=merged_events,
+        sources_loaded=source_paths,
+        warnings=_unique_strings(
+            warning for loaded in loaded_sessions for warning in loaded.warnings
+        ),
+    )
+
+
 def _accumulate_path_loaded_sessions(
     accumulators: dict[str, _LoadedSessionAccumulator],
     legacy_flat_sessions: list[LoadedTelemetrySession],
@@ -436,6 +502,53 @@ def _finalize_loaded_sessions(
     return sessions
 
 
+def _order_loaded_sessions(
+    sessions: Sequence[LoadedTelemetrySession],
+) -> list[LoadedTelemetrySession]:
+    order = {
+        summary.session_id: index
+        for index, summary in enumerate(
+            sort_session_summaries(loaded.summary for loaded in sessions)
+        )
+    }
+    return sorted(
+        sessions,
+        key=lambda loaded: (
+            order.get(loaded.summary.session_id, 999),
+            loaded.summary.session_id,
+        ),
+    )
+
+
+def _synthesize_distributed_sessions(
+    sessions: Sequence[LoadedTelemetrySession],
+    candidate_session_ids: set[str],
+) -> list[LoadedTelemetrySession]:
+    grouped: dict[tuple[str, int], list[LoadedTelemetrySession]] = {}
+    for loaded in sessions:
+        summary = loaded.summary
+        if summary.session_id not in candidate_session_ids:
+            continue
+        if summary.job_id is None or summary.world_size <= 1:
+            continue
+        if not loaded.events:
+            continue
+        grouped.setdefault((summary.job_id, summary.world_size), []).append(loaded)
+
+    merged_sessions: list[LoadedTelemetrySession] = []
+    for (_, world_size), group in grouped.items():
+        if len(group) <= 1 or len(group) > world_size:
+            continue
+
+        ranks = [loaded.summary.rank for loaded in group]
+        if len(set(ranks)) != len(ranks):
+            continue
+
+        merged_sessions.append(_merge_distributed_path_sessions(group))
+
+    return merged_sessions
+
+
 def _unique_strings(values: Iterable[str]) -> list[str]:
     seen: set[str] = set()
     ordered: list[str] = []
@@ -456,6 +569,7 @@ def load_distributed_artifacts(
     sources_loaded: set[str] = set()
     accumulators: dict[str, _LoadedSessionAccumulator] = {}
     legacy_flat_sessions: list[LoadedTelemetrySession] = []
+    single_session_input_ids: set[str] = set()
     rank_allocator = _TimelineRankAllocator()
 
     for input_path in paths:
@@ -469,6 +583,11 @@ def load_distributed_artifacts(
                 path,
                 rank_allocator=rank_allocator,
             )
+            if (
+                len(loaded_sessions) == 1
+                and not _is_legacy_sessionless_flat_file(path, loaded_sessions)
+            ):
+                single_session_input_ids.add(loaded_sessions[0].summary.session_id)
             _accumulate_path_loaded_sessions(
                 accumulators,
                 legacy_flat_sessions,
@@ -485,6 +604,8 @@ def load_distributed_artifacts(
                 path,
                 rank_allocator=rank_allocator,
             )
+            if len(loaded_sessions) == 1:
+                single_session_input_ids.add(loaded_sessions[0].summary.session_id)
             _accumulate_loaded_sessions(accumulators, loaded_sessions)
             warnings.extend(dir_warnings)
             for loaded in loaded_sessions:
@@ -499,6 +620,12 @@ def load_distributed_artifacts(
         sources_loaded.update(merged_legacy.sources_loaded)
 
     sessions = _finalize_loaded_sessions(accumulators)
+    synthetic_sessions = _synthesize_distributed_sessions(
+        sessions,
+        single_session_input_ids,
+    )
+    if synthetic_sessions:
+        sessions = _order_loaded_sessions([*sessions, *synthetic_sessions])
     selected: LoadedTelemetrySession | None = None
     if session_id is not None:
         selected = next(
@@ -508,7 +635,10 @@ def load_distributed_artifacts(
         if selected is None:
             raise ValueError(f"Requested session_id not found: {session_id}")
     else:
-        selected = select_default_loaded_session(sessions)
+        if synthetic_sessions:
+            selected = select_default_loaded_session(synthetic_sessions)
+        if selected is None:
+            selected = select_default_loaded_session(sessions)
 
     selected_events = list(selected.events) if selected is not None else []
     combined_warnings = _unique_strings(
