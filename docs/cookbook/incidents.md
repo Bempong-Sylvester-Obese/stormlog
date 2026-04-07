@@ -5,8 +5,6 @@
 Use these checklists when you already have a failure mode and need the shortest
 path to the next useful artifact or decision.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: incident responders, ML engineers.
 Difficulty: intermediate.
 

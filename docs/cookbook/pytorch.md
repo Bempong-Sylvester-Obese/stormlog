@@ -5,8 +5,6 @@
 Use these recipes when the workload is owned by PyTorch and you need a fast path
 from a memory incident to a saved artifact and an actionable next step.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: ML engineers, incident responders.
 Difficulty: intermediate.
 

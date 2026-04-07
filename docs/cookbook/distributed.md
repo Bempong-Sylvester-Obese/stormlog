@@ -5,8 +5,6 @@
 Use this page when you need to preserve per-rank identity during capture and
 rebuild a rank-aware timeline later.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: distributed-training owners, incident responders.
 Difficulty: advanced.
 

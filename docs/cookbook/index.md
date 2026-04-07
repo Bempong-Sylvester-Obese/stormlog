@@ -8,8 +8,6 @@ into task-oriented recipes for production-facing work.
 Use these pages when you already know the tool is installed and want the
 shortest path to a reliable operational workflow.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: operators, ML engineers, release owners.
 Difficulty: intermediate.
 

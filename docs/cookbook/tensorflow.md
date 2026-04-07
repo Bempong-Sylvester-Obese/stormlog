@@ -6,8 +6,6 @@ Use these recipes when the runtime is TensorFlow and you need production-safe
 capture, analysis, and diagnosis flows that match the current `tfmemprof`
 behavior.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: ML engineers, release owners.
 Difficulty: intermediate.
 

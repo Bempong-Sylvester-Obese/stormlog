@@ -8,8 +8,6 @@ Stormlog's operational behavior before release or as part of CI.
 > **Source checkout only below.** The commands on this page use the repository
 > `examples/` package and benchmark assets under `docs/benchmarks/`.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: release owners, CI maintainers.
 Difficulty: intermediate.
 
