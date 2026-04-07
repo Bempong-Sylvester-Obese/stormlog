@@ -6,8 +6,6 @@ Use this recipe when you want Stormlog to behave like an operational service:
 bounded history in memory, append-only sink artifacts on disk, and enough
 session metadata to reconstruct one run later.
 
-Validated against the current `release/dev` branch on April 7, 2026.
-
 Audience: operators, platform owners.
 Difficulty: intermediate.
 
