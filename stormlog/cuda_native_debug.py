@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRACE_ALLOC_MAX_ENTRIES = 100_000
 SNAPSHOT_PICKLE_FILENAME = "cuda_allocator_snapshot.pickle"
 TRACE_HTML_FILENAME = "cuda_allocator_state_history.html"
+TRACE_HTML_ANNOTATED_FILENAME = "cuda_allocator_state_history_annotated.html"
 SEGMENT_SUMMARY_FILENAME = "cuda_allocator_segments.txt"
 TRACE_SUMMARY_FILENAME = "cuda_allocator_trace.txt"
 TENSOR_ATTRIBUTION_FILENAME = "cuda_tensor_attribution.json"
@@ -355,6 +356,23 @@ def write_cuda_snapshot_artifacts(
         )
         _write_text(output_dir / TRACE_HTML_FILENAME, trace_html)
         files_written.append(TRACE_HTML_FILENAME)
+
+        # Generate the Stormlog attributed memory visualisation.
+        try:
+            from .attributed_viz import (
+                ATTRIBUTED_HTML_FILENAME,
+                render_attributed_html,
+            )
+
+            attributed_html = render_attributed_html(
+                snapshot_dict,
+                tensor_index,
+                device=_resolve_device_index(device),
+            )
+            _write_text(output_dir / ATTRIBUTED_HTML_FILENAME, attributed_html)
+            files_written.append(ATTRIBUTED_HTML_FILENAME)
+        except Exception as attr_exc:
+            warnings.append(f"attributed HTML: {attr_exc}")
     except Exception as exc:
         warnings.append(str(exc))
 
@@ -408,6 +426,7 @@ __all__ = [
     "SEGMENT_SUMMARY_FILENAME",
     "SNAPSHOT_PICKLE_FILENAME",
     "TENSOR_ATTRIBUTION_FILENAME",
+    "TRACE_HTML_ANNOTATED_FILENAME",
     "TRACE_HTML_FILENAME",
     "TRACE_SUMMARY_FILENAME",
     "build_cuda_tensor_attribution_index",

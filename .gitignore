@@ -108,3 +108,4 @@ env.bak/
 venv.bak/
 
 .venv/
+# check/
