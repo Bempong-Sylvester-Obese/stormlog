@@ -295,19 +295,23 @@ def test_unprofiled_scenario_summary_persists_final_artifact_size(
     assert persisted["artifact_size_bytes"] == final_size
 
 
-def test_run_overhead_report_uses_median_wall_overhead_trial(
+def test_run_overhead_report_uses_low_quantile_wall_overhead_trial(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     trial_wall_seconds = {
         1: (0.10, 0.20),  # 100%
-        2: (0.10, 0.90),  # 800% outlier
-        3: (0.10, 0.30),  # 200% median
+        2: (0.10, 0.22),  # 120% selected low quantile
+        3: (0.10, 0.30),  # 200%
+        4: (0.10, 0.90),  # 800% outlier
+        5: (0.10, 1.10),  # 1000% outlier
     }
     trial_cpu_seconds = {
         1: (0.10, 0.18),
         2: (0.10, 0.19),
         3: (0.10, 0.17),
+        4: (0.10, 0.21),
+        5: (0.10, 0.22),
     }
 
     def _trial_number(scenario_dir: Path) -> int:
@@ -375,7 +379,8 @@ def test_run_overhead_report_uses_median_wall_overhead_trial(
         "_run_tracked_scenario",
         _fake_tracked_scenario,
     )
-    monkeypatch.setattr(benchmark_harness, "DEFAULT_OVERHEAD_TRIAL_COUNT", 3)
+    monkeypatch.setattr(benchmark_harness, "DEFAULT_OVERHEAD_TRIAL_COUNT", 5)
+    monkeypatch.setattr(benchmark_harness, "DEFAULT_OVERHEAD_TRIAL_QUANTILE", 0.25)
 
     report = benchmark_harness._run_overhead_report(
         benchmark_harness.RuntimeSpec(
@@ -388,10 +393,11 @@ def test_run_overhead_report_uses_median_wall_overhead_trial(
         allocation_kb=64,
     )
 
-    assert report["trial_count"] == 3
-    assert report["selected_trial"] == 3
-    assert report["metrics"]["runtime_overhead_pct"] == pytest.approx(200.0)
-    assert len(report["trial_metrics"]) == 3
+    assert report["trial_count"] == 5
+    assert report["trial_quantile"] == pytest.approx(0.25)
+    assert report["selected_trial"] == 2
+    assert report["metrics"]["runtime_overhead_pct"] == pytest.approx(120.0)
+    assert len(report["trial_metrics"]) == 5
     assert Path(report["scenarios"]["unprofiled"]["artifact_dir"]).name == "unprofiled"
     assert (
         Path(report["scenarios"]["tracked_default"]["artifact_dir"]).name

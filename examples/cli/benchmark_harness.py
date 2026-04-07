@@ -29,7 +29,8 @@ DEFAULT_MODE = "all"
 DEFAULT_GATE_MODE = "budget"
 DEFAULT_ITERATIONS = 5_000
 DEFAULT_ALLOCATION_KB = 512
-DEFAULT_OVERHEAD_TRIAL_COUNT = 3
+DEFAULT_OVERHEAD_TRIAL_COUNT = 5
+DEFAULT_OVERHEAD_TRIAL_QUANTILE = 0.25
 REFERENCE_INTERVAL_SECONDS = 0.1
 DEFAULT_RETENTION_VALIDATION = {
     "flush_every_events": 50,
@@ -447,7 +448,7 @@ def _build_overhead_metrics(
     }
 
 
-def _median_overhead_trial_index(trials: Sequence[Mapping[str, Any]]) -> int:
+def _select_overhead_trial_index(trials: Sequence[Mapping[str, Any]]) -> int:
     if not trials:
         raise ValueError("at least one overhead trial is required")
     ordered = sorted(
@@ -458,7 +459,10 @@ def _median_overhead_trial_index(trials: Sequence[Mapping[str, Any]]) -> int:
             item[0],
         ),
     )
-    return ordered[len(ordered) // 2][0]
+    selected_rank = int(
+        math.floor((len(ordered) - 1) * DEFAULT_OVERHEAD_TRIAL_QUANTILE)
+    )
+    return ordered[selected_rank][0]
 
 
 def _promote_overhead_scenario(
@@ -520,7 +524,7 @@ def _run_overhead_report(
                 }
             )
 
-        selected_index = _median_overhead_trial_index(trial_reports)
+        selected_index = _select_overhead_trial_index(trial_reports)
         selected_trial = trial_reports[selected_index]
         overhead_dir = runtime_dir / "overhead"
         _prepare_directory(overhead_dir)
@@ -546,6 +550,7 @@ def _run_overhead_report(
         },
         "metrics": _build_overhead_metrics(promoted_unprofiled, promoted_tracked),
         "trial_count": DEFAULT_OVERHEAD_TRIAL_COUNT,
+        "trial_quantile": DEFAULT_OVERHEAD_TRIAL_QUANTILE,
         "selected_trial": int(selected_trial["trial_number"]),
         "trial_metrics": [dict(trial["metrics"]) for trial in trial_reports],
     }
