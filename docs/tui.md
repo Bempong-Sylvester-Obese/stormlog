@@ -77,13 +77,18 @@ The export buttons only work after timeline samples exist. If you have not start
 
 - loads live telemetry from the active tracker session
 - loads artifacts from JSON, CSV, or diagnose directories
+- discovers and lists distinct artifact sessions instead of merging them silently
+- lets you target a specific session id after loading artifacts
 - rebuilds rank-level diagnostics
 - supports rank filters such as `all`, `0,2,4-7`
 - highlights anomaly indicators and focused rank timelines
 
 ![Diagnostics tab](tui-diagnostics-current.png)
 
-The artifact input field accepts comma-separated paths. Use `Load Artifacts` first, then `Refresh` after changing the path set.
+The artifact input field accepts comma-separated paths. Use `Load Artifacts`
+first, then `Refresh` after changing the path set. When multiple sessions are
+found, the Diagnostics tab defaults to the newest `completed` session and lets
+you switch to another one by entering its session id.
 
 ### CLI & Actions
 
@@ -113,9 +118,10 @@ Use this tab when you want to kick off a CLI flow and keep the output attached t
 1. Open `Diagnostics`.
 2. Enter one or more artifact paths.
 3. Click `Load Artifacts`.
-4. Click `Refresh`.
-5. Narrow the result set with the rank filter if needed.
-6. Select a rank from the table to focus the timeline.
+4. If multiple sessions were discovered, optionally enter a session id and apply it.
+5. Click `Refresh`.
+6. Narrow the result set with the rank filter if needed.
+7. Select a rank from the table to focus the timeline.
 
 ### Workflow: run the release smoke path from the UI
 

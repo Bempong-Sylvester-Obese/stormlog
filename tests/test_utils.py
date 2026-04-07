@@ -142,7 +142,7 @@ def test_detect_gpu_hardware_preserves_identical_device_names(
     monkeypatch.setattr(
         gpumemprof_utils.subprocess,
         "run",
-        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+        lambda cmd, **kwargs: SimpleNamespace(
             returncode=0,
             stdout="\nNVIDIA GeForce RTX 4090\nNVIDIA GeForce RTX 4090\n",
             stderr="",
@@ -197,7 +197,7 @@ def test_detect_gpu_hardware_linux_parses_lspci(
     monkeypatch.setattr(
         gpumemprof_utils.subprocess,
         "run",
-        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+        lambda cmd, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
                 "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]\n"
@@ -226,7 +226,7 @@ def test_detect_gpu_hardware_macos_parses_system_profiler(
     monkeypatch.setattr(
         gpumemprof_utils.subprocess,
         "run",
-        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+        lambda cmd, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=json.dumps(
                 {

@@ -13,6 +13,7 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
+from .telemetry_sink import TelemetrySinkConfig
 from .utils import (
     _detect_gpu_hardware,
     format_bytes,
@@ -114,6 +115,27 @@ def _is_visualization_dependency_error(exc: BaseException) -> bool:
         current = next_exc
 
     return False
+
+
+def _build_telemetry_sink_config(
+    args: argparse.Namespace,
+) -> Optional[TelemetrySinkConfig]:
+    sink_dir = getattr(args, "telemetry_sink_dir", None)
+    if not sink_dir:
+        return None
+    return TelemetrySinkConfig(
+        root_dir=Path(sink_dir),
+        flush_every_seconds=float(getattr(args, "telemetry_flush_seconds", 2.0)),
+        rollover_max_bytes=int(getattr(args, "telemetry_rollover_mb", 64))
+        * 1024
+        * 1024,
+        retention_max_files=int(getattr(args, "telemetry_retention_files", 8)),
+        retention_max_total_bytes=int(
+            getattr(args, "telemetry_retention_total_mb", 512)
+        )
+        * 1024
+        * 1024,
+    )
 
 
 def main() -> None:
@@ -274,6 +296,36 @@ Examples:
         default=256,
         help="Maximum retained OOM dump storage in MB (default: 256)",
     )
+    track_parser.add_argument(
+        "--telemetry-sink-dir",
+        type=str,
+        default=None,
+        help="Directory for append-only telemetry sink segments",
+    )
+    track_parser.add_argument(
+        "--telemetry-flush-seconds",
+        type=float,
+        default=2.0,
+        help="Maximum seconds between telemetry sink flushes (default: 2.0)",
+    )
+    track_parser.add_argument(
+        "--telemetry-rollover-mb",
+        type=int,
+        default=64,
+        help="Telemetry sink segment rollover size in MB (default: 64)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-files",
+        type=int,
+        default=8,
+        help="Maximum retained telemetry sink segments (default: 8)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-total-mb",
+        type=int,
+        default=512,
+        help="Maximum retained telemetry sink size in MB (default: 512)",
+    )
 
     # Analyze command
     analyze_parser = subparsers.add_parser("analyze", help="Analyze profiling results")
@@ -295,6 +347,12 @@ Examples:
         type=str,
         default="plots",
         help="Directory for visualization plots (default: plots)",
+    )
+    analyze_parser.add_argument(
+        "--session-id",
+        type=str,
+        default=None,
+        help="Explicit telemetry session id to analyze when multiple sessions are present",
     )
 
     # Diagnose command
@@ -531,20 +589,22 @@ def cmd_monitor(args: argparse.Namespace) -> None:
                     current_mem = torch_module.cuda.memory_allocated(
                         profiler.device
                     ) / (1024**3)
-                    unit = "GB"
+                    current_mem_text = f"{current_mem:.2f} GB"
                 elif tracker is not None:
                     stats = tracker.get_statistics()
-                    current_mem = stats.get("current_memory_allocated", 0) / (1024**3)
-                    unit = "GB"
+                    current_allocated = stats.get("current_memory_allocated")
+                    current_mem_text = (
+                        f"{float(current_allocated) / (1024**3):.2f} GB"
+                        if isinstance(current_allocated, (int, float))
+                        else "-"
+                    )
                 else:
                     current_mem = (
                         profiler._take_snapshot().rss / (1024**2) if profiler else 0.0
                     )
-                    unit = "MB"
+                    current_mem_text = f"{current_mem:.2f} MB"
                 elapsed = time.time() - start_time
-                print(
-                    f"Elapsed: {elapsed:.1f}s, Current Memory: {current_mem:.2f} {unit}"
-                )
+                print(f"Elapsed: {elapsed:.1f}s, Current Memory: {current_mem_text}")
             time.sleep(1)
 
     except KeyboardInterrupt:
@@ -629,6 +689,9 @@ def cmd_track(args: argparse.Namespace) -> None:
 
     runtime_backend = str(get_system_info().get("detected_backend", "cpu"))
     gpu_runtime = runtime_backend in {"cuda", "rocm", "mps"}
+    telemetry_sink_config = _build_telemetry_sink_config(args)
+    if telemetry_sink_config is not None:
+        print(f"Append-only telemetry sink: {telemetry_sink_config.root_dir}")
     tracker: Any
     watchdog: Optional[Any] = None
     if gpu_runtime:
@@ -658,6 +721,7 @@ def cmd_track(args: argparse.Namespace) -> None:
             rank=rank,
             local_rank=local_rank,
             world_size=world_size,
+            telemetry_sink_config=telemetry_sink_config,
         )
 
         if args.oom_flight_recorder:
@@ -702,6 +766,7 @@ def cmd_track(args: argparse.Namespace) -> None:
             rank=rank,
             local_rank=local_rank,
             world_size=world_size,
+            telemetry_sink_config=telemetry_sink_config,
         )
         print("Running CPU memory tracker (no GPU backend available).")
 
@@ -730,13 +795,32 @@ def cmd_track(args: argparse.Namespace) -> None:
                     stats = tracker.get_statistics()
                     divisor = 1024**3 if gpu_runtime else 1024**2
                     unit = "GB" if gpu_runtime else "MB"
-                    current_mem = stats.get("current_memory_allocated", 0) / divisor
+                    current_allocated = stats.get("current_memory_allocated")
                     peak_mem = stats.get("peak_memory", 0) / divisor
-                    utilization = stats.get("memory_utilization_percent", 0)
-                    print(
-                        f"Elapsed: {elapsed:.1f}s, Memory: {current_mem:.2f} {unit} "
-                        f"({utilization:.1f}%), Peak: {peak_mem:.2f} {unit}"
+                    utilization = stats.get("memory_utilization_percent")
+                    collector_health = str(
+                        stats.get("collector_health_status", "healthy")
                     )
+                    retry_at = stats.get("collector_next_retry_epoch_s")
+                    current_mem_text = (
+                        f"{float(current_allocated) / divisor:.2f} {unit}"
+                        if isinstance(current_allocated, (int, float))
+                        else "-"
+                    )
+                    utilization_text = (
+                        f"{float(utilization):.1f}%"
+                        if isinstance(utilization, (int, float))
+                        else "-"
+                    )
+                    status_line = (
+                        f"Elapsed: {elapsed:.1f}s, Memory: {current_mem_text} "
+                        f"({utilization_text}), Peak: {peak_mem:.2f} {unit}, "
+                        f"Health: {collector_health}"
+                    )
+                    if isinstance(retry_at, (int, float)):
+                        retry_in = max(float(retry_at) - time.time(), 0.0)
+                        status_line += f", Retry In: {retry_in:.1f}s"
+                    print(status_line)
 
                 time.sleep(1)
 
@@ -756,6 +840,10 @@ def cmd_track(args: argparse.Namespace) -> None:
     unit = "GB" if gpu_runtime else "MB"
     print(f"Total events: {stats.get('total_events', 0)}")
     print(f"Peak memory: {stats.get('peak_memory', 0) / divisor:.2f} {unit}")
+    if "collector_health_status" in stats:
+        print(f"Collector health: {stats.get('collector_health_status', 'healthy')}")
+    if stats.get("collector_last_error"):
+        print(f"Last collector error: {stats.get('collector_last_error')}")
 
     if watchdog:
         cleanup_stats = watchdog.get_cleanup_stats()
@@ -775,6 +863,14 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _input_artifact_size_bytes(path: Path) -> int:
+    if path.is_file():
+        return int(path.stat().st_size)
+    if path.is_dir():
+        return sum(entry.stat().st_size for entry in path.rglob("*") if entry.is_file())
+    return 0
 
 
 def _build_analyze_summary(
@@ -877,30 +973,74 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         print(f"Error: Input file '{input_file}' not found")
         return 1
 
-    try:
-        with input_path.open("r", encoding="utf-8") as handle:
-            data = json.load(handle)
-    except Exception as e:
-        print(f"Error loading input file: {e}")
-        return 1
-
-    (load_telemetry_events,) = _import_runtime_symbols(
-        ".telemetry", ("load_telemetry_events",), "The analyze command"
+    (load_telemetry_sessions,) = _import_runtime_symbols(
+        ".telemetry", ("load_telemetry_sessions",), "The analyze command"
     )
 
     events: list[Any] | None = None
     telemetry_note: str | None = None
+    session_note: str | None = None
+    data: Any = None
+    requested_session_id = getattr(args, "session_id", None)
     try:
-        events = load_telemetry_events(input_path, permissive_legacy=True)
+        loaded_sessions = load_telemetry_sessions(input_path, permissive_legacy=True)
+        if loaded_sessions:
+            selected_session = None
+            if requested_session_id is not None:
+                selected_session = next(
+                    (
+                        loaded
+                        for loaded in loaded_sessions
+                        if loaded.summary.session_id == requested_session_id
+                    ),
+                    None,
+                )
+                if selected_session is None:
+                    print(
+                        "Error parsing telemetry events: Requested session_id not found: "
+                        f"{requested_session_id}"
+                    )
+                    return 1
+            else:
+                selected_session = loaded_sessions[0]
+            events = list(selected_session.events)
+            session_note = (
+                "Telemetry session selected: "
+                f"{selected_session.summary.session_id} "
+                f"({selected_session.summary.status}, "
+                f"started_at_ns={selected_session.summary.started_at_ns})."
+            )
+        else:
+            events = []
     except ValueError as exc:
+        if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        try:
+            with input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            print(f"Error loading input file: {error}")
+            return 1
         if not _json_payload_looks_like_telemetry(data):
             telemetry_note = "JSON payload does not contain telemetry events"
         else:
             print(f"Error parsing telemetry events: {exc}")
             return 1
     except Exception as exc:
-        print(f"Error parsing telemetry events: {exc}")
-        return 1
+        if input_path.is_dir() or input_path.suffix.lower() == ".jsonl":
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        try:
+            with input_path.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except Exception as error:
+            print(f"Error loading input file: {error}")
+            return 1
+        if _json_payload_looks_like_telemetry(data):
+            print(f"Error parsing telemetry events: {exc}")
+            return 1
+        telemetry_note = "JSON payload does not contain telemetry events"
 
     if events is not None:
         (MemoryAnalyzer,) = _import_runtime_symbols(
@@ -908,6 +1048,21 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         )
         analyzer = MemoryAnalyzer()
         report = analyzer.generate_optimization_report(events=events)
+        if session_note:
+            report["session"] = {
+                "selected_session_id": (
+                    requested_session_id
+                    if requested_session_id is not None
+                    else (
+                        loaded_sessions[0].summary.session_id
+                        if loaded_sessions
+                        else None
+                    )
+                ),
+                "discovered_session_ids": [
+                    loaded.summary.session_id for loaded in loaded_sessions
+                ],
+            }
     else:
         report = {
             "summary": {
@@ -923,10 +1078,12 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     summary_text = _build_analyze_summary(
         input_file=input_file,
-        file_size_bytes=input_path.stat().st_size,
+        file_size_bytes=_input_artifact_size_bytes(input_path),
         report=report,
     )
     print(summary_text)
+    if session_note:
+        print(session_note)
 
     if args.output:
         output_path = Path(args.output)

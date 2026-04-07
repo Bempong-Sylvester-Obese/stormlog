@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable, cast
 
 if TYPE_CHECKING:
     import tensorflow as tf
@@ -29,14 +29,16 @@ from examples.common import (
 def profile_tensor_allocation(profiler: TFMemoryProfiler, repeats: int = 3) -> None:
     for idx in range(repeats):
 
-        @profiler.profile_function
         def allocate_batch() -> float:
             inputs, targets = generate_tf_batch(batch_size=128)
             # Return a cheap scalar to keep TF graphs simple
             return float(inputs.mean())
 
         allocate_batch.__name__ = f"tf_allocate_iter_{idx+1}"
-        allocate_batch()
+        profiled_batch = cast(
+            Callable[[], float], profiler.profile_function(allocate_batch)
+        )
+        profiled_batch()
 
 
 def profile_training_steps(profiler: TFMemoryProfiler, model: tf.keras.Model) -> None:

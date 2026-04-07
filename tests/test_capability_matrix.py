@@ -1,25 +1,31 @@
 from __future__ import annotations
 
+import importlib.util
 import sys
 from pathlib import Path
 from subprocess import CompletedProcess
 from types import SimpleNamespace
+from typing import Sequence
+
+import pytest
 
 from examples.cli import capability_matrix
 
 
 def test_run_stormlog_diagnose_uses_absolute_output_path(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
     observed_cmd: list[str] = []
 
-    def _fake_run_command(cmd, **kwargs):  # type: ignore[no-untyped-def]
+    def _fake_run_command(
+        cmd: Sequence[str], **kwargs: object
+    ) -> CompletedProcess[str]:
         nonlocal observed_cmd
         observed_cmd = list(cmd)
-        assert kwargs["cwd"] == capability_matrix.REPO_ROOT
-        return CompletedProcess(cmd, 0, "", "")
+        assert kwargs.get("cwd") == capability_matrix.REPO_ROOT
+        return CompletedProcess(list(cmd), 0, "", "")
 
     monkeypatch.setattr(capability_matrix, "run_command", _fake_run_command)
 
@@ -31,17 +37,20 @@ def test_run_stormlog_diagnose_uses_absolute_output_path(
 
 
 def test_run_benchmark_check_uses_absolute_artifact_paths(
-    monkeypatch, tmp_path: Path
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: object())
 
     observed_cmd: list[str] = []
 
-    def _fake_run_command(cmd, **kwargs):  # type: ignore[no-untyped-def]
+    def _fake_run_command(
+        cmd: Sequence[str], **kwargs: object
+    ) -> CompletedProcess[str]:
         nonlocal observed_cmd
         observed_cmd = list(cmd)
-        assert kwargs["cwd"] == capability_matrix.REPO_ROOT
-        return CompletedProcess(cmd, 0, "", "")
+        assert kwargs.get("cwd") == capability_matrix.REPO_ROOT
+        return CompletedProcess(list(cmd), 0, "", "")
 
     monkeypatch.setattr(capability_matrix, "run_command", _fake_run_command)
 
@@ -52,9 +61,32 @@ def test_run_benchmark_check_uses_absolute_artifact_paths(
     assert output_path.is_absolute()
     assert artifact_root.is_absolute()
     assert result["output"] == str(output_path)
+    assert "--profile" in observed_cmd
+    assert observed_cmd[observed_cmd.index("--profile") + 1] == "pr"
+    assert "--mode" in observed_cmd
+    assert observed_cmd[observed_cmd.index("--mode") + 1] == "overhead"
+    assert observed_cmd[observed_cmd.index("--budgets") + 1] == str(
+        capability_matrix.REPO_ROOT
+        / "docs"
+        / "benchmarks"
+        / "v0.4_operating_budget.json"
+    )
 
 
-def test_run_tui_smoke_skips_when_tui_extras_are_missing(monkeypatch) -> None:
+def test_run_benchmark_check_skips_when_tensorflow_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: None)
+
+    result = capability_matrix._run_benchmark_check(Path("relative-artifacts"), "smoke")
+
+    assert result["status"] == "SKIP"
+    assert "tensorflow" in str(result["reason"]).lower()
+
+
+def test_run_tui_smoke_skips_when_tui_extras_are_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     class FakeSpawnError(Exception):
         pass
 
@@ -65,7 +97,8 @@ def test_run_tui_smoke_skips_when_tui_extras_are_missing(monkeypatch) -> None:
                 "Install with `pip install 'stormlog[tui,torch]'`."
             )
 
-        def expect(self, _pattern, timeout=None) -> None:  # type: ignore[no-untyped-def]
+        def expect(self, _pattern: object, timeout: float | None = None) -> None:
+            _ = timeout
             raise FakeSpawnError("missing textual")
 
         def send(self, _chars: str) -> None:
@@ -80,10 +113,11 @@ def test_run_tui_smoke_skips_when_tui_extras_are_missing(monkeypatch) -> None:
         def close(self) -> None:
             return None
 
-    fake_pexpect = SimpleNamespace(
-        spawn=lambda *args, **kwargs: FakeChild(),
-        EOF=FakeSpawnError,
-    )
+    def _fake_spawn(*args: object, **kwargs: object) -> FakeChild:
+        _ = args, kwargs
+        return FakeChild()
+
+    fake_pexpect = SimpleNamespace(spawn=_fake_spawn, EOF=FakeSpawnError)
     monkeypatch.setitem(sys.modules, "pexpect", fake_pexpect)
 
     result = capability_matrix._run_tui_smoke()

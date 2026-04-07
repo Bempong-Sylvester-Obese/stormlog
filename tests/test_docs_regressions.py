@@ -202,16 +202,16 @@ def _iter_local_doc_links(doc_path: Path) -> list[str]:
     ]
 
 
-@pytest.mark.parametrize("doc_path", DOC_SOURCE_FILES, ids=lambda path: path.name)
-def test_doc_links_and_media_targets_exist(doc_path: Path) -> None:
-    for target in _iter_local_doc_links(doc_path):
-        if target.startswith("/"):
-            resolved = (REPO_ROOT / target.lstrip("/")).resolve()
-        else:
-            resolved = (doc_path.parent / target).resolve()
-        assert (
-            resolved.exists()
-        ), f"{doc_path.relative_to(REPO_ROOT)} references missing path: {target}"
+def test_doc_links_and_media_targets_exist() -> None:
+    for doc_path in DOC_SOURCE_FILES:
+        for target in _iter_local_doc_links(doc_path):
+            if target.startswith("/"):
+                resolved = (REPO_ROOT / target.lstrip("/")).resolve()
+            else:
+                resolved = (doc_path.parent / target).resolve()
+            assert (
+                resolved.exists()
+            ), f"{doc_path.relative_to(REPO_ROOT)} references missing path: {target}"
 
 
 def test_docs_use_human_readable_markdown_link_labels() -> None:

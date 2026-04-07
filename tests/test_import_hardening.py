@@ -123,6 +123,74 @@ def test_tui_entrypoint_reports_tui_install_guidance_when_textual_is_missing() -
     assert "ok" in completed.stdout
 
 
+def test_tui_monitor_import_is_hardened_when_torch_is_missing() -> None:
+    code = textwrap.dedent(
+        """
+        import builtins
+
+        original_import = builtins.__import__
+
+        def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torch" or name.startswith("torch."):
+                raise ModuleNotFoundError("No module named 'torch'", name="torch")
+            return original_import(name, globals, locals, fromlist, level)
+
+        builtins.__import__ = blocked_import
+
+        import stormlog.tui.monitor as monitor
+
+        assert monitor.MemoryTracker is None
+        assert monitor.torch is None
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
+
+
+def test_tui_profiles_import_is_hardened_when_torch_is_missing() -> None:
+    code = textwrap.dedent(
+        """
+        import builtins
+
+        original_import = builtins.__import__
+
+        def blocked_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "torch" or name.startswith("torch."):
+                raise ModuleNotFoundError("No module named 'torch'", name="torch")
+            return original_import(name, globals, locals, fromlist, level)
+
+        builtins.__import__ = blocked_import
+
+        import stormlog.tui.profiles as profiles
+
+        assert profiles.fetch_pytorch_profiles() == []
+        assert profiles.clear_pytorch_profiles() is False
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
+
+
 def test_pytorch_demo_import_is_hardened_when_torch_is_missing() -> None:
     code = textwrap.dedent(
         """

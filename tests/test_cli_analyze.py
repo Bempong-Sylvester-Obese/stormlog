@@ -13,6 +13,7 @@ import pytest
 import stormlog.cli as gpumemprof_cli
 from stormlog.cli import cmd_analyze
 from stormlog.telemetry import telemetry_event_to_dict
+from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 
 matplotlib.use("Agg")
@@ -133,6 +134,36 @@ def test_cmd_analyze_non_telemetry_array_falls_back_gracefully(
     assert "Analyzing profiling results from:" in stdout
     assert "Notes: JSON payload does not contain telemetry events" in stdout
     assert "Error parsing telemetry events" not in stdout
+
+
+def test_cmd_analyze_reads_append_only_sink_directory(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path / "sink",
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    for event in _build_cross_rank_events():
+        sink.append(telemetry_event_to_dict(event))
+    sink.close()
+
+    exit_code = cmd_analyze(
+        argparse.Namespace(
+            input_file=str(tmp_path / "sink"),
+            output=None,
+            format="json",
+            visualization=False,
+            plot_dir=str(tmp_path / "plots"),
+        )
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "Distributed Analysis:" in stdout
+    assert "Top first-cause suspect: rank 2" in stdout
 
 
 def test_cmd_analyze_missing_input_returns_failure(

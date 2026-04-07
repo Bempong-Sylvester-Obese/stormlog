@@ -35,7 +35,8 @@ def test_gpu_tracker_rejects_non_positive_max_events() -> None:
 def test_gpu_tracker_appends_native_history_options_after_identity() -> None:
     parameters = list(inspect.signature(MemoryTracker.__init__).parameters)
 
-    assert parameters[-2:] == [
+    assert parameters[-3:] == [
         "enable_native_cuda_history",
         "native_history_max_entries",
+        "telemetry_sink_config",
     ]

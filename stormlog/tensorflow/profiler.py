@@ -11,7 +11,18 @@ import time
 import weakref
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Optional
+from functools import wraps
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    ParamSpec,
+    TypeVar,
+)
 
 from .tf_env import configure_tensorflow_logging
 
@@ -27,6 +38,9 @@ except ImportError:
 
 if TYPE_CHECKING:
     import tensorflow as tf
+
+P = ParamSpec("P")
+R = TypeVar("R")
 
 
 @dataclass
@@ -276,10 +290,11 @@ class TFMemoryProfiler:
 
         return snapshot
 
-    def profile_function(self, func: Callable[..., Any]) -> Callable[..., Any]:
+    def profile_function(self, func: Callable[P, R]) -> Callable[P, R]:
         """Decorator to profile function memory usage."""
 
-        def wrapper(*args: Any, **kwargs: Any) -> Any:
+        @wraps(func)
+        def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             func_name = func.__name__
 
             # Capture before
