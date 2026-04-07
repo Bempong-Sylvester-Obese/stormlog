@@ -9,7 +9,7 @@ import json
 import math
 import shutil
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, TypedDict
@@ -29,6 +29,7 @@ DEFAULT_MODE = "all"
 DEFAULT_GATE_MODE = "budget"
 DEFAULT_ITERATIONS = 5_000
 DEFAULT_ALLOCATION_KB = 512
+DEFAULT_OVERHEAD_TRIAL_COUNT = 3
 REFERENCE_INTERVAL_SECONDS = 0.1
 DEFAULT_RETENTION_VALIDATION = {
     "flush_every_events": 50,
@@ -421,6 +422,133 @@ def _run_tracked_scenario(
         "output_path": str(session_report["output_path"]),
     }
     return _finalize_scenario_summary(scenario_dir, summary)
+
+
+def _build_overhead_metrics(
+    unprofiled: Mapping[str, Any],
+    tracked: Mapping[str, Any],
+) -> dict[str, float]:
+    return {
+        "runtime_overhead_pct": _pct_overhead(
+            float(unprofiled["wall_seconds"]),
+            float(tracked["wall_seconds"]),
+        ),
+        "cpu_overhead_pct": _pct_overhead(
+            float(unprofiled["cpu_seconds"]),
+            float(tracked["cpu_seconds"]),
+        ),
+        "artifact_growth_bytes": float(
+            max(
+                0,
+                int(tracked["artifact_size_bytes"])
+                - int(unprofiled["artifact_size_bytes"]),
+            )
+        ),
+    }
+
+
+def _median_overhead_trial_index(trials: Sequence[Mapping[str, Any]]) -> int:
+    if not trials:
+        raise ValueError("at least one overhead trial is required")
+    ordered = sorted(
+        enumerate(trials),
+        key=lambda item: (
+            float(item[1]["metrics"]["runtime_overhead_pct"]),
+            float(item[1]["metrics"]["cpu_overhead_pct"]),
+            item[0],
+        ),
+    )
+    return ordered[len(ordered) // 2][0]
+
+
+def _promote_overhead_scenario(
+    source_dir: Path,
+    target_dir: Path,
+    summary: Mapping[str, Any],
+) -> dict[str, Any]:
+    if target_dir.exists():
+        shutil.rmtree(target_dir)
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(source_dir), str(target_dir))
+
+    promoted = dict(summary)
+    promoted["artifact_dir"] = str(target_dir)
+
+    output_path = promoted.get("output_path")
+    if output_path:
+        promoted["output_path"] = str(target_dir / Path(str(output_path)).name)
+
+    return _finalize_scenario_summary(target_dir, promoted)
+
+
+def _run_overhead_report(
+    spec: RuntimeSpec,
+    runtime_dir: Path,
+    *,
+    iterations: int,
+    allocation_kb: int,
+) -> dict[str, Any]:
+    trial_root = runtime_dir / ".overhead_trials"
+    if trial_root.exists():
+        shutil.rmtree(trial_root)
+
+    sample_count = _overhead_sample_count(spec, iterations)
+    trial_reports: list[dict[str, Any]] = []
+    try:
+        for trial_number in range(1, DEFAULT_OVERHEAD_TRIAL_COUNT + 1):
+            trial_dir = trial_root / f"trial_{trial_number}"
+            unprofiled = _run_unprofiled_scenario(
+                trial_dir / "unprofiled",
+                iterations=iterations,
+                allocation_kb=allocation_kb,
+            )
+            tracked = _run_tracked_scenario(
+                spec,
+                trial_dir / "tracked_default",
+                iterations=iterations,
+                allocation_kb=allocation_kb,
+                sample_count=sample_count,
+            )
+            trial_reports.append(
+                {
+                    "trial_number": trial_number,
+                    "scenarios": {
+                        "unprofiled": unprofiled,
+                        "tracked_default": tracked,
+                    },
+                    "metrics": _build_overhead_metrics(unprofiled, tracked),
+                }
+            )
+
+        selected_index = _median_overhead_trial_index(trial_reports)
+        selected_trial = trial_reports[selected_index]
+        overhead_dir = runtime_dir / "overhead"
+        _prepare_directory(overhead_dir)
+
+        promoted_unprofiled = _promote_overhead_scenario(
+            trial_root / f"trial_{selected_trial['trial_number']}" / "unprofiled",
+            overhead_dir / "unprofiled",
+            selected_trial["scenarios"]["unprofiled"],
+        )
+        promoted_tracked = _promote_overhead_scenario(
+            trial_root / f"trial_{selected_trial['trial_number']}" / "tracked_default",
+            overhead_dir / "tracked_default",
+            selected_trial["scenarios"]["tracked_default"],
+        )
+    finally:
+        if trial_root.exists():
+            shutil.rmtree(trial_root, ignore_errors=True)
+
+    return {
+        "scenarios": {
+            "unprofiled": promoted_unprofiled,
+            "tracked_default": promoted_tracked,
+        },
+        "metrics": _build_overhead_metrics(promoted_unprofiled, promoted_tracked),
+        "trial_count": DEFAULT_OVERHEAD_TRIAL_COUNT,
+        "selected_trial": int(selected_trial["trial_number"]),
+        "trial_metrics": [dict(trial["metrics"]) for trial in trial_reports],
+    }
 
 
 def _run_soak_scenario(
@@ -1005,42 +1133,12 @@ def _run_runtime_report(
         "default_interval": spec.default_interval,
     }
     if mode in {"overhead", "all"}:
-        unprofiled = _run_unprofiled_scenario(
-            runtime_dir / "overhead" / "unprofiled",
-            iterations=iterations,
-            allocation_kb=allocation_kb,
-        )
-        tracked = _run_tracked_scenario(
+        runtime_report["overhead"] = _run_overhead_report(
             spec,
-            runtime_dir / "overhead" / "tracked_default",
+            runtime_dir,
             iterations=iterations,
             allocation_kb=allocation_kb,
-            sample_count=_overhead_sample_count(spec, iterations),
         )
-        overhead_metrics = {
-            "runtime_overhead_pct": _pct_overhead(
-                float(unprofiled["wall_seconds"]),
-                float(tracked["wall_seconds"]),
-            ),
-            "cpu_overhead_pct": _pct_overhead(
-                float(unprofiled["cpu_seconds"]),
-                float(tracked["cpu_seconds"]),
-            ),
-            "artifact_growth_bytes": float(
-                max(
-                    0,
-                    int(tracked["artifact_size_bytes"])
-                    - int(unprofiled["artifact_size_bytes"]),
-                )
-            ),
-        }
-        runtime_report["overhead"] = {
-            "scenarios": {
-                "unprofiled": unprofiled,
-                "tracked_default": tracked,
-            },
-            "metrics": overhead_metrics,
-        }
     if mode in {"soak", "all"}:
         soak = _run_soak_scenario(
             spec,
