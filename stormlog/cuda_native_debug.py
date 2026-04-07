@@ -359,18 +359,15 @@ def write_cuda_snapshot_artifacts(
 
         # Generate the Stormlog attributed memory visualisation.
         try:
-            from .attributed_viz import (
-                ATTRIBUTED_HTML_FILENAME,
-                render_attributed_html,
-            )
+            from .attributed_viz import render_attributed_html
 
             attributed_html = render_attributed_html(
                 snapshot_dict,
                 tensor_index,
                 device=_resolve_device_index(device),
             )
-            _write_text(output_dir / ATTRIBUTED_HTML_FILENAME, attributed_html)
-            files_written.append(ATTRIBUTED_HTML_FILENAME)
+            _write_text(output_dir / TRACE_HTML_ANNOTATED_FILENAME, attributed_html)
+            files_written.append(TRACE_HTML_ANNOTATED_FILENAME)
         except Exception as attr_exc:
             warnings.append(f"attributed HTML: {attr_exc}")
     except Exception as exc:
@@ -384,6 +381,8 @@ def write_cuda_snapshot_artifacts(
                 "warning_count": len(warnings),
                 "warnings": warnings,
                 "trace_html_written": TRACE_HTML_FILENAME in files_written,
+                "annotated_trace_html_written": TRACE_HTML_ANNOTATED_FILENAME
+                in files_written,
                 "storage_pointer_count": tensor_index.get("storage_pointer_count", 0),
                 "attributed_allocation_count": attribution_summary.get(
                     "attributed_allocation_count",

@@ -164,10 +164,16 @@ def test_write_cuda_snapshot_artifacts_writes_expected_files(
     assert native_debug.SEGMENT_SUMMARY_FILENAME in files_written
     assert native_debug.TRACE_SUMMARY_FILENAME in files_written
     assert native_debug.TRACE_HTML_FILENAME in files_written
+    assert native_debug.TRACE_HTML_ANNOTATED_FILENAME in files_written
     assert native_debug.DEBUG_METADATA_FILENAME in files_written
     assert (tmp_path / native_debug.TRACE_HTML_FILENAME).read_text(
         encoding="utf-8"
     ) == "<html>allocator-state-history</html>"
+    metadata = (tmp_path / native_debug.DEBUG_METADATA_FILENAME).read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / native_debug.TRACE_HTML_ANNOTATED_FILENAME).exists()
+    assert '"annotated_trace_html_written": true' in metadata
 
 
 def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(

@@ -21,7 +21,7 @@ from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)
 
-ATTRIBUTED_HTML_FILENAME = "cuda_memory_attributed.html"
+ATTRIBUTED_HTML_FILENAME = "cuda_allocator_state_history_annotated.html"
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +104,18 @@ def _sz(n: int) -> str:
     return f"{n} B"
 
 
+def _device_traces_for(snapshot: Dict[str, Any], device: int) -> List[Dict[str, Any]]:
+    device_traces = snapshot.get("device_traces", [])
+    if not isinstance(device_traces, list) or not device_traces:
+        return []
+    if 0 <= device < len(device_traces):
+        traces = device_traces[device]
+        if isinstance(traces, list):
+            return traces
+    first_traces = device_traces[0]
+    return first_traces if isinstance(first_traces, list) else []
+
+
 def _process_snapshot(
     snapshot: Dict[str, Any],
     tensor_index: Dict[str, Any],
@@ -112,13 +124,7 @@ def _process_snapshot(
     """Pre-process snapshot + attribution into a clean JSON payload."""
     ptr_map = _build_pointer_lookup(tensor_index)
 
-    traces = snapshot.get("device_traces", [[]])[device]
-    if not traces:
-        traces = (
-            snapshot.get("device_traces", [[]])[0]
-            if snapshot.get("device_traces")
-            else []
-        )
+    traces = _device_traces_for(snapshot, device)
 
     # Build timeline events
     events = []
@@ -237,67 +243,73 @@ def _process_snapshot(
             }
         )
     offenders.sort(key=lambda x: x["size"], reverse=True)
-    
+
     # Process Segments and embed block address/name lookups
     formatted_segments = []
     active_memory_table = []
-    
+
     for s in raw_segments:
         formatted_blocks = []
         current_offset = s.get("address", 0)
-        
+
         for b in s.get("blocks", []):
             block_size = b.get("size", 0)
             state = b.get("state", "")
             frames_fmt = _format_frames(b.get("frames", []))
-            
+
             name = ""
             shape = ""
             dtype = ""
-            
+
             if state == "active_allocated":
                 entry = ptr_map.get(current_offset)
                 if entry:
                     name = _best_name(entry)
                     shape = _shape_str(entry)
                     dtype = _dtype_str(entry)
-                
+
                 if not name and frames_fmt:
                     name = _get_fallback_name(frames_fmt)
                 elif not name:
                     name = "Unnamed Tensor"
-                    
-                active_memory_table.append({
+
+                active_memory_table.append(
+                    {
+                        "address": current_offset,
+                        "size": block_size,
+                        "size_h": _sz(block_size),
+                        "name": name,
+                        "shape": shape,
+                        "dtype": dtype,
+                        "frames": frames_fmt,
+                        "pool": s.get("segment_type", "unknown"),
+                    }
+                )
+
+            formatted_blocks.append(
+                {
                     "address": current_offset,
                     "size": block_size,
                     "size_h": _sz(block_size),
+                    "state": state,
                     "name": name,
-                    "shape": shape,
-                    "dtype": dtype,
                     "frames": frames_fmt,
-                    "pool": s.get("segment_type", "unknown")
-                })
-                
-            formatted_blocks.append({
-                "address": current_offset,
-                "size": block_size,
-                "size_h": _sz(block_size),
-                "state": state,
-                "name": name,
-                "frames": frames_fmt
-            })
+                }
+            )
             current_offset += block_size
-            
-        formatted_segments.append({
-            "segment_type": s.get("segment_type", "large"),
-            "address": s.get("address", 0),
-            "total_size": s.get("total_size", 0),
-            "total_size_h": _sz(s.get("total_size", 0)),
-            "allocated_size": s.get("allocated_size", 0),
-            "active_size": s.get("active_size", 0),
-            "blocks": formatted_blocks,
-        })
-        
+
+        formatted_segments.append(
+            {
+                "segment_type": s.get("segment_type", "large"),
+                "address": s.get("address", 0),
+                "total_size": s.get("total_size", 0),
+                "total_size_h": _sz(s.get("total_size", 0)),
+                "allocated_size": s.get("allocated_size", 0),
+                "active_size": s.get("active_size", 0),
+                "blocks": formatted_blocks,
+            }
+        )
+
     active_memory_table.sort(key=lambda x: x["size"], reverse=True)
 
     # Summary of current segments
@@ -314,7 +326,7 @@ def _process_snapshot(
         "num_segments": len(raw_segments),
         "attribution_count": tensor_index.get("storage_pointer_count", 0),
         "segments": formatted_segments,
-        "active_table": active_memory_table
+        "active_table": active_memory_table,
     }
 
 
@@ -339,8 +351,6 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
 html,body{height:100%;background:var(--bg);color:var(--text);
   font-family:'Inter','SF Pro Display',-apple-system,system-ui,sans-serif;
   font-size:14px;line-height:1.5;overflow:hidden}
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
-
 /* Layout */
 .app{display:grid;grid-template-rows:auto 1fr;grid-template-columns:1fr 380px;
   height:100vh;gap:0}
