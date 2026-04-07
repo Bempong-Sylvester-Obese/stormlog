@@ -339,39 +339,48 @@ def write_cuda_snapshot_artifacts(
 
     try:
         memory_viz = _load_memory_viz()
-        _write_text(
-            output_dir / SEGMENT_SUMMARY_FILENAME,
-            memory_viz.segsum(snapshot_dict),
-        )
-        files_written.append(SEGMENT_SUMMARY_FILENAME)
-
-        _write_text(
-            output_dir / TRACE_SUMMARY_FILENAME, memory_viz.trace(snapshot_dict)
-        )
-        files_written.append(TRACE_SUMMARY_FILENAME)
-
-        trace_html = memory_viz.trace_plot(
-            snapshot_dict,
-            device=_resolve_device_index(device),
-        )
-        _write_text(output_dir / TRACE_HTML_FILENAME, trace_html)
-        files_written.append(TRACE_HTML_FILENAME)
-
-        # Generate the Stormlog attributed memory visualisation.
+    except Exception as exc:
+        warnings.append(f"memory_viz load: {exc}")
+    else:
         try:
-            from .attributed_viz import render_attributed_html
+            _write_text(
+                output_dir / SEGMENT_SUMMARY_FILENAME,
+                memory_viz.segsum(snapshot_dict),
+            )
+            files_written.append(SEGMENT_SUMMARY_FILENAME)
+        except Exception as exc:
+            warnings.append(f"segment summary: {exc}")
 
-            attributed_html = render_attributed_html(
+        try:
+            _write_text(
+                output_dir / TRACE_SUMMARY_FILENAME, memory_viz.trace(snapshot_dict)
+            )
+            files_written.append(TRACE_SUMMARY_FILENAME)
+        except Exception as exc:
+            warnings.append(f"trace summary: {exc}")
+
+        try:
+            trace_html = memory_viz.trace_plot(
                 snapshot_dict,
-                tensor_index,
                 device=_resolve_device_index(device),
             )
-            _write_text(output_dir / TRACE_HTML_ANNOTATED_FILENAME, attributed_html)
-            files_written.append(TRACE_HTML_ANNOTATED_FILENAME)
-        except Exception as attr_exc:
-            warnings.append(f"attributed HTML: {attr_exc}")
-    except Exception as exc:
-        warnings.append(str(exc))
+            _write_text(output_dir / TRACE_HTML_FILENAME, trace_html)
+            files_written.append(TRACE_HTML_FILENAME)
+        except Exception as exc:
+            warnings.append(str(exc))
+
+    try:
+        from .attributed_viz import render_attributed_html
+
+        attributed_html = render_attributed_html(
+            snapshot_dict,
+            tensor_index,
+            device=_resolve_device_index(device),
+        )
+        _write_text(output_dir / TRACE_HTML_ANNOTATED_FILENAME, attributed_html)
+        files_written.append(TRACE_HTML_ANNOTATED_FILENAME)
+    except Exception as attr_exc:
+        warnings.append(f"attributed HTML: {attr_exc}")
 
     metadata_path = output_dir / DEBUG_METADATA_FILENAME
     metadata_path.write_text(

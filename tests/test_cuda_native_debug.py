@@ -239,3 +239,42 @@ def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
         ("snapshot", 0),
         ("tensor_index", (0, True)),
     ]
+
+
+def test_write_cuda_snapshot_artifacts_writes_annotated_html_when_trace_plot_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = {
+        "segments": [],
+        "device_traces": [[]],
+    }
+    tensor_index = {
+        "device_index": 0,
+        "storage_pointer_count": 0,
+        "attributed_storage_pointers": [],
+    }
+
+    fake_memory_viz = SimpleNamespace(
+        segsum=lambda data: "segment-summary",
+        trace=lambda data: "trace-summary",
+        trace_plot=lambda data, device=None: (_ for _ in ()).throw(
+            RuntimeError("trace_plot boom")
+        ),
+    )
+    monkeypatch.setattr(native_debug, "_load_memory_viz", lambda: fake_memory_viz)
+
+    files_written = native_debug.write_cuda_snapshot_artifacts(
+        tmp_path,
+        snapshot,
+        tensor_index,
+        history_recorded=True,
+        device=0,
+    )
+
+    assert native_debug.TRACE_HTML_FILENAME not in files_written
+    assert native_debug.TRACE_HTML_ANNOTATED_FILENAME in files_written
+    metadata = (tmp_path / native_debug.DEBUG_METADATA_FILENAME).read_text(
+        encoding="utf-8"
+    )
+    assert "trace_plot boom" in metadata
+    assert '"annotated_trace_html_written": true' in metadata

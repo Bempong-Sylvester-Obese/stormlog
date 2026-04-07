@@ -104,6 +104,86 @@ def _sz(n: int) -> str:
     return f"{n} B"
 
 
+def _block_candidate_addresses(block: Dict[str, Any], current_offset: int) -> List[int]:
+    addresses: List[int] = []
+
+    block_address = int(block.get("address", 0) or 0)
+    if block_address > 0:
+        addresses.append(block_address)
+
+    history_entries = list(block.get("history", []))
+    for history_entry in reversed(history_entries):
+        history_addr = int(history_entry.get("addr", 0) or 0)
+        if history_addr > 0 and history_addr not in addresses:
+            addresses.append(history_addr)
+
+    fallback_offset = int(current_offset or 0)
+    if fallback_offset > 0 and fallback_offset not in addresses:
+        addresses.append(fallback_offset)
+
+    return addresses
+
+
+def _resolve_block_attribution(
+    ptr_map: Dict[int, Dict[str, Any]],
+    block: Dict[str, Any],
+    current_offset: int,
+) -> tuple[int, Dict[str, Any] | None]:
+    candidates = _block_candidate_addresses(block, current_offset)
+    if not candidates:
+        return 0, None
+    for address in candidates:
+        entry = ptr_map.get(address)
+        if entry is not None:
+            return address, entry
+    return candidates[0], None
+
+
+def _build_snapshot_offenders(
+    active_memory_table: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    grouped: Dict[tuple[str, str, str], Dict[str, Any]] = {}
+    for row in active_memory_table:
+        key = (
+            str(row.get("name", "")),
+            str(row.get("shape", "")),
+            str(row.get("dtype", "")),
+        )
+        bucket = grouped.setdefault(
+            key,
+            {
+                "name": key[0],
+                "shape": key[1],
+                "dtype": key[2],
+                "size": 0,
+                "count": 0,
+            },
+        )
+        bucket["size"] += int(row.get("size", 0))
+        bucket["count"] += 1
+
+    offenders = []
+    for bucket in grouped.values():
+        offenders.append(
+            {
+                **bucket,
+                "size_h": _sz(int(bucket["size"])),
+            }
+        )
+
+    offenders.sort(key=lambda offender: offender["size"], reverse=True)
+    return offenders
+
+
+def _json_for_script_tag(payload: Dict[str, Any]) -> str:
+    return (
+        json.dumps(payload, separators=(",", ":"))
+        .replace("</", "<\\/")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
 def _device_traces_for(snapshot: Dict[str, Any], device: int) -> List[Dict[str, Any]]:
     device_traces = snapshot.get("device_traces", [])
     if not isinstance(device_traces, list) or not device_traces:
@@ -210,39 +290,7 @@ def _process_snapshot(
                 }
             )
 
-    # Build "top offenders" from segments at OOM time
     raw_segments = snapshot.get("segments", [])
-    offenders: List[Dict[str, Any]] = []
-
-    for entry in tensor_index.get("attributed_storage_pointers", []):
-        names = entry.get("names", [])
-        tensors = entry.get("tensors", [])
-        if not tensors:
-            continue
-
-        storage_ptr_int = int(entry.get("storage_ptr_int", 0))
-        t0_tensor = tensors[0]
-
-        name = names[0] if names else ""
-        if not name:
-            # Fallback to parsing allocation frame
-            frames = addr_to_frames.get(storage_ptr_int, [])
-            if frames:
-                name = _get_fallback_name(frames)
-            else:
-                name = "Unnamed Tensor"
-
-        offenders.append(
-            {
-                "name": name,
-                "shape": str(t0_tensor.get("shape", [])),
-                "dtype": t0_tensor.get("dtype", ""),
-                "size": t0_tensor.get("size_bytes", 0),
-                "size_h": _sz(t0_tensor.get("size_bytes", 0)),
-                "count": len(tensors),
-            }
-        )
-    offenders.sort(key=lambda x: x["size"], reverse=True)
 
     # Process Segments and embed block address/name lookups
     formatted_segments = []
@@ -256,13 +304,17 @@ def _process_snapshot(
             block_size = b.get("size", 0)
             state = b.get("state", "")
             frames_fmt = _format_frames(b.get("frames", []))
+            block_address, entry = _resolve_block_attribution(
+                ptr_map,
+                b,
+                current_offset,
+            )
 
             name = ""
             shape = ""
             dtype = ""
 
             if state == "active_allocated":
-                entry = ptr_map.get(current_offset)
                 if entry:
                     name = _best_name(entry)
                     shape = _shape_str(entry)
@@ -275,7 +327,7 @@ def _process_snapshot(
 
                 active_memory_table.append(
                     {
-                        "address": current_offset,
+                        "address": block_address,
                         "size": block_size,
                         "size_h": _sz(block_size),
                         "name": name,
@@ -288,7 +340,7 @@ def _process_snapshot(
 
             formatted_blocks.append(
                 {
-                    "address": current_offset,
+                    "address": block_address,
                     "size": block_size,
                     "size_h": _sz(block_size),
                     "state": state,
@@ -311,6 +363,7 @@ def _process_snapshot(
         )
 
     active_memory_table.sort(key=lambda x: x["size"], reverse=True)
+    offenders = _build_snapshot_offenders(active_memory_table)
 
     # Summary of current segments
     total_reserved = sum(s.get("total_size", 0) for s in raw_segments)
@@ -948,6 +1001,5 @@ def render_attributed_html(
         A complete HTML document string.
     """
     payload = _process_snapshot(snapshot, tensor_index, device=device)
-    # Serialise with minimal whitespace
-    data_json = json.dumps(payload, separators=(",", ":"))
+    data_json = _json_for_script_tag(payload)
     return _HTML_TEMPLATE.replace("$DATA_JSON", data_json)
