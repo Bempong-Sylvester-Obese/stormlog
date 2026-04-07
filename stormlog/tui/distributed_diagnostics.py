@@ -583,9 +583,8 @@ def load_distributed_artifacts(
                 path,
                 rank_allocator=rank_allocator,
             )
-            if (
-                len(loaded_sessions) == 1
-                and not _is_legacy_sessionless_flat_file(path, loaded_sessions)
+            if len(loaded_sessions) == 1 and not _is_legacy_sessionless_flat_file(
+                path, loaded_sessions
             ):
                 single_session_input_ids.add(loaded_sessions[0].summary.session_id)
             _accumulate_path_loaded_sessions(
