@@ -315,6 +315,38 @@ class TestCPUMemoryTracker:
         tracker.stop_tracking()  # not started – should be a no-op
 
     @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_start_tracking_does_not_start_thread_when_session_open_fails(
+        self, mock_cls: Any
+    ) -> None:
+        mock_cls.return_value = _make_mock_process()
+        tracker = CPUMemoryTracker(sampling_interval=0.05)
+        thread_start_calls = 0
+
+        class _ThreadSpy:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                _ = args, kwargs
+
+            def start(self) -> None:
+                nonlocal thread_start_calls
+                thread_start_calls += 1
+
+            def join(self, timeout: float | None = None) -> None:
+                _ = timeout
+
+        with patch("stormlog.cpu_profiler.threading.Thread", _ThreadSpy):
+            with patch.object(
+                tracker,
+                "_open_session",
+                side_effect=RuntimeError("session startup failed"),
+            ):
+                with pytest.raises(RuntimeError, match="session startup failed"):
+                    tracker.start_tracking()
+
+        assert thread_start_calls == 0
+        assert tracker.is_tracking is False
+        assert tracker._tracking_thread is None
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
     def test_add_event_under_lock(self, mock_cls: Any) -> None:
         mock_cls.return_value = _make_mock_process(rss=2048)
         tracker = CPUMemoryTracker()
@@ -544,6 +576,47 @@ class TestCPUMemoryTracker:
         stats = tracker.get_statistics()
         assert stats["final_retained_files"] == 1
         assert stats["rollover_count"] == 0
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_recreates_sink_on_restart(
+        self, mock_cls: Any, tmp_path: Path
+    ) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker(
+            telemetry_sink_config=TelemetrySinkConfig(
+                root_dir=tmp_path / "sink",
+                flush_every_events=1,
+                flush_every_seconds=1.0,
+                rollover_max_bytes=1024 * 1024,
+                retention_max_total_bytes=1024 * 1024,
+            )
+        )
+
+        class _NoOpThread:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                _ = args, kwargs
+
+            def start(self) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return False
+
+            def join(self, timeout: float | None = None) -> None:
+                _ = timeout
+
+        with patch("stormlog.cpu_profiler.threading.Thread", _NoOpThread):
+            tracker.start_tracking()
+            first_sink = tracker._telemetry_sink
+            assert first_sink is not None
+            tracker.stop_tracking()
+            assert tracker._telemetry_sink is None
+
+            tracker.start_tracking()
+            second_sink = tracker._telemetry_sink
+
+        assert second_sink is not None
+        assert second_sink is not first_sink
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_tracker_disables_sink_after_append_failure(self, mock_cls: Any) -> None:

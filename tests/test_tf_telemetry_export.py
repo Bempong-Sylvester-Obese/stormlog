@@ -37,6 +37,9 @@ class _NoOpThread:
     def start(self) -> None:
         return None
 
+    def is_alive(self) -> bool:
+        return False
+
     def join(self, timeout: float | None = None) -> None:
         _ = timeout
 
@@ -570,3 +573,37 @@ def test_tf_tracker_uses_session_wall_clock_for_failure_only_runs(
         "collector_degraded",
         "stop",
     ]
+
+
+def test_tf_tracker_recreates_sink_on_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+    monkeypatch.setattr(tf_tracker.threading, "Thread", _NoOpThread)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+        telemetry_sink_config=TelemetrySinkConfig(
+            root_dir=tmp_path / "sink",
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            rollover_max_bytes=1024 * 1024,
+            retention_max_total_bytes=1024 * 1024,
+        ),
+    )
+    monkeypatch.setattr(tracker, "_get_current_memory", lambda: 32.0)
+
+    tracker.start_tracking()
+    first_sink = tracker._telemetry_sink
+    assert first_sink is not None
+    tracker.stop_tracking()
+    assert tracker._telemetry_sink is None
+
+    tracker.start_tracking()
+    second_sink = tracker._telemetry_sink
+
+    assert second_sink is not None
+    assert second_sink is not first_sink

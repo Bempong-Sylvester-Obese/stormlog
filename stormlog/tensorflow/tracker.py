@@ -136,6 +136,7 @@ class MemoryTracker:
         self.device = device or self._get_default_device()
         self.enable_logging = enable_logging
         self.max_history = max_history
+        self._telemetry_sink_config = telemetry_sink_config
         self._telemetry_sink = (
             AppendOnlyTelemetrySink(telemetry_sink_config)
             if telemetry_sink_config is not None
@@ -285,6 +286,10 @@ class MemoryTracker:
     def get_session_summary(self) -> Optional[SessionSummary]:
         """Return the active or most recent TensorFlow tracking session."""
         return self._session_summary
+
+    def _ensure_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None and self._telemetry_sink_config is not None:
+            self._telemetry_sink = AppendOnlyTelemetrySink(self._telemetry_sink_config)
 
     def _device_id(self) -> int:
         """Best-effort device id extraction."""
@@ -550,7 +555,7 @@ class MemoryTracker:
         self._session_start_time = time.time()
         self._session_end_time = None
         self._session_summary = None
-        self.tracking = True
+        self._ensure_telemetry_sink()
         self._stop_event.clear()
 
         # Reset tracking data
@@ -562,10 +567,12 @@ class MemoryTracker:
             telemetry_partial=False,
         )
 
+        self._ensure_session_summary()
+
         # Start tracking thread
         self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
         self.tracking_thread.start()
-        self._ensure_session_summary()
+        self.tracking = True
         self._append_event(
             timestamp=self._session_start_time,
             memory_mb=self._status_memory_value(),

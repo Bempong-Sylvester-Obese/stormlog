@@ -138,6 +138,7 @@ class MemoryTracker:
         self.enable_alerts = enable_alerts
         self.enable_native_cuda_history = enable_native_cuda_history
         self.native_history_max_entries = native_history_max_entries
+        self._telemetry_sink_config = telemetry_sink_config
         self._telemetry_sink = (
             AppendOnlyTelemetrySink(telemetry_sink_config)
             if telemetry_sink_config is not None
@@ -281,6 +282,10 @@ class MemoryTracker:
         ):
             self._session_summary = self._telemetry_sink.start_session(summary)
         return self._session_summary
+
+    def _ensure_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None and self._telemetry_sink_config is not None:
+            self._telemetry_sink = AppendOnlyTelemetrySink(self._telemetry_sink_config)
 
     def get_session_summary(self) -> Optional[SessionSummary]:
         """Return the current or most recent tracking session summary."""
@@ -565,14 +570,15 @@ class MemoryTracker:
         self._reset_collector_session_state()
         self._reset_tracking_state_for_new_session()
         self._session_summary = None
-        self.is_tracking = True
+        self._ensure_telemetry_sink()
         self._stop_event.clear()
         self.stats["tracking_start_time"] = time.time()
+        self._open_session()
 
         self._tracking_thread = threading.Thread(target=self._tracking_loop)
         self._tracking_thread.daemon = True
         self._tracking_thread.start()
-        self._open_session()
+        self.is_tracking = True
 
         # Add initial event
         self._add_event("start", 0, "Memory tracking started")

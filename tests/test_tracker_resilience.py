@@ -82,6 +82,9 @@ class _NoOpThread:
     def start(self) -> None:
         return None
 
+    def is_alive(self) -> bool:
+        return False
+
     def join(self, timeout: float | None = None) -> None:
         _ = timeout
 
@@ -505,3 +508,36 @@ def test_memory_tracker_hides_stale_current_stats_when_unhealthy(
     assert stats["current_memory_allocated"] is None
     assert stats["current_memory_reserved"] is None
     assert stats["memory_utilization_percent"] is None
+
+
+def test_memory_tracker_recreates_sink_on_restart(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(
+        monkeypatch,
+        collector,
+        telemetry_sink_config=TelemetrySinkConfig(
+            root_dir=tmp_path / "sink",
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            rollover_max_bytes=1024 * 1024,
+            retention_max_total_bytes=1024 * 1024,
+        ),
+    )
+    monkeypatch.setattr(tracker_mod.threading, "Thread", _NoOpThread)
+
+    tracker.start_tracking()
+    first_sink = tracker._telemetry_sink
+    assert first_sink is not None
+    tracker.stop_tracking()
+    assert tracker._telemetry_sink is None
+
+    tracker.start_tracking()
+    second_sink = tracker._telemetry_sink
+
+    assert second_sink is not None
+    assert second_sink is not first_sink
