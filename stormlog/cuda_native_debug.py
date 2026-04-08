@@ -6,7 +6,7 @@ import gc
 import json
 import logging
 import pickle
-import warnings
+import warnings as _warnings
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -137,8 +137,8 @@ def _collect_module_name_index(device_index: int) -> dict[int, set[str]]:
     pointer_to_names: dict[int, set[str]] = defaultdict(set)
     pointer_to_python_names: dict[int, set[str]] = defaultdict(set)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=FutureWarning)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", category=FutureWarning)
         for obj in gc.get_objects():
             try:
                 if isinstance(obj, torch.nn.Module):
@@ -192,8 +192,8 @@ def build_cuda_tensor_attribution_index(
     pointer_to_names = _collect_module_name_index(device_index)
     pointer_to_tensors: dict[int, list[dict[str, Any]]] = defaultdict(list)
 
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", category=FutureWarning)
+    with _warnings.catch_warnings():
+        _warnings.simplefilter("ignore", category=FutureWarning)
         for obj in gc.get_objects():
             try:
                 if not isinstance(obj, torch.Tensor) or not obj.is_cuda:
@@ -368,10 +368,12 @@ def write_cuda_snapshot_artifacts(
             warnings.append(f"trace summary: {exc}")
 
         try:
-            trace_html = memory_viz.trace_plot(
-                snapshot_dict,
-                device=_resolve_device_index(device),
-            )
+            with _warnings.catch_warnings():
+                _warnings.simplefilter("ignore", category=FutureWarning)
+                trace_html = memory_viz.trace_plot(
+                    snapshot_dict,
+                    device=_resolve_device_index(device),
+                )
             _write_text(output_dir / TRACE_HTML_FILENAME, trace_html)
             files_written.append(TRACE_HTML_FILENAME)
         except Exception as exc:
