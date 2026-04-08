@@ -6,6 +6,7 @@ import gc
 import json
 import logging
 import pickle
+import warnings
 from collections import defaultdict
 from contextlib import contextmanager
 from pathlib import Path
@@ -136,34 +137,39 @@ def _collect_module_name_index(device_index: int) -> dict[int, set[str]]:
     pointer_to_names: dict[int, set[str]] = defaultdict(set)
     pointer_to_python_names: dict[int, set[str]] = defaultdict(set)
 
-    for obj in gc.get_objects():
-        try:
-            if isinstance(obj, torch.nn.Module):
-                for name, parameter in obj.named_parameters(recurse=True):
-                    if not parameter.is_cuda or parameter.device.index != device_index:
-                        continue
-                    storage_ptr = _safe_storage_ptr(parameter)
-                    if storage_ptr is not None:
-                        pointer_to_names[storage_ptr].add(name)
-                for name, buffer in obj.named_buffers(recurse=True):
-                    if not buffer.is_cuda or buffer.device.index != device_index:
-                        continue
-                    storage_ptr = _safe_storage_ptr(buffer)
-                    if storage_ptr is not None:
-                        pointer_to_names[storage_ptr].add(name)
-            elif isinstance(obj, dict):
-                for key, value in obj.items():
-                    if not isinstance(key, str) or key.startswith("__"):
-                        continue
-                    if not isinstance(value, torch.Tensor) or not value.is_cuda:
-                        continue
-                    if value.device.index != device_index:
-                        continue
-                    storage_ptr = _safe_storage_ptr(value)
-                    if storage_ptr is not None:
-                        pointer_to_python_names[storage_ptr].add(key)
-        except Exception:
-            continue
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=FutureWarning)
+        for obj in gc.get_objects():
+            try:
+                if isinstance(obj, torch.nn.Module):
+                    for name, parameter in obj.named_parameters(recurse=True):
+                        if (
+                            not parameter.is_cuda
+                            or parameter.device.index != device_index
+                        ):
+                            continue
+                        storage_ptr = _safe_storage_ptr(parameter)
+                        if storage_ptr is not None:
+                            pointer_to_names[storage_ptr].add(name)
+                    for name, buffer in obj.named_buffers(recurse=True):
+                        if not buffer.is_cuda or buffer.device.index != device_index:
+                            continue
+                        storage_ptr = _safe_storage_ptr(buffer)
+                        if storage_ptr is not None:
+                            pointer_to_names[storage_ptr].add(name)
+                elif isinstance(obj, dict):
+                    for key, value in obj.items():
+                        if not isinstance(key, str) or key.startswith("__"):
+                            continue
+                        if not isinstance(value, torch.Tensor) or not value.is_cuda:
+                            continue
+                        if value.device.index != device_index:
+                            continue
+                        storage_ptr = _safe_storage_ptr(value)
+                        if storage_ptr is not None:
+                            pointer_to_python_names[storage_ptr].add(key)
+            except Exception:
+                continue
 
     for storage_ptr, names in pointer_to_python_names.items():
         if storage_ptr not in pointer_to_names:
@@ -186,29 +192,31 @@ def build_cuda_tensor_attribution_index(
     pointer_to_names = _collect_module_name_index(device_index)
     pointer_to_tensors: dict[int, list[dict[str, Any]]] = defaultdict(list)
 
-    for obj in gc.get_objects():
-        try:
-            if not isinstance(obj, torch.Tensor) or not obj.is_cuda:
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=FutureWarning)
+        for obj in gc.get_objects():
+            try:
+                if not isinstance(obj, torch.Tensor) or not obj.is_cuda:
+                    continue
+                if obj.device.index != device_index:
+                    continue
+            except Exception:
                 continue
-            if obj.device.index != device_index:
+
+            storage_ptr = _safe_storage_ptr(obj)
+            if storage_ptr is None:
                 continue
-        except Exception:
-            continue
 
-        storage_ptr = _safe_storage_ptr(obj)
-        if storage_ptr is None:
-            continue
-
-        pointer_to_tensors[storage_ptr].append(
-            {
-                "shape": list(obj.shape),
-                "dtype": str(obj.dtype),
-                "device": str(obj.device),
-                "size_bytes": _tensor_size_bytes(obj),
-                "requires_grad": bool(getattr(obj, "requires_grad", False)),
-                "is_leaf": bool(getattr(obj, "is_leaf", False)),
-            }
-        )
+            pointer_to_tensors[storage_ptr].append(
+                {
+                    "shape": list(obj.shape),
+                    "dtype": str(obj.dtype),
+                    "device": str(obj.device),
+                    "size_bytes": _tensor_size_bytes(obj),
+                    "requires_grad": bool(getattr(obj, "requires_grad", False)),
+                    "is_leaf": bool(getattr(obj, "is_leaf", False)),
+                }
+            )
 
     attributed_pointers: list[dict[str, Any]] = []
     for storage_ptr in sorted(pointer_to_tensors):
