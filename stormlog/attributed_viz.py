@@ -40,7 +40,10 @@ def _build_pointer_lookup(
 
 def _best_name(entry: Dict[str, Any]) -> str:
     names = entry.get("names", [])
-    return names[0] if names else "<unnamed>"
+    if not isinstance(names, list) or not names:
+        return "<unnamed>"
+    first_name = names[0]
+    return str(first_name) if first_name else "<unnamed>"
 
 
 def _shape_str(entry: Dict[str, Any]) -> str:
