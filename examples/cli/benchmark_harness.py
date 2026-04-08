@@ -379,33 +379,50 @@ def _run_tracked_scenario(
     _prepare_directory(scenario_dir)
     gc.collect()
     session = spec.factory(scenario_dir, spec.default_interval, sink_overrides)
-    session.start()
-    schedule = _sample_points(iterations, sample_count)
-    schedule_index = 0
-    emitted = 0
+    session_started = False
+    session_report: dict[str, Any] | None = None
+    scenario_failed = False
+    try:
+        session.start()
+        session_started = True
+        schedule = _sample_points(iterations, sample_count)
+        schedule_index = 0
+        emitted = 0
 
-    def _on_iteration(step: int) -> None:
-        nonlocal schedule_index, emitted
-        while schedule_index < len(schedule) and schedule[schedule_index] == step:
+        def _on_iteration(step: int) -> None:
+            nonlocal schedule_index, emitted
+            while schedule_index < len(schedule) and schedule[schedule_index] == step:
+                session.emit_sample(emitted)
+                emitted += 1
+                schedule_index += 1
+
+        wall_start = time.perf_counter()
+        cpu_start = time.process_time()
+        checksum = _run_workload(
+            iterations=iterations,
+            allocation_kb=allocation_kb,
+            on_iteration=_on_iteration,
+        )
+        wall_seconds = time.perf_counter() - wall_start
+        cpu_seconds = time.process_time() - cpu_start
+
+        while emitted < sample_count:
             session.emit_sample(emitted)
             emitted += 1
-            schedule_index += 1
 
-    wall_start = time.perf_counter()
-    cpu_start = time.process_time()
-    checksum = _run_workload(
-        iterations=iterations,
-        allocation_kb=allocation_kb,
-        on_iteration=_on_iteration,
-    )
-    wall_seconds = time.perf_counter() - wall_start
-    cpu_seconds = time.process_time() - cpu_start
+        session_report = session.finish()
+    except Exception:
+        scenario_failed = True
+        raise
+    finally:
+        if session_started and session_report is None:
+            try:
+                session.finish()
+            except Exception:
+                if not scenario_failed:
+                    raise
 
-    while emitted < sample_count:
-        session.emit_sample(emitted)
-        emitted += 1
-
-    session_report = session.finish()
+    assert session_report is not None
     stats = dict(session_report["stats"])
     summary = {
         "name": spec.name,
@@ -565,28 +582,47 @@ def _run_soak_scenario(
     _prepare_directory(scenario_dir)
     gc.collect()
     session = spec.factory(scenario_dir, spec.default_interval, None)
-    session.start()
-    sample_count = max(
-        1,
-        int(
-            round((PROFILE_EQUIVALENT_HOURS[profile] * 3600.0) / spec.default_interval)
-        ),
-    )
-    equivalent_seconds = sample_count * spec.default_interval
-    baseline_rss = _process_rss_bytes()
-    rss_points = [baseline_rss]
-    checkpoint_stride = max(sample_count // 50, 1)
+    session_started = False
+    session_report: dict[str, Any] | None = None
+    scenario_failed = False
+    try:
+        session.start()
+        session_started = True
+        sample_count = max(
+            1,
+            int(
+                round(
+                    (PROFILE_EQUIVALENT_HOURS[profile] * 3600.0) / spec.default_interval
+                )
+            ),
+        )
+        equivalent_seconds = sample_count * spec.default_interval
+        baseline_rss = _process_rss_bytes()
+        rss_points = [baseline_rss]
+        checkpoint_stride = max(sample_count // 50, 1)
 
-    wall_start = time.perf_counter()
-    cpu_start = time.process_time()
-    for index in range(sample_count):
-        session.emit_sample(index)
-        if index % checkpoint_stride == 0 or index == sample_count - 1:
-            rss_points.append(_process_rss_bytes())
-    wall_seconds = time.perf_counter() - wall_start
-    cpu_seconds = time.process_time() - cpu_start
+        wall_start = time.perf_counter()
+        cpu_start = time.process_time()
+        for index in range(sample_count):
+            session.emit_sample(index)
+            if index % checkpoint_stride == 0 or index == sample_count - 1:
+                rss_points.append(_process_rss_bytes())
+        wall_seconds = time.perf_counter() - wall_start
+        cpu_seconds = time.process_time() - cpu_start
 
-    session_report = session.finish()
+        session_report = session.finish()
+    except Exception:
+        scenario_failed = True
+        raise
+    finally:
+        if session_started and session_report is None:
+            try:
+                session.finish()
+            except Exception:
+                if not scenario_failed:
+                    raise
+
+    assert session_report is not None
     final_rss = _process_rss_bytes()
     rss_points.append(final_rss)
     max_delta = max(value - baseline_rss for value in rss_points)
@@ -637,23 +673,40 @@ def _run_retention_validation(
     _prepare_directory(scenario_dir)
     gc.collect()
     session = spec.factory(scenario_dir, spec.default_interval, overrides)
-    session.start()
+    session_started = False
+    session_report: dict[str, Any] | None = None
+    scenario_failed = False
+    try:
+        session.start()
+        session_started = True
 
-    last_stats: dict[str, Any] = {}
-    for index in range(sample_limit):
-        session.emit_sample(index)
-        if index % 25 == 0:
-            # All session implementations surface up-to-date sink stats through
-            # tracker statistics, so we can inspect progress without finalizing.
-            if hasattr(session, "tracker"):
-                last_stats = dict(getattr(session, "tracker").get_statistics())
-                if (
-                    int(last_stats.get("rollover_count", 0)) > 0
-                    and int(last_stats.get("pruned_segment_count", 0)) > 0
-                ):
-                    break
+        last_stats: dict[str, Any] = {}
+        for index in range(sample_limit):
+            session.emit_sample(index)
+            if index % 25 == 0:
+                # All session implementations surface up-to-date sink stats through
+                # tracker statistics, so we can inspect progress without finalizing.
+                if hasattr(session, "tracker"):
+                    last_stats = dict(getattr(session, "tracker").get_statistics())
+                    if (
+                        int(last_stats.get("rollover_count", 0)) > 0
+                        and int(last_stats.get("pruned_segment_count", 0)) > 0
+                    ):
+                        break
 
-    session_report = session.finish()
+        session_report = session.finish()
+    except Exception:
+        scenario_failed = True
+        raise
+    finally:
+        if session_started and session_report is None:
+            try:
+                session.finish()
+            except Exception:
+                if not scenario_failed:
+                    raise
+
+    assert session_report is not None
     stats = dict(session_report["stats"])
     checks = {
         "rollover_observed": int(stats.get("rollover_count", 0)) > 0,

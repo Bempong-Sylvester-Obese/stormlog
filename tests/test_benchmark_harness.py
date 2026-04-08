@@ -24,6 +24,27 @@ class _UnusedRuntimeSession(benchmark_harness.RuntimeSession):
         }
 
 
+class _FailingRuntimeSession(benchmark_harness.RuntimeSession):
+    def __init__(self) -> None:
+        self.finish_calls = 0
+
+    def start(self) -> None:
+        return None
+
+    def emit_sample(self, index: int) -> None:
+        _ = index
+        raise RuntimeError("sample failed")
+
+    def finish(self) -> dict[str, object]:
+        self.finish_calls += 1
+        return {
+            "stats": {},
+            "event_count": 0,
+            "collector_failure_event_count": 0,
+            "output_path": "",
+        }
+
+
 def _write_budget_file(
     path: Path,
     budgets: dict[str, float],
@@ -405,6 +426,65 @@ def test_run_overhead_report_uses_low_quantile_wall_overhead_trial(
     )
     assert Path(report["scenarios"]["tracked_default"]["output_path"]).exists()
     assert not (tmp_path / "gpumemprof_cpu" / ".overhead_trials").exists()
+
+
+def test_run_tracked_scenario_finalizes_session_on_emit_failure(
+    tmp_path: Path,
+) -> None:
+    session = _FailingRuntimeSession()
+    spec = benchmark_harness.RuntimeSpec(
+        name="gpumemprof_cpu",
+        default_interval=0.1,
+        factory=lambda artifact_dir, interval, sink_overrides: session,
+    )
+
+    with pytest.raises(RuntimeError, match="sample failed"):
+        benchmark_harness._run_tracked_scenario(
+            spec,
+            tmp_path / "tracked",
+            iterations=4,
+            allocation_kb=16,
+            sample_count=1,
+        )
+
+    assert session.finish_calls == 1
+
+
+def test_run_soak_scenario_finalizes_session_on_emit_failure(tmp_path: Path) -> None:
+    session = _FailingRuntimeSession()
+    spec = benchmark_harness.RuntimeSpec(
+        name="gpumemprof_cpu",
+        default_interval=0.1,
+        factory=lambda artifact_dir, interval, sink_overrides: session,
+    )
+
+    with pytest.raises(RuntimeError, match="sample failed"):
+        benchmark_harness._run_soak_scenario(
+            spec,
+            tmp_path / "soak",
+            profile="pr",
+        )
+
+    assert session.finish_calls == 1
+
+
+def test_run_retention_validation_finalizes_session_on_emit_failure(
+    tmp_path: Path,
+) -> None:
+    session = _FailingRuntimeSession()
+    spec = benchmark_harness.RuntimeSpec(
+        name="gpumemprof_cpu",
+        default_interval=0.1,
+        factory=lambda artifact_dir, interval, sink_overrides: session,
+    )
+
+    with pytest.raises(RuntimeError, match="sample failed"):
+        benchmark_harness._run_retention_validation(
+            spec,
+            tmp_path / "retention",
+        )
+
+    assert session.finish_calls == 1
 
 
 def test_benchmark_harness_writes_v04_report_with_expected_shape(
