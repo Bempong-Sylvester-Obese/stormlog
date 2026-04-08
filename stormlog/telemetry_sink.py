@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, TextIO
+from typing import Any, Mapping, TextIO, cast
 
 from .session import (
     SESSION_STATUS_COMPLETED,
@@ -148,26 +148,30 @@ class AppendOnlyTelemetrySink:
             self._flush_locked(force=force)
 
     def close(self, session_status: str = SESSION_STATUS_COMPLETED) -> None:
-        with self._lock:
-            self._flush_locked(force=True)
-            if self._handle is not None:
-                self._handle.close()
-                self._handle = None
-            current = self._current_segment()
-            if current is not None and not current.closed:
-                current.closed = True
-            if self._active_session_id is not None:
-                active = self._sessions.get(self._active_session_id)
-                if active is not None:
-                    self._sessions[self._active_session_id] = update_session_summary(
-                        active,
-                        status=session_status,
-                        ended_at_ns=now_ns(),
-                    )
-            self._active_session_id = None
-            self._write_manifest_locked()
-            self._closed = True
-        self._stop_flush_thread()
+        try:
+            with self._lock:
+                self._flush_locked(force=True)
+                if self._handle is not None:
+                    self._handle.close()
+                    self._handle = None
+                current = self._current_segment()
+                if current is not None and not current.closed:
+                    current.closed = True
+                if self._active_session_id is not None:
+                    active = self._sessions.get(self._active_session_id)
+                    if active is not None:
+                        self._sessions[self._active_session_id] = (
+                            update_session_summary(
+                                active,
+                                status=session_status,
+                                ended_at_ns=now_ns(),
+                            )
+                        )
+                self._active_session_id = None
+                self._write_manifest_locked()
+                self._closed = True
+        finally:
+            self._stop_flush_thread()
 
     def get_diagnostics(self) -> dict[str, int]:
         """Return runtime retention and rollover diagnostics."""
@@ -521,6 +525,25 @@ def resolve_telemetry_sink_manifest_path(path: str | Path) -> Path | None:
     return None
 
 
+def _coerce_manifest_int(
+    value: object,
+    *,
+    default: int,
+    minimum: int | None = None,
+) -> int:
+    try:
+        coerced = int(cast(Any, value))
+    except (TypeError, ValueError):
+        return default
+    if minimum is not None and coerced < minimum:
+        return default
+    return int(coerced)
+
+
+def _coerce_manifest_entries(value: object) -> list[object]:
+    return value if isinstance(value, list) else []
+
+
 def read_telemetry_sink_manifest(path: str | Path) -> TelemetrySinkManifest | None:
     """Read a sink manifest from a sink directory, manifest file, or segment file."""
     manifest_path = resolve_telemetry_sink_manifest_path(path)
@@ -535,11 +558,20 @@ def read_telemetry_sink_manifest(path: str | Path) -> TelemetrySinkManifest | No
     if not isinstance(payload, Mapping):
         return None
 
-    schema_version = int(payload.get("schema_version", 1))
-    fmt = str(payload.get("format", "stormlog.append_only_telemetry_sink"))
+    schema_version = _coerce_manifest_int(
+        payload.get("schema_version", 1),
+        default=1,
+        minimum=1,
+    )
+    fmt_value = payload.get("format", "stormlog.append_only_telemetry_sink")
+    fmt = (
+        fmt_value
+        if isinstance(fmt_value, str) and fmt_value
+        else "stormlog.append_only_telemetry_sink"
+    )
     sessions: list[SessionSummary] = []
     if schema_version >= 2:
-        for raw_session in payload.get("sessions", []):
+        for raw_session in _coerce_manifest_entries(payload.get("sessions", [])):
             if not isinstance(raw_session, Mapping):
                 continue
             try:
@@ -548,7 +580,7 @@ def read_telemetry_sink_manifest(path: str | Path) -> TelemetrySinkManifest | No
                 continue
 
     segments: list[TelemetrySinkSegment] = []
-    for raw_segment in payload.get("segments", []):
+    for raw_segment in _coerce_manifest_entries(payload.get("segments", [])):
         if not isinstance(raw_segment, Mapping):
             continue
         filename = raw_segment.get("filename")
@@ -558,8 +590,16 @@ def read_telemetry_sink_manifest(path: str | Path) -> TelemetrySinkManifest | No
             segments.append(
                 TelemetrySinkSegment(
                     filename=filename,
-                    event_count=int(raw_segment.get("event_count", 0)),
-                    size_bytes=int(raw_segment.get("size_bytes", 0)),
+                    event_count=_coerce_manifest_int(
+                        raw_segment.get("event_count", 0),
+                        default=0,
+                        minimum=0,
+                    ),
+                    size_bytes=_coerce_manifest_int(
+                        raw_segment.get("size_bytes", 0),
+                        default=0,
+                        minimum=0,
+                    ),
                     closed=bool(raw_segment.get("closed", False)),
                     session_id=(
                         raw_segment.get("session_id")

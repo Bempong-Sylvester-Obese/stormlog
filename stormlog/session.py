@@ -6,7 +6,7 @@ import os
 import socket
 import time
 from dataclasses import asdict, dataclass, replace
-from typing import Any, Iterable, Mapping, Protocol, TypeVar
+from typing import Any, Iterable, Mapping, Protocol, TypeVar, cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 SESSION_STATUS_RUNNING = "running"
@@ -29,6 +29,7 @@ _SESSION_SELECTION_PRIORITY = {
     SESSION_STATUS_INCOMPLETE: 2,
     SESSION_STATUS_RUNNING: 3,
 }
+_UNCHANGED = object()
 
 
 @dataclass(frozen=True)
@@ -52,7 +53,7 @@ class _HasSummary(Protocol):
     summary: SessionSummary
 
 
-_SummaryT = TypeVar("_SummaryT", bound="_HasSummary")
+_SessionLikeT = TypeVar("_SessionLikeT", SessionSummary, _HasSummary)
 
 
 def now_ns() -> int:
@@ -110,15 +111,17 @@ def update_session_summary(
     summary: SessionSummary,
     *,
     status: str | None = None,
-    ended_at_ns: int | None = None,
+    ended_at_ns: int | None | object = _UNCHANGED,
     source: str | None = None,
 ) -> SessionSummary:
     """Return a copy of a session summary with lifecycle updates applied."""
     updates: dict[str, Any] = {}
     if status is not None:
         updates["status"] = normalize_session_status(status)
-    if ended_at_ns is not None:
-        updates["ended_at_ns"] = int(ended_at_ns)
+    if ended_at_ns is not _UNCHANGED:
+        updates["ended_at_ns"] = (
+            None if ended_at_ns is None else int(cast(int, ended_at_ns))
+        )
     if source is not None:
         updates["source"] = source
     return replace(summary, **updates)
@@ -240,31 +243,37 @@ def infer_session_summary_from_events(
 
 def sort_session_summaries(summaries: Iterable[SessionSummary]) -> list[SessionSummary]:
     """Sort sessions by selection priority and recency."""
-    return sorted(
-        summaries,
-        key=lambda summary: (
-            _SESSION_SELECTION_PRIORITY.get(summary.status, 99),
-            -int(summary.ended_at_ns or summary.started_at_ns),
-            -summary.started_at_ns,
-            summary.session_id,
-        ),
+    return sorted(summaries, key=_session_selection_sort_key)
+
+
+def _session_selection_sort_key(summary: SessionSummary) -> tuple[int, int, int, str]:
+    return (
+        _SESSION_SELECTION_PRIORITY.get(summary.status, 99),
+        -int(summary.ended_at_ns or summary.started_at_ns),
+        -summary.started_at_ns,
+        summary.session_id,
     )
 
 
+def _session_summary_for_selection(
+    session: SessionSummary | _HasSummary,
+) -> SessionSummary:
+    if isinstance(session, SessionSummary):
+        return session
+    return session.summary
+
+
 def select_default_session(
-    sessions: Iterable[_SummaryT],
-) -> _SummaryT | None:
+    sessions: Iterable[_SessionLikeT],
+) -> _SessionLikeT | None:
     """Pick the default session using lifecycle priority and recency."""
     session_list = list(sessions)
     if not session_list:
         return None
     ordered = sorted(
         session_list,
-        key=lambda loaded: (
-            _SESSION_SELECTION_PRIORITY.get(loaded.summary.status, 99),
-            -int(loaded.summary.ended_at_ns or loaded.summary.started_at_ns),
-            -loaded.summary.started_at_ns,
-            loaded.summary.session_id,
+        key=lambda session: _session_selection_sort_key(
+            _session_summary_for_selection(session)
         ),
     )
     return ordered[0]

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -61,8 +62,20 @@ def collector_retry_delay_seconds(
         return 0.0
     if initial_delay_s <= 0:
         return 0.0
+    if max_delay_s <= 0:
+        return 0.0
+
+    bounded_initial = min(initial_delay_s, max_delay_s)
+    if factor <= 1.0:
+        return bounded_initial
+
     power = max(consecutive_failures - 1, 0)
-    delay = initial_delay_s * (factor**power)
+    try:
+        delay = initial_delay_s * (factor**power)
+    except OverflowError:
+        return max_delay_s
+    if not math.isfinite(delay):
+        return max_delay_s
     return min(max_delay_s, delay)
 
 

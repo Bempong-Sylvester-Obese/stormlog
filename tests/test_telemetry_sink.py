@@ -7,7 +7,11 @@ from pathlib import Path
 import pytest
 
 from stormlog.telemetry import load_telemetry_sessions
-from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
+from stormlog.telemetry_sink import (
+    AppendOnlyTelemetrySink,
+    TelemetrySinkConfig,
+    read_telemetry_sink_manifest,
+)
 
 
 def _segment_records(path: Path) -> list[dict[str, object]]:
@@ -278,3 +282,52 @@ def test_telemetry_sink_config_rejects_total_retention_below_rollover() -> None:
             rollover_max_bytes=2048,
             retention_max_total_bytes=1024,
         )
+
+
+def test_read_telemetry_sink_manifest_tolerates_malformed_root_fields(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": "oops",
+                "format": 7,
+                "sessions": {"bad": "shape"},
+                "segments": "segment-000001.jsonl",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    manifest = read_telemetry_sink_manifest(tmp_path)
+
+    assert manifest is not None
+    assert manifest.schema_version == 1
+    assert manifest.format == "stormlog.append_only_telemetry_sink"
+    assert manifest.sessions == []
+    assert manifest.segments == []
+
+
+def test_append_only_sink_close_stops_flush_thread_after_manifest_failure(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append({"seq": 1})
+    assert sink._flush_thread is not None
+    assert sink._flush_thread.is_alive()
+
+    def _fail_manifest_write() -> None:
+        raise OSError("manifest write failed")
+
+    sink._write_manifest_locked = _fail_manifest_write  # type: ignore[method-assign]
+
+    with pytest.raises(OSError, match="manifest write failed"):
+        sink.close()
+
+    assert sink._flush_thread is None

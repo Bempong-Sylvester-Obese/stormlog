@@ -323,7 +323,7 @@ def run_diagnose(
                 command_line=command_line,
                 files_written=files_with_manifest,
                 exit_code=1,
-                risk_detected=False,
+                risk_detected=risk_detected,
                 session_summary=session_summary,
                 error=str(e),
             )
