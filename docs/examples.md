@@ -59,6 +59,19 @@ This demo shows:
 - `profile_context`
 - summary reporting
 
+### CUDA allocator-history and attributed HTML
+
+```bash
+python -m examples.basic.cuda_native_history_demo --output ./diag_bundle_native_demo
+```
+
+This demo shows:
+
+- `stormlog.cuda_native_debug.cuda_memory_history`
+- `capture_cuda_snapshot_artifacts`
+- the annotated `cuda_allocator_state_history_annotated.html` artifact
+- a retained-allocation snapshot that populates the timeline, segment explorer, and active-memory table
+
 ### TensorFlow
 
 ```bash

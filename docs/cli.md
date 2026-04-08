@@ -183,9 +183,14 @@ when reloaded later.
 `--native-history` is a CUDA-only debug mode. It records allocator history for
 the current `gpumemprof diagnose` process, then writes native snapshot artifacts
 such as `cuda_allocator_snapshot.pickle`,
-`cuda_allocator_state_history.html`, and tensor-attribution JSON alongside the
-normal diagnose bundle files. On MPS, ROCm, or CPU-only runtimes, the command
-fails explicitly instead of pretending support.
+`cuda_allocator_state_history.html`,
+`cuda_allocator_state_history_annotated.html`, and tensor-attribution JSON
+alongside the normal diagnose bundle files. The annotated HTML is the
+Stormlog-native view that exposes the timeline trace, segment explorer, and
+active-memory table in one file. For a maintained workflow example of that
+artifact, continue with [PyTorch Production Recipes](cookbook/pytorch.md). On
+MPS, ROCm, or CPU-only runtimes, the command fails explicitly instead of
+pretending support.
 
 ## `tfmemprof`
 

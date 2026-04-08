@@ -101,6 +101,39 @@ snapshots and state-history files.
 Do not use this path on CPU-only or non-CUDA hosts. Fall back to the standard
 diagnose bundle there.
 
+## Recipe: generate the annotated allocator-history HTML
+
+```bash
+python -m examples.basic.cuda_native_history_demo --output ./diag_bundle_native_demo
+```
+
+This is source-checkout only. Use it when you want a workload-backed artifact
+that reliably populates the Stormlog-native annotated HTML instead of capturing
+an otherwise idle CLI process.
+
+The command writes the standard native-history files plus
+`cuda_allocator_state_history_annotated.html`, which combines the timeline
+trace, segment explorer, and active-memory table in one self-contained file.
+
+### What the annotated HTML shows
+
+Generated from `examples.basic.cuda_native_history_demo` on an L4 host:
+
+![Annotated timeline trace](assets/cuda_native_history_timeline.png)
+
+The timeline trace lets you inspect cumulative allocator growth and click into a
+specific attributed allocation.
+
+![Annotated segment explorer](assets/cuda_native_history_segments.png)
+
+The segment explorer shows how each CUDA segment is partitioned between active
+allocations and inactive/fragmented blocks.
+
+![Annotated active-memory table](assets/cuda_native_history_active_table.png)
+
+The active-memory table is the fastest way to confirm which named tensors or
+retained activations were still live at snapshot time.
+
 ## Recipe: turn saved telemetry into a report
 
 ```bash

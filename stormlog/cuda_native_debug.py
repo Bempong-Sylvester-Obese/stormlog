@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TRACE_ALLOC_MAX_ENTRIES = 100_000
 SNAPSHOT_PICKLE_FILENAME = "cuda_allocator_snapshot.pickle"
 TRACE_HTML_FILENAME = "cuda_allocator_state_history.html"
+TRACE_HTML_ANNOTATED_FILENAME = "cuda_allocator_state_history_annotated.html"
 SEGMENT_SUMMARY_FILENAME = "cuda_allocator_segments.txt"
 TRACE_SUMMARY_FILENAME = "cuda_allocator_trace.txt"
 TENSOR_ATTRIBUTION_FILENAME = "cuda_tensor_attribution.json"
@@ -338,25 +339,48 @@ def write_cuda_snapshot_artifacts(
 
     try:
         memory_viz = _load_memory_viz()
-        _write_text(
-            output_dir / SEGMENT_SUMMARY_FILENAME,
-            memory_viz.segsum(snapshot_dict),
-        )
-        files_written.append(SEGMENT_SUMMARY_FILENAME)
+    except Exception as exc:
+        warnings.append(f"memory_viz load: {exc}")
+    else:
+        try:
+            _write_text(
+                output_dir / SEGMENT_SUMMARY_FILENAME,
+                memory_viz.segsum(snapshot_dict),
+            )
+            files_written.append(SEGMENT_SUMMARY_FILENAME)
+        except Exception as exc:
+            warnings.append(f"segment summary: {exc}")
 
-        _write_text(
-            output_dir / TRACE_SUMMARY_FILENAME, memory_viz.trace(snapshot_dict)
-        )
-        files_written.append(TRACE_SUMMARY_FILENAME)
+        try:
+            _write_text(
+                output_dir / TRACE_SUMMARY_FILENAME, memory_viz.trace(snapshot_dict)
+            )
+            files_written.append(TRACE_SUMMARY_FILENAME)
+        except Exception as exc:
+            warnings.append(f"trace summary: {exc}")
 
-        trace_html = memory_viz.trace_plot(
+        try:
+            trace_html = memory_viz.trace_plot(
+                snapshot_dict,
+                device=_resolve_device_index(device),
+            )
+            _write_text(output_dir / TRACE_HTML_FILENAME, trace_html)
+            files_written.append(TRACE_HTML_FILENAME)
+        except Exception as exc:
+            warnings.append(str(exc))
+
+    try:
+        from .attributed_viz import render_attributed_html
+
+        attributed_html = render_attributed_html(
             snapshot_dict,
+            tensor_index,
             device=_resolve_device_index(device),
         )
-        _write_text(output_dir / TRACE_HTML_FILENAME, trace_html)
-        files_written.append(TRACE_HTML_FILENAME)
-    except Exception as exc:
-        warnings.append(str(exc))
+        _write_text(output_dir / TRACE_HTML_ANNOTATED_FILENAME, attributed_html)
+        files_written.append(TRACE_HTML_ANNOTATED_FILENAME)
+    except Exception as attr_exc:
+        warnings.append(f"attributed HTML: {attr_exc}")
 
     metadata_path = output_dir / DEBUG_METADATA_FILENAME
     metadata_path.write_text(
@@ -366,6 +390,8 @@ def write_cuda_snapshot_artifacts(
                 "warning_count": len(warnings),
                 "warnings": warnings,
                 "trace_html_written": TRACE_HTML_FILENAME in files_written,
+                "annotated_trace_html_written": TRACE_HTML_ANNOTATED_FILENAME
+                in files_written,
                 "storage_pointer_count": tensor_index.get("storage_pointer_count", 0),
                 "attributed_allocation_count": attribution_summary.get(
                     "attributed_allocation_count",
@@ -408,6 +434,7 @@ __all__ = [
     "SEGMENT_SUMMARY_FILENAME",
     "SNAPSHOT_PICKLE_FILENAME",
     "TENSOR_ATTRIBUTION_FILENAME",
+    "TRACE_HTML_ANNOTATED_FILENAME",
     "TRACE_HTML_FILENAME",
     "TRACE_SUMMARY_FILENAME",
     "build_cuda_tensor_attribution_index",
