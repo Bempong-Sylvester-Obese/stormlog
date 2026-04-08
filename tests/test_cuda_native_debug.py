@@ -127,8 +127,38 @@ def test_write_cuda_snapshot_artifacts_writes_expected_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     snapshot = {
-        "segments": [],
-        "device_traces": [[]],
+        "segments": [
+            {
+                "address": 4096,
+                "segment_type": "large",
+                "total_size": 128,
+                "allocated_size": 64,
+                "active_size": 64,
+                "blocks": [
+                    {
+                        "address": 8192,
+                        "size": 64,
+                        "state": "active_allocated",
+                        "frames": [
+                            {"name": "forward", "filename": "linear.py", "line": 12}
+                        ],
+                    }
+                ],
+            }
+        ],
+        "device_traces": [
+            [
+                {
+                    "action": "alloc",
+                    "addr": 8192,
+                    "size": 64,
+                    "time_us": 100,
+                    "frames": [
+                        {"name": "forward", "filename": "linear.py", "line": 12}
+                    ],
+                }
+            ]
+        ],
     }
     tensor_index = {
         "device_index": 0,
@@ -172,8 +202,15 @@ def test_write_cuda_snapshot_artifacts_writes_expected_files(
     metadata = (tmp_path / native_debug.DEBUG_METADATA_FILENAME).read_text(
         encoding="utf-8"
     )
+    annotated_html = (tmp_path / native_debug.TRACE_HTML_ANNOTATED_FILENAME).read_text(
+        encoding="utf-8"
+    )
     assert (tmp_path / native_debug.TRACE_HTML_ANNOTATED_FILENAME).exists()
     assert '"annotated_trace_html_written": true' in metadata
+    assert "Timeline Trace" in annotated_html
+    assert "Segment Explorer" in annotated_html
+    assert "Active Memory Table" in annotated_html
+    assert "model.linear.weight" in annotated_html
 
 
 def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(

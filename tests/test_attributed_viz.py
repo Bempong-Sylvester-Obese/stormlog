@@ -1,7 +1,16 @@
 from __future__ import annotations
 
+import json
+
 import stormlog.attributed_viz as attributed_viz
 import stormlog.cuda_native_debug as native_debug
+
+
+def _extract_embedded_payload(html: str) -> dict[str, object]:
+    prefix = "const DATA = "
+    start = html.index(prefix) + len(prefix)
+    end = html.index(";\n\n// === UTILS ===", start)
+    return json.loads(html[start:end].replace("<\\/", "</"))
 
 
 def test_render_attributed_html_is_self_contained() -> None:
@@ -190,3 +199,75 @@ def test_process_snapshot_offenders_only_include_snapshot_active_allocations() -
     )
 
     assert [offender["name"] for offender in payload["offenders"]] == ["active.tensor"]
+
+
+def test_render_attributed_html_embeds_timeline_segment_and_active_views() -> None:
+    snapshot = {
+        "segments": [
+            {
+                "address": 4096,
+                "segment_type": "large",
+                "total_size": 256,
+                "allocated_size": 128,
+                "active_size": 128,
+                "blocks": [
+                    {
+                        "address": 8192,
+                        "size": 128,
+                        "state": "active_allocated",
+                        "frames": [
+                            {"name": "forward", "filename": "linear.py", "line": 12}
+                        ],
+                    },
+                    {
+                        "address": 12288,
+                        "size": 128,
+                        "state": "inactive",
+                        "frames": [],
+                    },
+                ],
+            }
+        ],
+        "device_traces": [
+            [
+                {
+                    "action": "alloc",
+                    "addr": 8192,
+                    "size": 128,
+                    "time_us": 100,
+                    "frames": [
+                        {"name": "forward", "filename": "linear.py", "line": 12}
+                    ],
+                }
+            ]
+        ],
+    }
+    tensor_index = {
+        "storage_pointer_count": 1,
+        "attributed_storage_pointers": [
+            {
+                "storage_ptr_int": 8192,
+                "names": ["model.linear.weight"],
+                "tensors": [
+                    {
+                        "shape": [16, 8],
+                        "dtype": "torch.float32",
+                        "size_bytes": 128,
+                    }
+                ],
+            }
+        ],
+    }
+
+    html = attributed_viz.render_attributed_html(snapshot, tensor_index)
+    payload = _extract_embedded_payload(html)
+
+    assert "Timeline Trace" in html
+    assert "Segment Explorer" in html
+    assert "Active Memory Table" in html
+    assert "Top Memory Offenders" in html
+    assert payload["num_events"] == 1
+    assert payload["events"][0]["name"] == "model.linear.weight"
+    assert payload["segments"][0]["blocks"][0]["name"] == "model.linear.weight"
+    assert payload["active_table"][0]["name"] == "model.linear.weight"
+    assert payload["offenders"][0]["name"] == "model.linear.weight"
