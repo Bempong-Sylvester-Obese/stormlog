@@ -96,13 +96,24 @@ def _run_stormlog_diagnose(check_dir: Path) -> Dict[str, object]:
 
 
 def _run_benchmark_check(check_dir: Path, mode: str) -> Dict[str, object]:
+    if importlib.util.find_spec("tensorflow") is None:
+        return {
+            "status": "SKIP",
+            "reason": "benchmark harness requires tensorflow for tfmemprof_cpu",
+            "output": str((check_dir / "benchmark_report.json").resolve()),
+        }
+
     output = (check_dir / "benchmark_report.json").resolve()
     artifact_root = (check_dir / "benchmark_scenarios").resolve()
     cmd = _python_module_cmd(
         "examples.cli.benchmark_harness",
         "--check",
+        "--profile",
+        "pr",
+        "--mode",
+        "overhead" if mode == "smoke" else "all",
         "--budgets",
-        str(REPO_ROOT / "docs" / "benchmarks" / "v0.2_budgets.json"),
+        str(REPO_ROOT / "docs" / "benchmarks" / "v0.4_operating_budget.json"),
         "--output",
         str(output),
         "--artifact-root",

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 
 import pytest
 
@@ -228,6 +229,59 @@ def test_diagnose_exit_code_two_when_risk_detected(
     )
     exit_code = gpumemprof_cli.cmd_diagnose(args)  # type: ignore[arg-type, unused-ignore]
     assert exit_code == 2
+
+
+def test_diagnose_fallback_manifest_preserves_risk_detected(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _patch_diagnose_env(monkeypatch, cuda_available=True, risk_detected=True)
+    _patch_timeline_capture(monkeypatch)
+    recorded_risks: list[bool] = []
+    call_count = {"value": 0}
+
+    def _fake_write_manifest(
+        artifact_dir: Path,
+        *,
+        command_line: str,
+        files_written: list[str],
+        exit_code: int,
+        risk_detected: bool,
+        session_summary: object,
+        native_history: bool,
+        error: str | None = None,
+    ) -> None:
+        _ = (
+            command_line,
+            files_written,
+            exit_code,
+            session_summary,
+            native_history,
+            error,
+        )
+        recorded_risks.append(risk_detected)
+        manifest_path = artifact_dir / "manifest.json"
+        if call_count["value"] == 0:
+            call_count["value"] += 1
+            raise OSError("disk full")
+        manifest_path.write_text(
+            json.dumps({"risk_detected": risk_detected}),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(diagnose_module, "_write_manifest", _fake_write_manifest)
+
+    artifact_dir, exit_code = diagnose_module.run_diagnose(
+        str(tmp_path),
+        None,
+        0,
+        0.5,
+        "gpumemprof diagnose",
+    )
+
+    assert exit_code == 1
+    assert recorded_risks == [True, True]
+    manifest = json.loads((artifact_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["risk_detected"] is True
 
 
 def test_diagnose_stdout_contains_artifact_path_and_status(
@@ -454,7 +508,7 @@ def test_diagnose_native_history_writes_snapshot_artifacts_for_cuda(
     def _fake_native_history(
         device: object = None,
         trace_alloc_max_entries: int = 0,
-    ) -> object:
+    ) -> Iterator[None]:
         history_calls["device"] = device
         history_calls["trace_alloc_max_entries"] = trace_alloc_max_entries
         yield

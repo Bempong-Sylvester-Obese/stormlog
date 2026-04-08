@@ -106,6 +106,36 @@ def test_get_system_info_detects_rocm_backend(monkeypatch: pytest.MonkeyPatch) -
     assert system_info["detected_backend"] == "rocm"
 
 
+def test_check_memory_fragmentation_adds_formatted_keys_without_mutation_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dummy_properties = SimpleNamespace(total_memory=8 * 1024**3)
+    dummy_device_type = type("DummyDevice", (), {})
+    dummy_torch = SimpleNamespace(
+        device=dummy_device_type,
+        cuda=SimpleNamespace(
+            is_available=lambda: True,
+            current_device=lambda: 0,
+            memory_stats=lambda device_id: {
+                "allocated_bytes.all.current": 2 * 1024**3,
+                "reserved_bytes.all.current": 3 * 1024**3,
+                "active_bytes.all.current": 2 * 1024**3,
+                "inactive_split_bytes.all.current": 512 * 1024**2,
+            },
+            get_device_properties=lambda device_id: dummy_properties,
+        ),
+    )
+    monkeypatch.setattr(gpumemprof_utils, "torch", dummy_torch)
+
+    fragmentation = gpumemprof_utils.check_memory_fragmentation()
+
+    assert fragmentation["total_memory"] == 8 * 1024**3
+    assert fragmentation["allocated_memory"] == 2 * 1024**3
+    assert fragmentation["reserved_memory"] == 3 * 1024**3
+    assert fragmentation["allocated_memory_formatted"] == "2.00 GB"
+    assert fragmentation["reserved_memory_formatted"] == "3.00 GB"
+
+
 def test_detect_gpu_hardware_windows_prefers_powershell_output(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -142,7 +172,7 @@ def test_detect_gpu_hardware_preserves_identical_device_names(
     monkeypatch.setattr(
         gpumemprof_utils.subprocess,
         "run",
-        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+        lambda cmd, **kwargs: SimpleNamespace(
             returncode=0,
             stdout="\nNVIDIA GeForce RTX 4090\nNVIDIA GeForce RTX 4090\n",
             stderr="",
@@ -197,7 +227,7 @@ def test_detect_gpu_hardware_linux_parses_lspci(
     monkeypatch.setattr(
         gpumemprof_utils.subprocess,
         "run",
-        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+        lambda cmd, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=(
                 "03:00.0 VGA compatible controller: Advanced Micro Devices, Inc. [AMD/ATI] Navi 23 [Radeon RX 6600]\n"
@@ -226,7 +256,7 @@ def test_detect_gpu_hardware_macos_parses_system_profiler(
     monkeypatch.setattr(
         gpumemprof_utils.subprocess,
         "run",
-        lambda cmd, **kwargs: SimpleNamespace(  # type: ignore[no-untyped-def]
+        lambda cmd, **kwargs: SimpleNamespace(
             returncode=0,
             stdout=json.dumps(
                 {

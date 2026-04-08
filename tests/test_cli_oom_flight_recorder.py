@@ -42,6 +42,16 @@ def test_main_parses_oom_track_flags(monkeypatch: pytest.MonkeyPatch) -> None:
             "0",
             "--world-size",
             "8",
+            "--telemetry-sink-dir",
+            "telemetry_sink",
+            "--telemetry-flush-seconds",
+            "3.5",
+            "--telemetry-rollover-mb",
+            "32",
+            "--telemetry-retention-files",
+            "4",
+            "--telemetry-retention-total-mb",
+            "128",
         ],
     )
 
@@ -57,6 +67,11 @@ def test_main_parses_oom_track_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.rank == 2
     assert args.local_rank == 0
     assert args.world_size == 8
+    assert args.telemetry_sink_dir == "telemetry_sink"
+    assert args.telemetry_flush_seconds == 3.5
+    assert args.telemetry_rollover_mb == 32
+    assert args.telemetry_retention_files == 4
+    assert args.telemetry_retention_total_mb == 128
 
 
 def test_cmd_track_passes_oom_config_to_memorytracker(
@@ -130,6 +145,11 @@ def test_cmd_track_passes_oom_config_to_memorytracker(
         rank=2,
         local_rank=0,
         world_size=8,
+        telemetry_sink_dir="telemetry_sink",
+        telemetry_flush_seconds=3.5,
+        telemetry_rollover_mb=32,
+        telemetry_retention_files=4,
+        telemetry_retention_total_mb=128,
     )
 
     gpumemprof_cli.cmd_track(args)
@@ -145,6 +165,218 @@ def test_cmd_track_passes_oom_config_to_memorytracker(
     assert created["rank"] == 2
     assert created["local_rank"] == 0
     assert created["world_size"] == 8
+    telemetry_sink_config = created["telemetry_sink_config"]
+    assert telemetry_sink_config.root_dir == gpumemprof_cli.Path("telemetry_sink")
+    assert telemetry_sink_config.flush_every_seconds == 3.5
+    assert telemetry_sink_config.rollover_max_bytes == 32 * 1024 * 1024
+    assert telemetry_sink_config.retention_max_files == 4
+    assert telemetry_sink_config.retention_max_total_bytes == 128 * 1024 * 1024
     assert created["capture_context"] == "stormlog.track"
     assert created["capture_metadata"]["command"] == "track"
     assert created["capture_metadata"]["runtime_backend"] == "cuda"
+
+
+def test_cmd_track_passes_telemetry_sink_config_to_cpu_tracker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    created: dict[str, Any] = {}
+
+    class _FakeCPUTracker:
+        def __init__(self, **kwargs: object) -> None:
+            created.update(kwargs)
+
+        def start_tracking(self) -> None:
+            return None
+
+        def stop_tracking(self) -> None:
+            return None
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_allocated": 0,
+                "peak_memory": 0,
+                "memory_utilization_percent": 0,
+                "total_events": 0,
+            }
+
+        def export_events(self, output: str, fmt: str) -> None:
+            _ = (output, fmt)
+
+    monkeypatch.setattr(gpumemprof_cli, "CPUMemoryTracker", _FakeCPUTracker)
+    monkeypatch.setattr(
+        gpumemprof_cli, "get_system_info", lambda: {"detected_backend": "cpu"}
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    gpumemprof_cli.cmd_track(
+        Namespace(
+            device=None,
+            duration=None,
+            interval=0.5,
+            output=None,
+            format="json",
+            watchdog=False,
+            warning_threshold=70.0,
+            critical_threshold=90.0,
+            oom_flight_recorder=False,
+            oom_dump_dir="oom_test_dir",
+            oom_buffer_size=None,
+            oom_max_dumps=9,
+            oom_max_total_mb=512,
+            job_id=None,
+            rank=None,
+            local_rank=None,
+            world_size=None,
+            telemetry_sink_dir="cpu_sink",
+            telemetry_flush_seconds=2.5,
+            telemetry_rollover_mb=16,
+            telemetry_retention_files=3,
+            telemetry_retention_total_mb=64,
+        )
+    )
+
+    telemetry_sink_config = created["telemetry_sink_config"]
+    assert telemetry_sink_config.root_dir == gpumemprof_cli.Path("cpu_sink")
+    assert telemetry_sink_config.flush_every_seconds == 2.5
+    assert telemetry_sink_config.rollover_max_bytes == 16 * 1024 * 1024
+    assert telemetry_sink_config.retention_max_files == 3
+    assert telemetry_sink_config.retention_max_total_bytes == 64 * 1024 * 1024
+
+
+def test_cmd_track_reports_collector_health_in_output(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _FakeTracker:
+        def __init__(self, **kwargs: object) -> None:
+            self.last_oom_dump_path = None
+            self._retry_at = gpumemprof_cli.time.time() + 5.0
+            _ = kwargs
+
+        def set_threshold(self, name: str, value: float) -> None:
+            _ = (name, value)
+
+        def add_alert_callback(self, callback: object) -> None:
+            _ = callback
+
+        def start_tracking(self) -> None:
+            return None
+
+        def stop_tracking(self) -> None:
+            return None
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_allocated": None,
+                "peak_memory": 0,
+                "memory_utilization_percent": None,
+                "total_events": 1,
+                "collector_health_status": "unhealthy",
+                "collector_last_error": "collector unavailable",
+                "collector_next_retry_epoch_s": self._retry_at,
+            }
+
+        def capture_oom(
+            self, context: str = "runtime", metadata: object = None
+        ) -> object:
+            _ = (context, metadata)
+            return nullcontext()
+
+    monkeypatch.setattr(gpumemprof_cli, "MemoryTracker", _FakeTracker)
+    monkeypatch.setattr(gpumemprof_cli, "MemoryWatchdog", lambda tracker: None)
+    monkeypatch.setattr(
+        gpumemprof_cli, "get_system_info", lambda: {"detected_backend": "cuda"}
+    )
+
+    def _interrupt(_: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(gpumemprof_cli.time, "sleep", _interrupt)
+
+    gpumemprof_cli.cmd_track(
+        Namespace(
+            device=0,
+            duration=None,
+            interval=0.25,
+            output=None,
+            format="json",
+            watchdog=False,
+            warning_threshold=70.0,
+            critical_threshold=90.0,
+            oom_flight_recorder=False,
+            oom_dump_dir="oom_test_dir",
+            oom_buffer_size=None,
+            oom_max_dumps=9,
+            oom_max_total_mb=512,
+            job_id=None,
+            rank=None,
+            local_rank=None,
+            world_size=None,
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "Health: unhealthy" in output
+    assert "Collector health: unhealthy" in output
+    assert "Last collector error: collector unavailable" in output
+
+
+def test_cmd_monitor_handles_unavailable_current_memory_for_mps(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    current_time = {"value": 0.0}
+
+    class _FakeTracker:
+        def __init__(self, **kwargs: object) -> None:
+            self.started = False
+            self.stopped = False
+            _ = kwargs
+
+        def start_tracking(self) -> None:
+            self.started = True
+
+        def stop_tracking(self) -> None:
+            self.stopped = True
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_allocated": None,
+                "peak_memory": 0,
+            }
+
+        def get_events(self) -> list[object]:
+            return []
+
+        def export_events(self, output: str, fmt: str) -> None:
+            _ = (output, fmt)
+
+    monkeypatch.setattr(
+        gpumemprof_cli, "get_system_info", lambda: {"detected_backend": "mps"}
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "_import_runtime_symbols",
+        lambda module, names, command: (_FakeTracker,),
+    )
+    monkeypatch.setattr(gpumemprof_cli.time, "time", lambda: current_time["value"])
+
+    def _sleep(_: float) -> None:
+        current_time["value"] += 1.1
+
+    monkeypatch.setattr(gpumemprof_cli.time, "sleep", _sleep)
+
+    gpumemprof_cli.cmd_monitor(
+        Namespace(
+            device=None,
+            duration=1.0,
+            interval=0.25,
+            output=None,
+            format="json",
+        )
+    )
+
+    output = capsys.readouterr().out
+    assert "Current Memory: -" in output

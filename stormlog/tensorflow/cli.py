@@ -21,6 +21,7 @@ except ImportError:
     tf = None
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 from .analyzer import MemoryAnalyzer
 from .diagnose import run_diagnose
@@ -51,6 +52,27 @@ def _normalize_telemetry_events(
         )
         normalized.append(telemetry_event_to_dict(event))
     return normalized
+
+
+def _build_telemetry_sink_config(
+    args: argparse.Namespace,
+) -> TelemetrySinkConfig | None:
+    sink_dir = getattr(args, "telemetry_sink_dir", None)
+    if not sink_dir:
+        return None
+    return TelemetrySinkConfig(
+        root_dir=Path(sink_dir),
+        flush_every_seconds=float(getattr(args, "telemetry_flush_seconds", 2.0)),
+        rollover_max_bytes=int(getattr(args, "telemetry_rollover_mb", 64))
+        * 1024
+        * 1024,
+        retention_max_files=int(getattr(args, "telemetry_retention_files", 8)),
+        retention_max_total_bytes=int(
+            getattr(args, "telemetry_retention_total_mb", 512)
+        )
+        * 1024
+        * 1024,
+    )
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -184,6 +206,9 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         print(f"Average Memory: {results.average_memory:.1f} MB")
         print(f"Duration: {results.duration:.1f} seconds")
         print(f"Samples Collected: {len(results.memory_usage)}")
+        dropped_samples = int(getattr(results, "history_dropped_samples", 0))
+        if dropped_samples:
+            print(f"Dropped Samples: {dropped_samples}")
 
         if results.alerts_triggered:
             print(f"Alerts Triggered: {len(results.alerts_triggered)}")
@@ -197,6 +222,27 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 "memory_usage": results.memory_usage,
                 "timestamps": results.timestamps,
                 "alerts": results.alerts_triggered,
+                "history_window_limit": int(
+                    getattr(results, "history_window_limit", len(results.memory_usage))
+                ),
+                "history_retained_samples": int(
+                    getattr(
+                        results, "history_retained_samples", len(results.memory_usage)
+                    )
+                ),
+                "history_dropped_samples": int(
+                    getattr(results, "history_dropped_samples", 0)
+                ),
+                "history_retained_alerts": int(
+                    getattr(
+                        results,
+                        "history_retained_alerts",
+                        len(results.alerts_triggered),
+                    )
+                ),
+                "history_dropped_alerts": int(
+                    getattr(results, "history_dropped_alerts", 0)
+                ),
             }
 
             output_path = Path(args.output)
@@ -220,6 +266,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     rank = getattr(args, "rank", None)
     local_rank = getattr(args, "local_rank", None)
     world_size = getattr(args, "world_size", None)
+    telemetry_sink_config = _build_telemetry_sink_config(args)
 
     tracker = MemoryTracker(
         sampling_interval=args.interval,
@@ -230,7 +277,10 @@ def cmd_track(args: argparse.Namespace) -> int:
         rank=rank,
         local_rank=local_rank,
         world_size=world_size,
+        telemetry_sink_config=telemetry_sink_config,
     )
+    if telemetry_sink_config is not None:
+        print(f"Append-only telemetry sink: {telemetry_sink_config.root_dir}")
 
     # Add alert callback
     def alert_callback(alert: Dict[str, Any]) -> None:
@@ -246,8 +296,19 @@ def cmd_track(args: argparse.Namespace) -> int:
             time.sleep(5.0)  # Check every 5 seconds
 
             # Show periodic updates
-            current_memory = tracker.get_current_memory()
-            print(f"Current memory: {current_memory:.1f} MB")
+            stats = tracker.get_statistics()
+            current_memory = stats.get("current_memory_mb")
+            collector_health = str(stats.get("collector_health_status", "healthy"))
+            if isinstance(current_memory, (int, float)):
+                status_line = f"Current memory: {float(current_memory):.1f} MB"
+            else:
+                status_line = "Current memory: unavailable"
+            status_line += f" | Health: {collector_health}"
+            retry_at = stats.get("collector_next_retry_epoch_s")
+            if isinstance(retry_at, (int, float)):
+                retry_in = max(float(retry_at) - time.time(), 0.0)
+                status_line += f" | Retry In: {retry_in:.1f}s"
+            print(status_line)
 
     except KeyboardInterrupt:
         print("\nStopping tracking...")
@@ -268,6 +329,33 @@ def cmd_track(args: argparse.Namespace) -> int:
                     results.events,
                     sampling_interval_ms=sampling_interval_ms,
                 ),
+                "history_window_limit": int(
+                    getattr(results, "history_window_limit", len(results.memory_usage))
+                ),
+                "history_retained_samples": int(
+                    getattr(
+                        results, "history_retained_samples", len(results.memory_usage)
+                    )
+                ),
+                "history_dropped_samples": int(
+                    getattr(results, "history_dropped_samples", 0)
+                ),
+                "history_retained_events": int(
+                    getattr(results, "history_retained_events", len(results.events))
+                ),
+                "history_dropped_events": int(
+                    getattr(results, "history_dropped_events", 0)
+                ),
+                "history_retained_alerts": int(
+                    getattr(
+                        results,
+                        "history_retained_alerts",
+                        len(results.alerts_triggered),
+                    )
+                ),
+                "history_dropped_alerts": int(
+                    getattr(results, "history_dropped_alerts", 0)
+                ),
             }
 
             output_path = Path(args.output)
@@ -277,7 +365,22 @@ def cmd_track(args: argparse.Namespace) -> int:
 
             print(f"Results saved to {args.output}")
 
+        final_stats = tracker.get_statistics()
         print(f"\nTracking completed. Peak memory: {results.peak_memory:.1f} MB")
+        dropped_samples = int(final_stats.get("history_dropped_samples", 0))
+        dropped_events = int(final_stats.get("history_dropped_events", 0))
+        if dropped_samples or dropped_events:
+            print(
+                "History truncation: "
+                f"samples={dropped_samples}, events={dropped_events}"
+            )
+        if "collector_health_status" in final_stats:
+            print(
+                "Collector health: "
+                f"{final_stats.get('collector_health_status', 'healthy')}"
+            )
+        if final_stats.get("collector_last_error"):
+            print(f"Last collector error: {final_stats.get('collector_last_error')}")
 
     return 0
 
@@ -488,6 +591,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="TensorFlow Stormlog CLI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Cookbook:
+  https://stormlog.readthedocs.io/en/latest/cookbook/index.html
+        """,
     )
 
     parser.add_argument(
@@ -568,6 +675,35 @@ def main() -> int:
     )
     track_parser.add_argument(
         "--output", required=True, help="Output file for tracking results"
+    )
+    track_parser.add_argument(
+        "--telemetry-sink-dir",
+        default=None,
+        help="Directory for append-only telemetry sink segments",
+    )
+    track_parser.add_argument(
+        "--telemetry-flush-seconds",
+        type=float,
+        default=2.0,
+        help="Maximum seconds between telemetry sink flushes (default: 2.0)",
+    )
+    track_parser.add_argument(
+        "--telemetry-rollover-mb",
+        type=int,
+        default=64,
+        help="Telemetry sink segment rollover size in MB (default: 64)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-files",
+        type=int,
+        default=8,
+        help="Maximum retained telemetry sink segments (default: 8)",
+    )
+    track_parser.add_argument(
+        "--telemetry-retention-total-mb",
+        type=int,
+        default=512,
+        help="Maximum retained telemetry sink size in MB (default: 512)",
     )
 
     # Analyze command

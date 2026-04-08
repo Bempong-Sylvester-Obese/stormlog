@@ -16,11 +16,22 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import psutil
 
+from stormlog.session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INCOMPLETE,
+    SESSION_STATUS_RUNNING,
+    SessionSummary,
+    create_session_summary,
+    finalize_session_summary,
+    now_ns,
+    update_session_summary,
+)
 from stormlog.telemetry import (
     resolve_distributed_identity,
     telemetry_event_from_record,
     telemetry_event_to_dict,
 )
+from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +52,7 @@ else:
             memory_reserved: int
             memory_change: int
             device_id: int
+            session_id: Optional[str] = None
             context: Optional[str] = None
             job_id: Optional[str] = None
             rank: int = 0
@@ -222,6 +234,7 @@ class CPUMemoryTracker:
         rank: Optional[int] = None,
         local_rank: Optional[int] = None,
         world_size: Optional[int] = None,
+        telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
     ) -> None:
         if sampling_interval <= 0:
             raise ValueError("sampling_interval must be > 0")
@@ -230,12 +243,19 @@ class CPUMemoryTracker:
 
         self.process = psutil.Process()
         self.sampling_interval = sampling_interval
+        self.max_events = max_events
         self.events: deque[TrackingEvent] = deque(maxlen=max_events)
         self._events_lock = threading.Lock()
         self.is_tracking = False
         self._stop_event = threading.Event()
         self._tracking_thread: Optional[threading.Thread] = None
         self.enable_alerts = enable_alerts
+        self._telemetry_sink_config = telemetry_sink_config
+        self._telemetry_sink = (
+            AppendOnlyTelemetrySink(telemetry_sink_config)
+            if telemetry_sink_config is not None
+            else None
+        )
         self.distributed_identity = resolve_distributed_identity(
             job_id=job_id,
             rank=rank,
@@ -243,6 +263,10 @@ class CPUMemoryTracker:
             world_size=world_size,
             env=os.environ,
         )
+        self.session_source = "stormlog.cpu_profiler"
+        self._session_summary: Optional[SessionSummary] = None
+        self._history_dropped_events = 0
+        self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
 
         self.stats: Dict[str, Any] = {
             "tracking_start_time": None,
@@ -251,21 +275,68 @@ class CPUMemoryTracker:
             "alert_count": 0,
         }
 
+    @staticmethod
+    def _empty_sink_diagnostics() -> Dict[str, int]:
+        return {
+            "rollover_count": 0,
+            "pruned_segment_count": 0,
+            "pruned_bytes": 0,
+            "final_retained_files": 0,
+            "final_retained_bytes": 0,
+        }
+
     def _current_rss(self) -> int:
         with self.process.oneshot():
             return int(self.process.memory_info().rss)
 
+    def _open_session(self) -> SessionSummary:
+        if self._session_summary is not None:
+            return self._session_summary
+        summary = create_session_summary(
+            source=self.session_source,
+            status=SESSION_STATUS_RUNNING,
+            started_at_ns=now_ns(),
+            host=socket.gethostname(),
+            pid=os.getpid(),
+            job_id=self.distributed_identity["job_id"],
+            rank=self.distributed_identity["rank"],
+            local_rank=self.distributed_identity["local_rank"],
+            world_size=self.distributed_identity["world_size"],
+        )
+        self._session_summary = summary
+        if self._telemetry_sink is not None and hasattr(
+            self._telemetry_sink, "start_session"
+        ):
+            self._session_summary = self._telemetry_sink.start_session(summary)
+        return self._session_summary
+
+    def get_session_summary(self) -> Optional[SessionSummary]:
+        return self._session_summary
+
+    def _ensure_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None and self._telemetry_sink_config is not None:
+            self._telemetry_sink = AppendOnlyTelemetrySink(self._telemetry_sink_config)
+
     def start_tracking(self) -> None:
         if self.is_tracking:
             return
-        self.is_tracking = True
+        self._session_summary = None
+        self._ensure_telemetry_sink()
         self._stop_event.clear()
         with self._events_lock:
+            self.events.clear()
+            self.stats["peak_memory"] = 0
+            self.stats["total_events"] = 0
+            self.stats["alert_count"] = 0
             self.stats["tracking_start_time"] = time.time()
+            self._history_dropped_events = 0
+        self._last_sink_diagnostics = self._empty_sink_diagnostics()
+        self._open_session()
         self._tracking_thread = threading.Thread(
             target=self._tracking_loop, daemon=True
         )
         self._tracking_thread.start()
+        self.is_tracking = True
         self._add_event("start", 0, "CPU memory tracking started")
 
     def stop_tracking(self) -> None:
@@ -276,6 +347,12 @@ class CPUMemoryTracker:
         if self._tracking_thread:
             self._tracking_thread.join(timeout=1.0)
         self._add_event("stop", 0, "CPU memory tracking stopped")
+        self._close_telemetry_sink()
+        if self._session_summary is not None:
+            self._session_summary = finalize_session_summary(
+                self._session_summary,
+                ended_at_ns=now_ns(),
+            )
 
     def _tracking_loop(self) -> None:
         last_rss = self._current_rss()
@@ -316,6 +393,7 @@ class CPUMemoryTracker:
                 )
 
             last_rss = current_rss
+            self._flush_telemetry_sink()
 
     def _add_event(self, event_type: str, memory_change: int, context: str) -> None:
         rss = self._current_rss()
@@ -326,6 +404,11 @@ class CPUMemoryTracker:
             memory_reserved=rss,
             memory_change=memory_change,
             device_id=-1,
+            session_id=(
+                self._open_session().session_id
+                if self._session_summary is None
+                else self._session_summary.session_id
+            ),
             context=context,
             job_id=self.distributed_identity["job_id"],
             rank=self.distributed_identity["rank"],
@@ -333,7 +416,111 @@ class CPUMemoryTracker:
             world_size=self.distributed_identity["world_size"],
         )
         with self._events_lock:
+            if len(self.events) == self.max_events:
+                self._history_dropped_events += 1
             self.events.append(event)
+        self._append_to_telemetry_sink(event)
+
+    def _telemetry_record_from_event(self, event: TrackingEvent) -> Dict[str, Any]:
+        host = socket.gethostname()
+        pid = os.getpid()
+        sampling_interval_ms = int(round(self.sampling_interval * 1000))
+        return telemetry_event_to_dict(
+            telemetry_event_from_record(
+                {
+                    "session_id": event.session_id
+                    or (
+                        self._session_summary.session_id
+                        if self._session_summary is not None
+                        else self._open_session().session_id
+                    ),
+                    "timestamp": event.timestamp,
+                    "event_type": event.event_type,
+                    "memory_allocated": event.memory_allocated,
+                    "memory_reserved": event.memory_reserved,
+                    "memory_change": event.memory_change,
+                    "device_id": event.device_id,
+                    "context": event.context,
+                    "job_id": event.job_id,
+                    "rank": event.rank,
+                    "local_rank": event.local_rank,
+                    "world_size": event.world_size,
+                    "collector": "stormlog.cpu_tracker",
+                    "sampling_interval_ms": sampling_interval_ms,
+                    "pid": pid,
+                    "host": host,
+                },
+                default_collector="stormlog.cpu_tracker",
+                default_sampling_interval_ms=sampling_interval_ms,
+                default_session_id=event.session_id,
+            )
+        )
+
+    def _append_to_telemetry_sink(self, event: TrackingEvent) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.append(self._telemetry_record_from_event(event))
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
+        except Exception as exc:
+            self._disable_telemetry_sink("append", exc)
+
+    def _flush_telemetry_sink(self, *, force: bool = False) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.flush(force=force)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
+        except Exception as exc:
+            self._disable_telemetry_sink("flush", exc)
+
+    def _close_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._close_sink_with_status(
+                self._telemetry_sink,
+                SESSION_STATUS_COMPLETED,
+            )
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
+        except Exception as exc:
+            self._disable_telemetry_sink("close", exc)
+        else:
+            self._telemetry_sink = None
+
+    def _disable_telemetry_sink(self, operation: str, exc: Exception) -> None:
+        sink = self._telemetry_sink
+        if sink is None:
+            return
+        self._telemetry_sink = None
+        logger.warning(
+            "Disabling CPU telemetry sink after %s failure: %s",
+            operation,
+            exc,
+        )
+        if self._session_summary is not None:
+            self._session_summary = update_session_summary(
+                self._session_summary,
+                status=SESSION_STATUS_INCOMPLETE,
+                ended_at_ns=now_ns(),
+            )
+        try:
+            self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
+            if hasattr(sink, "get_diagnostics"):
+                self._last_sink_diagnostics = sink.get_diagnostics()
+        except Exception as close_exc:
+            logger.debug(
+                "CPU telemetry sink close failed after %s error: %s",
+                operation,
+                close_exc,
+            )
+
+    @staticmethod
+    def _close_sink_with_status(sink: Any, status: str) -> None:
+        try:
+            sink.close(session_status=status)
+        except TypeError:
+            sink.close()
 
     def get_events(
         self,
@@ -378,12 +565,28 @@ class CPUMemoryTracker:
         duration = 0.0
         if isinstance(tracking_start_time, (int, float)):
             duration = time.time() - float(tracking_start_time)
+        with self._events_lock:
+            retained_events = len(self.events)
         return {
             "mode": "cpu",
             "total_events": total_events,
             "peak_memory": peak_memory,
             "current_memory_allocated": rss,
             "tracking_duration_seconds": duration,
+            "history_window_limit_events": self.max_events,
+            "history_retained_events": retained_events,
+            "history_dropped_events": self._history_dropped_events,
+            **self._last_sink_diagnostics,
+            "session_id": (
+                self._session_summary.session_id
+                if self._session_summary is not None
+                else None
+            ),
+            "session_status": (
+                self._session_summary.status
+                if self._session_summary is not None
+                else None
+            ),
         }
 
     def get_memory_timeline(self, interval: float = 1.0) -> Dict[str, List[float]]:
@@ -406,40 +609,14 @@ class CPUMemoryTracker:
             self.events.clear()
             self.stats["peak_memory"] = 0
             self.stats["total_events"] = 0
+            self._history_dropped_events = 0
 
     def export_events(self, filename: str, format: str = "csv") -> None:
         with self._events_lock:
             events_snapshot = list(self.events)
 
-        host = socket.gethostname()
-        pid = os.getpid()
-        sampling_interval_ms = int(round(self.sampling_interval * 1000))
-
         records = [
-            telemetry_event_to_dict(
-                telemetry_event_from_record(
-                    {
-                        "timestamp": event.timestamp,
-                        "event_type": event.event_type,
-                        "memory_allocated": event.memory_allocated,
-                        "memory_reserved": event.memory_reserved,
-                        "memory_change": event.memory_change,
-                        "device_id": event.device_id,
-                        "context": event.context,
-                        "job_id": event.job_id,
-                        "rank": event.rank,
-                        "local_rank": event.local_rank,
-                        "world_size": event.world_size,
-                        "collector": "stormlog.cpu_tracker",
-                        "sampling_interval_ms": sampling_interval_ms,
-                        "pid": pid,
-                        "host": host,
-                    },
-                    default_collector="stormlog.cpu_tracker",
-                    default_sampling_interval_ms=sampling_interval_ms,
-                )
-            )
-            for event in events_snapshot
+            self._telemetry_record_from_event(event) for event in events_snapshot
         ]
 
         if not records:

@@ -8,7 +8,9 @@ import socket
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 
-from stormlog.telemetry import TelemetryEventV2, telemetry_event_from_record
+from stormlog.session import SessionSummary
+from stormlog.telemetry import TelemetryEvent, telemetry_event_from_record
+from stormlog.telemetry_sink import TelemetrySinkConfig
 
 from ..utils import format_bytes
 
@@ -22,30 +24,26 @@ try:
     MemoryTracker: Any = _MemoryTracker
     MemoryWatchdog: Any = _MemoryWatchdog
     TrackingEvent: Any = _TrackingEvent
-except ImportError as e:
-    raise ImportError(
-        "stormlog.tracker is required for TrackerSession. "
-        "Ensure stormlog is properly installed."
-    ) from e
+except ImportError as exc:
+    logger.debug("GPU tracker imports unavailable: %s", exc)
+    MemoryTracker = None
+    MemoryWatchdog = None
+    TrackingEvent = None
 
 try:
     from stormlog.cpu_profiler import CPUMemoryTracker as _CPUMemoryTracker
 
     CPUMemoryTracker: Any = _CPUMemoryTracker
-except ImportError as e:
-    raise ImportError(
-        "CPUMemoryTracker is required for TrackerSession. "
-        "Ensure stormlog is properly installed."
-    ) from e
+except ImportError as exc:
+    logger.debug("CPU tracker imports unavailable: %s", exc)
+    CPUMemoryTracker = None
 
 try:
     import torch as _torch
 
     torch: Any = _torch
-except ImportError as e:
-    raise ImportError(
-        "torch is required for TrackerSession. Install it with: pip install torch"
-    ) from e
+except ImportError:
+    torch = None
 
 
 class TrackerUnavailableError(RuntimeError):
@@ -74,6 +72,7 @@ class TrackerSession:
         auto_cleanup: bool = False,
         max_events_per_poll: int = 50,
         max_events: int = 10_000,
+        telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
     ) -> None:
         # Defensive check: ensure at least one tracker is available
         # (In normal operation, imports are required and will raise ImportError if missing.
@@ -87,6 +86,7 @@ class TrackerSession:
         self.auto_cleanup = auto_cleanup
         self.max_events_per_poll = max_events_per_poll
         self.max_events = max_events
+        self.telemetry_sink_config = telemetry_sink_config
         self._tracker: Optional[Any] = None
         self._watchdog: Optional[Any] = None
         self._last_seen_ts: Optional[float] = None
@@ -107,20 +107,31 @@ class TrackerSession:
 
         tracker_kwargs.setdefault("sampling_interval", self.sampling_interval)
         tracker_kwargs.setdefault("enable_alerts", True)
+        tracker_kwargs.setdefault("telemetry_sink_config", self.telemetry_sink_config)
 
         tracker: Optional[Any] = None
         backend = "gpu"
 
         # Try GPU tracker first, fall back to CPU tracker if initialization fails
-        try:
-            tracker = MemoryTracker(**tracker_kwargs)
-        except Exception as exc:
-            logger.debug("GPU MemoryTracker init failed, falling back to CPU: %s", exc)
+        if MemoryTracker is not None and torch is not None:
+            try:
+                tracker = MemoryTracker(**tracker_kwargs)
+            except Exception as exc:
+                logger.debug(
+                    "GPU MemoryTracker init failed, falling back to CPU: %s", exc
+                )
+        elif MemoryTracker is None:
+            logger.debug("GPU MemoryTracker import unavailable, falling back to CPU.")
+        else:
+            logger.debug("torch is unavailable, falling back to CPU tracking.")
+
+        if tracker is None and CPUMemoryTracker is not None:
             backend = "cpu"
             tracker = CPUMemoryTracker(
                 sampling_interval=tracker_kwargs["sampling_interval"],
                 max_events=self.max_events,
                 enable_alerts=tracker_kwargs.get("enable_alerts", True),
+                telemetry_sink_config=tracker_kwargs.get("telemetry_sink_config"),
             )
 
         if tracker is None:
@@ -195,7 +206,7 @@ class TrackerSession:
             Dict[str, Any], self._tracker.get_memory_timeline(interval=interval)
         )
 
-    def get_telemetry_events(self) -> list[TelemetryEventV2]:
+    def get_telemetry_events(self) -> list[TelemetryEvent]:
         """Return normalized telemetry events from the active tracker session."""
         tracker = self._tracker
         if not tracker:
@@ -224,7 +235,7 @@ class TrackerSession:
         elif hasattr(tracker, "events"):
             raw_events = list(getattr(tracker, "events", []))
 
-        normalized: list[TelemetryEventV2] = []
+        normalized: list[TelemetryEvent] = []
         for raw_event in raw_events:
             timestamp = getattr(raw_event, "timestamp", None)
             if timestamp is None:
@@ -240,13 +251,21 @@ class TrackerSession:
 
             metadata = dict(getattr(raw_event, "metadata", {}) or {})
             metadata.setdefault("backend", backend_name)
+            partial_fields = set(metadata.get("collector_partial_fields", []) or [])
+            session_id = getattr(raw_event, "session_id", None)
+            if session_id is None:
+                session_summary = self.get_session_summary()
+                session_id = (
+                    session_summary.session_id if session_summary is not None else None
+                )
 
             device_total = getattr(raw_event, "device_total", None)
-            if device_total is None:
+            if device_total is None and "device_total_bytes" not in partial_fields:
                 tracker_total = getattr(tracker, "total_memory", None)
                 device_total = int(tracker_total) if tracker_total is not None else None
 
             record = {
+                "session_id": session_id,
                 "timestamp": float(timestamp),
                 "event_type": event_type,
                 "collector": collector,
@@ -276,6 +295,7 @@ class TrackerSession:
                         permissive_legacy=True,
                         default_collector=collector,
                         default_sampling_interval_ms=sampling_interval_ms,
+                        default_session_id=session_id,
                     )
                 )
             except Exception as exc:
@@ -285,6 +305,21 @@ class TrackerSession:
                 )
 
         return normalized
+
+    def get_session_summary(self) -> Optional[SessionSummary]:
+        """Return the underlying tracker session summary when available."""
+        tracker = self._tracker
+        if tracker is None or not hasattr(tracker, "get_session_summary"):
+            return None
+        try:
+            summary = tracker.get_session_summary()
+        except Exception as exc:
+            logger.debug(
+                "TrackerSession.get_session_summary failed: %s",
+                exc,
+            )
+            return None
+        return cast(Optional[SessionSummary], summary)
 
     def get_device_label(self) -> Optional[str]:
         """Return the CUDA device label, if tracking."""

@@ -1,0 +1,62 @@
+{
+  "version": "v0.4",
+  "description": "Baseline metrics for the v0.4 pull-request operability gate, captured from GitHub Actions ubuntu-24.04 with Python 3.10.",
+  "config": {
+    "allocation_kb": 512,
+    "iterations": 5000,
+    "mode": "all",
+    "profile": "pr",
+    "profile_equivalent_hours": 6.0,
+    "retention_validation": {
+      "flush_every_events": 50,
+      "flush_every_seconds": 2.0,
+      "retention_max_files": 2,
+      "retention_max_total_bytes": 24576,
+      "rollover_max_bytes": 8192,
+      "rollover_max_events": 200,
+      "sample_limit": 2048
+    },
+    "runtimes": {
+      "gpumemprof_cpu": {
+        "default_interval": 0.1,
+        "overhead_sample_count": 5000,
+        "soak_sample_count": 216000
+      },
+      "tfmemprof_cpu": {
+        "default_interval": 1.0,
+        "overhead_sample_count": 500,
+        "soak_sample_count": 21600
+      }
+    }
+  },
+  "metrics": {
+    "gpumemprof_cpu.artifact_growth_bytes": 6806920.0,
+    "gpumemprof_cpu.collector_failure_event_count": 0.0,
+    "gpumemprof_cpu.cpu_overhead_pct": 735.28,
+    "gpumemprof_cpu.final_retained_bytes": 48109266.0,
+    "gpumemprof_cpu.final_retained_files": 8.0,
+    "gpumemprof_cpu.history_dropped_alerts": 0.0,
+    "gpumemprof_cpu.history_dropped_events": 206002.0,
+    "gpumemprof_cpu.history_dropped_samples": 0.0,
+    "gpumemprof_cpu.max_rss_delta_bytes": 3854336.0,
+    "gpumemprof_cpu.pruned_bytes": 88508889.0,
+    "gpumemprof_cpu.pruned_segment_count": 14.0,
+    "gpumemprof_cpu.rollover_count": 21.0,
+    "gpumemprof_cpu.rss_growth_per_24h_equiv": 15417344.0,
+    "gpumemprof_cpu.runtime_overhead_pct": 778.51,
+    "tfmemprof_cpu.artifact_growth_bytes": 957833.0,
+    "tfmemprof_cpu.collector_failure_event_count": 0.0,
+    "tfmemprof_cpu.cpu_overhead_pct": 99.82,
+    "tfmemprof_cpu.final_retained_bytes": 17908075.0,
+    "tfmemprof_cpu.final_retained_files": 3.0,
+    "tfmemprof_cpu.history_dropped_alerts": 0.0,
+    "tfmemprof_cpu.history_dropped_events": 11602.0,
+    "tfmemprof_cpu.history_dropped_samples": 11600.0,
+    "tfmemprof_cpu.max_rss_delta_bytes": 20877312.0,
+    "tfmemprof_cpu.pruned_bytes": 0.0,
+    "tfmemprof_cpu.pruned_segment_count": 0.0,
+    "tfmemprof_cpu.rollover_count": 2.0,
+    "tfmemprof_cpu.rss_growth_per_24h_equiv": 83509248.0,
+    "tfmemprof_cpu.runtime_overhead_pct": 107.56
+  }
+}

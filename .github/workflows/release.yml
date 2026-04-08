@@ -42,44 +42,7 @@ jobs:
                   if [ -n "$EXISTING_TAG" ]; then
                       VERSION="${EXISTING_TAG#v}"
                   else
-                      VERSION="$(python3 - <<'PY'
-                  import re
-                  import subprocess
-
-                  tags = subprocess.check_output(
-                      ["git", "tag", "--list", "v*"],
-                      text=True,
-                  ).splitlines()
-
-                  stable_versions = []
-                  prerelease_bases = []
-                  for tag in tags:
-                      stable_match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)", tag)
-                      if stable_match:
-                          stable_versions.append(
-                              tuple(int(part) for part in stable_match.groups())
-                          )
-                          continue
-
-                      prerelease_match = re.fullmatch(
-                          r"v(\d+)\.(\d+)\.(\d+)(?:[A-Za-z0-9.+-].*)",
-                          tag,
-                      )
-                      if prerelease_match:
-                          prerelease_bases.append(
-                              tuple(int(part) for part in prerelease_match.groups())
-                          )
-
-                  if stable_versions:
-                      major, minor, patch = max(stable_versions)
-                      print(f"{major}.{minor}.{patch + 1}")
-                  elif prerelease_bases:
-                      major, minor, patch = max(prerelease_bases)
-                      print(f"{major}.{minor}.{patch}")
-                  else:
-                      print("0.1.0")
-                  PY
-                      )"
+                      VERSION="$(python3 -m stormlog.release_version)"
                       EXISTING_TAG="v${VERSION}"
 
                       if git rev-parse "${EXISTING_TAG}" >/dev/null 2>&1; then

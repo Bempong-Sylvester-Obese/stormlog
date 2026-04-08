@@ -9,6 +9,7 @@ from typing import cast
 import pytest
 
 from stormlog.telemetry import (
+    TelemetryEvent,
     TelemetryEventV2,
     telemetry_event_from_record,
     telemetry_event_to_dict,
@@ -32,7 +33,7 @@ def _make_event(
     total: int | None = None,
     context: str = "",
     metadata: dict[str, object] | None = None,
-) -> TelemetryEventV2:
+) -> TelemetryEvent:
     return telemetry_event_from_record(
         {
             "timestamp": timestamp,
@@ -60,7 +61,7 @@ def _make_event(
     )
 
 
-def _write_csv_events(path: Path, events: list[TelemetryEventV2]) -> None:
+def _write_csv_events(path: Path, events: list[TelemetryEvent]) -> None:
     records = [telemetry_event_to_dict(event) for event in events]
     if not records:
         return
@@ -77,6 +78,11 @@ def _write_csv_events(path: Path, events: list[TelemetryEventV2]) -> None:
                 else:
                     row[key] = str(value)
             writer.writerow(row)
+
+
+def _flatten_result_events(result: object) -> list[TelemetryEvent]:
+    sessions = getattr(result, "sessions")
+    return [event for session in sessions for event in session.events]
 
 
 def test_parse_rank_filter_supports_all_lists_and_ranges() -> None:
@@ -187,7 +193,7 @@ def test_build_distributed_model_includes_earliest_and_most_severe_indicators() 
 
 
 def test_build_distributed_model_surfaces_collective_attribution_signals() -> None:
-    events: list[TelemetryEventV2] = []
+    events: list[TelemetryEvent] = []
     for rank in (0, 1):
         for index in range(12):
             timestamp = 1.0 + index * 0.1 + rank * 0.001
@@ -260,18 +266,96 @@ def test_load_distributed_artifacts_merges_json_and_csv_inputs(
     )
 
     json_path = tmp_path / "events.json"
-    json_path.write_text(
-        json.dumps([telemetry_event_to_dict(json_event)]), encoding="utf-8"
-    )
+    json_record = telemetry_event_to_dict(json_event)
+    json_record.pop("session_id")
+    json_path.write_text(json.dumps([json_record]), encoding="utf-8")
 
     csv_path = tmp_path / "events.csv"
-    _write_csv_events(csv_path, [csv_event])
+    csv_record = telemetry_event_to_dict(csv_event)
+    csv_record.pop("session_id")
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(csv_record.keys()))
+        writer.writeheader()
+        writer.writerow(
+            {
+                key: (
+                    json.dumps(value)
+                    if isinstance(value, dict)
+                    else ("" if value is None else str(value))
+                )
+                for key, value in csv_record.items()
+            }
+        )
 
     result = load_distributed_artifacts([json_path, csv_path])
+    all_events = _flatten_result_events(result)
     assert len(result.events) == 2
+    assert len(result.sessions) == 1
+    assert len(all_events) == 2
+    assert result.selected_session_id == result.sessions[0].summary.session_id
     assert result.warnings == []
     assert str(json_path) in result.sources_loaded
     assert str(csv_path) in result.sources_loaded
+
+
+def test_load_distributed_artifacts_adds_merged_session_for_multi_rank_job_inputs(
+    tmp_path: Path,
+) -> None:
+    first_event = telemetry_event_to_dict(
+        _make_event(
+            timestamp=1.0,
+            rank=0,
+            world_size=2,
+            allocated=10,
+            reserved=12,
+            used=12,
+            total=100,
+        )
+    )
+    first_event["session_id"] = "session-a"
+    second_event = telemetry_event_to_dict(
+        _make_event(
+            timestamp=2.0,
+            rank=1,
+            world_size=2,
+            allocated=20,
+            reserved=24,
+            used=24,
+            total=100,
+        )
+    )
+    second_event["session_id"] = "session-b"
+
+    first_path = tmp_path / "first.json"
+    first_path.write_text(json.dumps([first_event]), encoding="utf-8")
+    second_path = tmp_path / "second.json"
+    second_path.write_text(json.dumps([second_event]), encoding="utf-8")
+
+    result = load_distributed_artifacts([first_path, second_path])
+    assert len(result.events) == 2
+    assert len(result.sessions) == 3
+    assert {session.summary.session_id for session in result.sessions} >= {
+        "session-a",
+        "session-b",
+    }
+    assert result.selected_session_id not in {"session-a", "session-b"}
+
+    selected = next(
+        session
+        for session in result.sessions
+        if session.summary.session_id == result.selected_session_id
+    )
+    assert sorted({event.rank for event in selected.events}) == [0, 1]
+    assert selected.summary.job_id == "job-1"
+    assert selected.summary.world_size == 2
+
+    explicit = load_distributed_artifacts(
+        [first_path, second_path],
+        session_id="session-a",
+    )
+    assert explicit.selected_session_id == "session-a"
+    assert len(explicit.events) == 1
+    assert explicit.events[0].rank == 0
 
 
 def test_load_distributed_artifacts_reads_directory_event_payloads(
@@ -366,8 +450,9 @@ def test_load_distributed_artifacts_merges_mixed_directory_event_and_timeline_ra
     )
 
     result = load_distributed_artifacts([artifact_dir])
+    all_events = _flatten_result_events(result)
 
-    assert sorted({event.rank for event in result.events}) == [0, 1]
+    assert sorted({event.rank for event in all_events}) == [0, 1]
     assert str(events_path) in result.sources_loaded
     assert str(timeline_path) in result.sources_loaded
 
@@ -403,10 +488,11 @@ def test_load_distributed_artifacts_preserves_rank_identity_across_timeline_bund
     )
 
     result = load_distributed_artifacts([rank0_bundle, rank1_bundle])
-    model = build_distributed_model(result.events)
+    all_events = _flatten_result_events(result)
+    model = build_distributed_model(all_events)
 
     rank_to_allocated: dict[int, list[int]] = {}
-    for event in result.events:
+    for event in all_events:
         rank_to_allocated.setdefault(event.rank, []).append(
             event.allocator_allocated_bytes
         )
@@ -451,9 +537,10 @@ def test_load_distributed_artifacts_ignores_local_rank_path_segments_for_inferen
     )
 
     result = load_distributed_artifacts([local_dash_bundle, local_underscore_bundle])
-    model = build_distributed_model(result.events)
+    all_events = _flatten_result_events(result)
+    model = build_distributed_model(all_events)
 
-    assert sorted({event.rank for event in result.events}) == [0, 1]
+    assert sorted({event.rank for event in all_events}) == [0, 1]
     assert model.present_ranks == [0, 1]
     assert model.missing_ranks == []
     assert str(local_dash_timeline) in result.sources_loaded

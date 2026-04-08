@@ -253,15 +253,18 @@ jobs:
                   python3 -m pip install --upgrade pip
                   pip install -e . --no-deps
                   pip install -r requirements-ci-base.txt
+                  pip install tensorflow-cpu==2.15.0
 
             - name: Run memory regression gate
               run: |
                   python3 -m examples.cli.benchmark_harness \
                     --check \
+                    --profile pr \
+                    --mode all \
                     --gate-mode regression \
                     --iterations 5000 \
-                    --baseline docs/benchmarks/v0.3_baseline.json \
-                    --tolerances docs/benchmarks/v0.3_tolerances.json \
+                    --baseline docs/benchmarks/v0.4_baseline.json \
+                    --tolerances docs/benchmarks/v0.4_tolerances.json \
                     --output artifacts/benchmarks/ci_regression.json \
                     --artifact-root artifacts/benchmarks/ci_scenarios
 
@@ -270,6 +273,52 @@ jobs:
               uses: actions/upload-artifact@v4
               with:
                   name: benchmark-regression-artifacts
+                  path: artifacts/benchmarks/
+
+    memory-operability-budget:
+        if: github.event_name == 'schedule'
+        runs-on: ubuntu-24.04
+
+        steps:
+            - uses: actions/checkout@v4
+
+            - name: Set up Python
+              uses: actions/setup-python@v6
+              with:
+                  python-version: "3.10"
+
+            - name: Cache pip dependencies
+              uses: actions/cache@v5
+              with:
+                  path: ~/.cache/pip
+                  key: ${{ runner.os }}-pip-benchmark-budget-${{ hashFiles('pyproject.toml') }}
+                  restore-keys: |
+                      ${{ runner.os }}-pip-benchmark-budget-
+
+            - name: Install benchmark budget dependencies
+              run: |
+                  python3 -m pip install --upgrade pip
+                  pip install -e . --no-deps
+                  pip install -r requirements-ci-base.txt
+                  pip install tensorflow-cpu==2.15.0
+
+            - name: Run nightly operability budget gate
+              run: |
+                  python3 -m examples.cli.benchmark_harness \
+                    --check \
+                    --profile nightly \
+                    --mode all \
+                    --gate-mode budget \
+                    --iterations 5000 \
+                    --budgets docs/benchmarks/v0.4_operating_budget.json \
+                    --output artifacts/benchmarks/ci_nightly_budget.json \
+                    --artifact-root artifacts/benchmarks/ci_nightly_scenarios
+
+            - name: Upload nightly operability artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: benchmark-operability-artifacts
                   path: artifacts/benchmarks/
 
     artifact-cli-smoke:

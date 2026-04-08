@@ -7,12 +7,28 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal, Mapping, Optional
 
+from .session import (
+    SESSION_STATUS_INCOMPLETE,
+    SessionSummary,
+    infer_session_summary_from_events,
+    select_default_loaded_session,
+    sort_session_summaries,
+    stable_legacy_session_id,
+)
+from .telemetry_sink import (
+    read_telemetry_sink_manifest,
+    resolve_telemetry_sink_segment_paths,
+)
+
 SCHEMA_VERSION_V2: Literal[2] = 2
+SCHEMA_VERSION_V3: Literal[3] = 3
+SCHEMA_VERSION_LATEST: Literal[3] = SCHEMA_VERSION_V3
 UNKNOWN_PID = -1
 UNKNOWN_HOST = "unknown"
 
-REQUIRED_V2_FIELDS = (
+REQUIRED_V3_FIELDS = (
     "schema_version",
+    "session_id",
     "timestamp_ns",
     "event_type",
     "collector",
@@ -31,14 +47,20 @@ REQUIRED_V2_FIELDS = (
     "context",
     "metadata",
 )
-OPTIONAL_V2_FIELDS = (
+OPTIONAL_V3_FIELDS = (
     "job_id",
     "rank",
     "local_rank",
     "world_size",
 )
+REQUIRED_V2_FIELDS = tuple(
+    field_name for field_name in REQUIRED_V3_FIELDS if field_name != "session_id"
+)
+OPTIONAL_V2_FIELDS = OPTIONAL_V3_FIELDS
 KNOWN_V2_FIELD_SET = frozenset(REQUIRED_V2_FIELDS + OPTIONAL_V2_FIELDS)
-_DISTRIBUTED_METADATA_KEYS = frozenset(OPTIONAL_V2_FIELDS)
+KNOWN_V3_FIELD_SET = frozenset(REQUIRED_V3_FIELDS + OPTIONAL_V3_FIELDS)
+_DISTRIBUTED_METADATA_KEYS = frozenset(OPTIONAL_V3_FIELDS)
+_SESSION_METADATA_KEYS = frozenset({"session_id"})
 _RANK_ENV_GROUPS = (
     ("RANK", "LOCAL_RANK", "WORLD_SIZE"),
     (
@@ -53,7 +75,7 @@ _JOB_ID_ENV_KEYS = ("TORCHELASTIC_RUN_ID", "SLURM_JOB_ID")
 
 @dataclass
 class TelemetryEventV2:
-    """Canonical telemetry event payload used by tracker exports."""
+    """Legacy v2 telemetry event payload retained for backward-compatible writes/tests."""
 
     schema_version: Literal[2]
     timestamp_ns: int
@@ -80,6 +102,51 @@ class TelemetryEventV2:
 
     def __post_init__(self) -> None:
         validate_telemetry_record(telemetry_event_to_dict(self))
+
+
+@dataclass
+class TelemetryEventV3:
+    """Canonical telemetry event payload used by tracker exports and loaders."""
+
+    schema_version: Literal[3]
+    session_id: str
+    timestamp_ns: int
+    event_type: str
+    collector: str
+    sampling_interval_ms: int
+    pid: int
+    host: str
+    device_id: int
+    allocator_allocated_bytes: int
+    allocator_reserved_bytes: int
+    allocator_active_bytes: Optional[int]
+    allocator_inactive_bytes: Optional[int]
+    allocator_change_bytes: int
+    device_used_bytes: int
+    device_free_bytes: Optional[int]
+    device_total_bytes: Optional[int]
+    context: Optional[str]
+    job_id: Optional[str] = None
+    rank: int = 0
+    local_rank: int = 0
+    world_size: int = 1
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        validate_telemetry_record(telemetry_event_to_dict(self))
+
+
+TelemetryEvent = TelemetryEventV3
+
+
+@dataclass
+class LoadedTelemetrySession:
+    """Grouped telemetry records and lifecycle metadata for one session."""
+
+    summary: SessionSummary
+    events: list[TelemetryEvent]
+    sources_loaded: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
 def _is_int(value: Any) -> bool:
@@ -293,6 +360,33 @@ def _strip_distributed_identity_metadata(metadata: Mapping[str, Any]) -> dict[st
     }
 
 
+def _strip_session_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in metadata.items()
+        if key not in _SESSION_METADATA_KEYS
+    }
+
+
+def _resolve_session_id(
+    record: Mapping[str, Any],
+    *,
+    metadata: Mapping[str, Any] | None = None,
+    default_session_id: str | None = None,
+) -> str:
+    raw_session_id = record.get("session_id")
+    if raw_session_id is None and metadata is not None:
+        raw_session_id = metadata.get("session_id")
+    if isinstance(raw_session_id, str) and raw_session_id.strip():
+        return raw_session_id
+    if default_session_id is not None:
+        return default_session_id
+    timestamp_value = record.get("timestamp_ns", record.get("timestamp", "unknown"))
+    host_value = record.get("host", UNKNOWN_HOST)
+    pid_value = record.get("pid", UNKNOWN_PID)
+    return stable_legacy_session_id(timestamp_value, host_value, pid_value)
+
+
 def _legacy_timestamp_ns(record: Mapping[str, Any]) -> int:
     if "timestamp_ns" in record:
         return _coerce_int(record["timestamp_ns"], "timestamp_ns")
@@ -465,10 +559,38 @@ def _legacy_collector(
     return default_collector
 
 
-def telemetry_event_to_dict(event: TelemetryEventV2) -> dict[str, Any]:
+def telemetry_event_to_dict(
+    event: TelemetryEvent | TelemetryEventV2,
+) -> dict[str, Any]:
     """Serialize a telemetry event to a plain dictionary."""
+    if isinstance(event, TelemetryEventV2):
+        return {
+            "schema_version": event.schema_version,
+            "timestamp_ns": event.timestamp_ns,
+            "event_type": event.event_type,
+            "collector": event.collector,
+            "sampling_interval_ms": event.sampling_interval_ms,
+            "pid": event.pid,
+            "host": event.host,
+            "job_id": event.job_id,
+            "rank": event.rank,
+            "local_rank": event.local_rank,
+            "world_size": event.world_size,
+            "device_id": event.device_id,
+            "allocator_allocated_bytes": event.allocator_allocated_bytes,
+            "allocator_reserved_bytes": event.allocator_reserved_bytes,
+            "allocator_active_bytes": event.allocator_active_bytes,
+            "allocator_inactive_bytes": event.allocator_inactive_bytes,
+            "allocator_change_bytes": event.allocator_change_bytes,
+            "device_used_bytes": event.device_used_bytes,
+            "device_free_bytes": event.device_free_bytes,
+            "device_total_bytes": event.device_total_bytes,
+            "context": event.context,
+            "metadata": dict(event.metadata),
+        }
     return {
         "schema_version": event.schema_version,
+        "session_id": event.session_id,
         "timestamp_ns": event.timestamp_ns,
         "event_type": event.event_type,
         "collector": event.collector,
@@ -494,23 +616,36 @@ def telemetry_event_to_dict(event: TelemetryEventV2) -> dict[str, Any]:
 
 
 def validate_telemetry_record(record: Mapping[str, Any]) -> None:
-    """Validate a v2 telemetry record.
+    """Validate a v2 or v3 telemetry record.
 
     Raises:
         ValueError: if the record is invalid or partial.
     """
 
-    missing = [name for name in REQUIRED_V2_FIELDS if name not in record]
+    schema_version = _coerce_int(record.get("schema_version"), "schema_version")
+    required_fields: tuple[str, ...]
+    known_fields: frozenset[str]
+    if schema_version == SCHEMA_VERSION_V3:
+        required_fields = REQUIRED_V3_FIELDS
+        known_fields = KNOWN_V3_FIELD_SET
+        require_session_id = True
+    elif schema_version == SCHEMA_VERSION_V2:
+        required_fields = REQUIRED_V2_FIELDS
+        known_fields = KNOWN_V2_FIELD_SET
+        require_session_id = False
+    else:
+        raise ValueError(f"Unsupported schema_version: {schema_version}")
+
+    missing = [name for name in required_fields if name not in record]
     if missing:
         raise ValueError(f"Missing required telemetry fields: {', '.join(missing)}")
 
-    unknown = sorted(str(name) for name in record if name not in KNOWN_V2_FIELD_SET)
+    unknown = sorted(str(name) for name in record if name not in known_fields)
     if unknown:
         raise ValueError(f"Unknown telemetry fields: {', '.join(unknown)}")
 
-    schema_version = _coerce_int(record["schema_version"], "schema_version")
-    if schema_version != SCHEMA_VERSION_V2:
-        raise ValueError("schema_version must be 2")
+    if require_session_id:
+        _coerce_required_string(record["session_id"], "session_id")
 
     timestamp_ns = _coerce_int(record["timestamp_ns"], "timestamp_ns")
     if timestamp_ns < 0:
@@ -608,28 +743,40 @@ def telemetry_event_from_record(
     permissive_legacy: bool = True,
     default_collector: str = "legacy.unknown",
     default_sampling_interval_ms: int = 0,
-) -> TelemetryEventV2:
-    """Create a v2 telemetry event from v2 or legacy tracker records."""
+    default_session_id: str | None = None,
+) -> TelemetryEvent:
+    """Create a canonical telemetry event from v3, v2, or legacy records."""
 
     if not isinstance(record, Mapping):
         raise ValueError("record must be a mapping")
 
     if "schema_version" in record:
         schema_version = _coerce_int(record["schema_version"], "schema_version")
-        if schema_version != SCHEMA_VERSION_V2:
+        if schema_version not in {SCHEMA_VERSION_V2, SCHEMA_VERSION_V3}:
             raise ValueError(f"Unsupported schema_version: {schema_version}")
 
-        validate_telemetry_record(record)
-        metadata = _coerce_metadata_dict(record["metadata"])
+        raw_metadata = record.get("metadata", {})
+        metadata = _coerce_metadata_dict(raw_metadata)
         distributed_identity = resolve_distributed_identity(
             job_id=record.get("job_id"),
             rank=record.get("rank"),
             local_rank=record.get("local_rank"),
             world_size=record.get("world_size"),
         )
+        session_id = _resolve_session_id(
+            record,
+            metadata=metadata,
+            default_session_id=default_session_id,
+        )
+        upgraded_record = dict(record)
+        upgraded_record["schema_version"] = SCHEMA_VERSION_V3
+        upgraded_record["session_id"] = session_id
+        validate_telemetry_record(upgraded_record)
+        metadata = _coerce_metadata_dict(upgraded_record["metadata"])
 
-        return TelemetryEventV2(
-            schema_version=SCHEMA_VERSION_V2,
+        return TelemetryEvent(
+            schema_version=SCHEMA_VERSION_V3,
+            session_id=session_id,
             timestamp_ns=_coerce_int(record["timestamp_ns"], "timestamp_ns"),
             event_type=_coerce_required_string(record["event_type"], "event_type"),
             collector=_coerce_required_string(record["collector"], "collector"),
@@ -714,12 +861,19 @@ def telemetry_event_from_record(
         metadata=metadata,
     )
     metadata = _strip_distributed_identity_metadata(metadata)
+    session_id = _resolve_session_id(
+        record,
+        metadata=metadata,
+        default_session_id=default_session_id,
+    )
+    metadata = _strip_session_metadata(metadata)
 
     context_value = record.get("context", record.get("message"))
     context = _coerce_string(context_value, "context", allow_none=True)
 
-    event = TelemetryEventV2(
-        schema_version=SCHEMA_VERSION_V2,
+    event = TelemetryEvent(
+        schema_version=SCHEMA_VERSION_V3,
+        session_id=session_id,
         timestamp_ns=timestamp_ns,
         event_type=event_type,
         collector=collector,
@@ -758,14 +912,107 @@ def _looks_like_event_record(payload: Mapping[str, Any]) -> bool:
     return any(key in payload for key in candidate_keys)
 
 
-def load_telemetry_events(
-    path: str | Path,
-    permissive_legacy: bool = True,
-    events_key: Optional[str] = None,
-) -> list[TelemetryEventV2]:
-    """Load telemetry events from JSON and normalize to v2 payloads."""
+def _group_session_events(
+    events: list[TelemetryEvent],
+) -> dict[str, list[TelemetryEvent]]:
+    grouped: dict[str, list[TelemetryEvent]] = {}
+    for event in events:
+        grouped.setdefault(event.session_id, []).append(event)
+    for session_events in grouped.values():
+        session_events.sort(key=lambda event: event.timestamp_ns)
+    return grouped
 
-    payload_path = Path(path)
+
+def _assemble_loaded_sessions(
+    *,
+    grouped_events: dict[str, list[TelemetryEvent]],
+    manifest_summaries: list[SessionSummary] | None = None,
+    sources_by_session: Mapping[str, set[str]] | None = None,
+    warnings_by_session: Mapping[str, list[str]] | None = None,
+    default_source: str,
+    default_source_path: str,
+) -> list[LoadedTelemetrySession]:
+    summary_by_id = {
+        summary.session_id: summary for summary in (manifest_summaries or [])
+    }
+    session_ids = set(grouped_events) | set(summary_by_id)
+    loaded_sessions: list[LoadedTelemetrySession] = []
+
+    for session_id in session_ids:
+        session_events = list(grouped_events.get(session_id, []))
+        summary = summary_by_id.get(session_id)
+        if summary is None:
+            summary = infer_session_summary_from_events(
+                session_id=session_id,
+                events=session_events,
+                source=default_source,
+                fallback_status=SESSION_STATUS_INCOMPLETE,
+            )
+        loaded_sessions.append(
+            LoadedTelemetrySession(
+                summary=summary,
+                events=session_events,
+                sources_loaded=sorted(
+                    (sources_by_session or {}).get(session_id, {default_source_path})
+                ),
+                warnings=list((warnings_by_session or {}).get(session_id, [])),
+            )
+        )
+
+    ordered_summaries = sort_session_summaries(
+        loaded.summary for loaded in loaded_sessions
+    )
+    order = {
+        summary.session_id: index for index, summary in enumerate(ordered_summaries)
+    }
+    return sorted(
+        loaded_sessions,
+        key=lambda loaded: (
+            order.get(loaded.summary.session_id, 999),
+            loaded.summary.session_id,
+        ),
+    )
+
+
+def _load_jsonl_events(
+    path: Path,
+    *,
+    permissive_legacy: bool,
+    default_session_id: str | None = None,
+) -> list[TelemetryEvent]:
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    output: list[TelemetryEvent] = []
+
+    for index, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            if index == len(lines) and not line.endswith("\n"):
+                break
+            raise ValueError(
+                f"Malformed telemetry JSONL record in {path} at line {index}"
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise ValueError(
+                f"Telemetry record in {path} at line {index} must be an object"
+            )
+        output.append(
+            telemetry_event_from_record(
+                payload,
+                permissive_legacy=permissive_legacy,
+                default_session_id=default_session_id,
+            )
+        )
+    return output
+
+
+def _load_json_records(
+    payload_path: Path,
+    *,
+    events_key: Optional[str],
+) -> list[Mapping[str, Any]]:
     with payload_path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
 
@@ -788,22 +1035,122 @@ def load_telemetry_events(
     else:
         raise ValueError("Telemetry payload must be a JSON object or array")
 
-    output: list[TelemetryEventV2] = []
+    normalized: list[Mapping[str, Any]] = []
     for index, record in enumerate(records):
         if not isinstance(record, Mapping):
             raise ValueError(f"Event at index {index} must be an object")
-        event = telemetry_event_from_record(
+        normalized.append(record)
+    return normalized
+
+
+def load_telemetry_sessions(
+    path: str | Path,
+    permissive_legacy: bool = True,
+    events_key: Optional[str] = None,
+) -> list[LoadedTelemetrySession]:
+    """Load grouped telemetry sessions from JSON, JSONL, or sink directories."""
+
+    payload_path = Path(path)
+    default_source_path = str(payload_path.resolve())
+    default_source = f"artifact:{payload_path.name or payload_path.resolve()}"
+
+    manifest = read_telemetry_sink_manifest(payload_path)
+    segment_paths = resolve_telemetry_sink_segment_paths(payload_path)
+    if segment_paths:
+        grouped_events: dict[str, list[TelemetryEvent]] = {}
+        sources_by_session: dict[str, set[str]] = {}
+        segment_session_ids = {
+            segment.filename: segment.session_id
+            for segment in (manifest.segments if manifest is not None else [])
+        }
+        fallback_session_id = stable_legacy_session_id(default_source_path, "sink")
+        for segment_path in segment_paths:
+            hint_session_id = (
+                segment_session_ids.get(segment_path.name) or fallback_session_id
+            )
+            segment_events = _load_jsonl_events(
+                segment_path,
+                permissive_legacy=permissive_legacy,
+                default_session_id=hint_session_id,
+            )
+            session_groups = _group_session_events(segment_events)
+            for session_id, events in session_groups.items():
+                grouped_events.setdefault(session_id, []).extend(events)
+                sources_by_session.setdefault(session_id, set()).add(str(segment_path))
+            if not segment_events and hint_session_id:
+                sources_by_session.setdefault(hint_session_id, set()).add(
+                    str(segment_path)
+                )
+        for events in grouped_events.values():
+            events.sort(key=lambda event: event.timestamp_ns)
+        return _assemble_loaded_sessions(
+            grouped_events=grouped_events,
+            manifest_summaries=manifest.sessions if manifest is not None else None,
+            sources_by_session=sources_by_session,
+            default_source=default_source,
+            default_source_path=default_source_path,
+        )
+
+    records = _load_json_records(payload_path, events_key=events_key)
+    default_session_id = stable_legacy_session_id(
+        default_source_path, events_key or "json"
+    )
+    loaded_events: list[TelemetryEvent] = [
+        telemetry_event_from_record(
             record,
             permissive_legacy=permissive_legacy,
+            default_session_id=default_session_id,
         )
-        output.append(event)
+        for record in records
+    ]
+    grouped_events = _group_session_events(loaded_events)
+    sources_by_session = {
+        session_id: {default_source_path} for session_id in grouped_events
+    }
+    return _assemble_loaded_sessions(
+        grouped_events=grouped_events,
+        manifest_summaries=None,
+        sources_by_session=sources_by_session,
+        default_source=default_source,
+        default_source_path=default_source_path,
+    )
 
-    return output
+
+def load_telemetry_events(
+    path: str | Path,
+    permissive_legacy: bool = True,
+    events_key: Optional[str] = None,
+    session_id: str | None = None,
+) -> list[TelemetryEvent]:
+    """Load telemetry events from JSON and return the selected session."""
+
+    sessions = load_telemetry_sessions(
+        path,
+        permissive_legacy=permissive_legacy,
+        events_key=events_key,
+    )
+    if not sessions:
+        return []
+
+    if session_id is not None:
+        for loaded in sessions:
+            if loaded.summary.session_id == session_id:
+                return list(loaded.events)
+        raise ValueError(f"Requested session_id not found: {session_id}")
+
+    selected = select_default_loaded_session(sessions)
+    return list(selected.events) if selected is not None else []
 
 
 __all__ = [
     "SCHEMA_VERSION_V2",
+    "SCHEMA_VERSION_V3",
+    "SCHEMA_VERSION_LATEST",
+    "LoadedTelemetrySession",
+    "TelemetryEvent",
     "TelemetryEventV2",
+    "TelemetryEventV3",
+    "load_telemetry_sessions",
     "telemetry_event_from_record",
     "telemetry_event_to_dict",
     "validate_telemetry_record",

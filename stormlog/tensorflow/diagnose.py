@@ -7,11 +7,21 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from stormlog.session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INCOMPLETE,
+    SessionSummary,
+    create_session_summary,
+    now_ns,
+    session_summary_to_dict,
+    update_session_summary,
+)
+
 from .utils import get_backend_info, get_gpu_info, get_system_info
 
 # Risk thresholds (same semantics as Stormlog)
 HIGH_UTILIZATION_RATIO = 0.85
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2
 
 
 def _default_str(obj: Any) -> str:
@@ -55,6 +65,35 @@ def _create_artifact_dir(output: Optional[str], prefix: str) -> Path:
             return artifact_dir
         except FileExistsError:
             suffix += 1
+
+
+def _write_manifest(
+    artifact_dir: Path,
+    *,
+    command_line: str,
+    files_written: list[str],
+    exit_code: int,
+    risk_detected: bool,
+    session_summary: SessionSummary,
+    error: str | None = None,
+) -> None:
+    manifest = {
+        "schema_version": MANIFEST_VERSION,
+        "version": MANIFEST_VERSION,
+        "created_iso": datetime.utcnow().isoformat() + "Z",
+        "command_line": command_line,
+        "files": files_written,
+        "exit_code": exit_code,
+        "risk_detected": risk_detected,
+        "session_id": session_summary.session_id,
+        "session_status": session_summary.status,
+        "session": session_summary_to_dict(session_summary),
+    }
+    if error:
+        manifest["error"] = error
+    manifest_path = artifact_dir / "manifest.json"
+    with open(manifest_path, "w") as f:
+        json.dump(manifest, f, indent=2)
 
 
 def collect_environment(device: Optional[str] = None) -> Dict[str, Any]:
@@ -218,6 +257,10 @@ def run_diagnose(
         print(f"Error: Cannot create output directory {target}: {e}", file=sys.stderr)
         raise
 
+    session_summary = create_session_summary(
+        source="tfmemprof diagnose",
+        started_at_ns=now_ns(),
+    )
     files_written: List[str] = []
     risk_detected = False
     exit_code = 0
@@ -247,35 +290,43 @@ def run_diagnose(
         exit_code = 2 if risk_detected else 0
 
         # 4. Manifest
+        session_summary = update_session_summary(
+            session_summary,
+            status=SESSION_STATUS_COMPLETED,
+            ended_at_ns=now_ns(),
+        )
         files_written.append("manifest.json")
-        manifest = {
-            "version": MANIFEST_VERSION,
-            "created_iso": datetime.utcnow().isoformat() + "Z",
-            "command_line": command_line,
-            "files": files_written,
-            "exit_code": exit_code,
-            "risk_detected": risk_detected,
-        }
-        manifest_path = artifact_dir / "manifest.json"
-        with open(manifest_path, "w") as f:
-            json.dump(manifest, f, indent=2)
+        _write_manifest(
+            artifact_dir,
+            command_line=command_line,
+            files_written=files_written,
+            exit_code=exit_code,
+            risk_detected=risk_detected,
+            session_summary=session_summary,
+        )
     except OSError as e:
         print(f"Error: Failed to write diagnostic artifact: {e}", file=sys.stderr)
         exit_code = 1
         if not files_written:
             raise
-        manifest = {
-            "version": MANIFEST_VERSION,
-            "created_iso": datetime.utcnow().isoformat() + "Z",
-            "command_line": command_line,
-            "files": files_written,
-            "exit_code": 1,
-            "risk_detected": False,
-            "error": str(e),
-        }
+        session_summary = update_session_summary(
+            session_summary,
+            status=SESSION_STATUS_INCOMPLETE,
+            ended_at_ns=now_ns(),
+        )
         try:
-            with open(artifact_dir / "manifest.json", "w") as f:
-                json.dump(manifest, f, indent=2)
+            files_with_manifest = list(files_written)
+            if "manifest.json" not in files_with_manifest:
+                files_with_manifest.append("manifest.json")
+            _write_manifest(
+                artifact_dir,
+                command_line=command_line,
+                files_written=files_with_manifest,
+                exit_code=1,
+                risk_detected=risk_detected,
+                session_summary=session_summary,
+                error=str(e),
+            )
         except OSError:
             pass
 

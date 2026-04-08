@@ -127,8 +127,38 @@ def test_write_cuda_snapshot_artifacts_writes_expected_files(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     snapshot = {
-        "segments": [],
-        "device_traces": [[]],
+        "segments": [
+            {
+                "address": 4096,
+                "segment_type": "large",
+                "total_size": 128,
+                "allocated_size": 64,
+                "active_size": 64,
+                "blocks": [
+                    {
+                        "address": 8192,
+                        "size": 64,
+                        "state": "active_allocated",
+                        "frames": [
+                            {"name": "forward", "filename": "linear.py", "line": 12}
+                        ],
+                    }
+                ],
+            }
+        ],
+        "device_traces": [
+            [
+                {
+                    "action": "alloc",
+                    "addr": 8192,
+                    "size": 64,
+                    "time_us": 100,
+                    "frames": [
+                        {"name": "forward", "filename": "linear.py", "line": 12}
+                    ],
+                }
+            ]
+        ],
     }
     tensor_index = {
         "device_index": 0,
@@ -164,10 +194,23 @@ def test_write_cuda_snapshot_artifacts_writes_expected_files(
     assert native_debug.SEGMENT_SUMMARY_FILENAME in files_written
     assert native_debug.TRACE_SUMMARY_FILENAME in files_written
     assert native_debug.TRACE_HTML_FILENAME in files_written
+    assert native_debug.TRACE_HTML_ANNOTATED_FILENAME in files_written
     assert native_debug.DEBUG_METADATA_FILENAME in files_written
     assert (tmp_path / native_debug.TRACE_HTML_FILENAME).read_text(
         encoding="utf-8"
     ) == "<html>allocator-state-history</html>"
+    metadata = (tmp_path / native_debug.DEBUG_METADATA_FILENAME).read_text(
+        encoding="utf-8"
+    )
+    annotated_html = (tmp_path / native_debug.TRACE_HTML_ANNOTATED_FILENAME).read_text(
+        encoding="utf-8"
+    )
+    assert (tmp_path / native_debug.TRACE_HTML_ANNOTATED_FILENAME).exists()
+    assert '"annotated_trace_html_written": true' in metadata
+    assert "Timeline Trace" in annotated_html
+    assert "Segment Explorer" in annotated_html
+    assert "Active Memory Table" in annotated_html
+    assert "model.linear.weight" in annotated_html
 
 
 def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
@@ -181,14 +224,18 @@ def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
         "collect",
         lambda: calls.append(("gc.collect", None)),
     )
+
+    def _snapshot(device: object = None) -> dict[str, object]:
+        calls.append(("snapshot", device))
+        return {"segments": [], "device_traces": []}
+
     monkeypatch.setattr(
         native_debug,
         "torch",
         SimpleNamespace(
             cuda=SimpleNamespace(
                 memory=SimpleNamespace(
-                    _snapshot=lambda device=None: calls.append(("snapshot", device))
-                    or {"segments": [], "device_traces": []}
+                    _snapshot=_snapshot,
                 )
             )
         ),
@@ -229,3 +276,42 @@ def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
         ("snapshot", 0),
         ("tensor_index", (0, True)),
     ]
+
+
+def test_write_cuda_snapshot_artifacts_writes_annotated_html_when_trace_plot_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    snapshot = {
+        "segments": [],
+        "device_traces": [[]],
+    }
+    tensor_index = {
+        "device_index": 0,
+        "storage_pointer_count": 0,
+        "attributed_storage_pointers": [],
+    }
+
+    fake_memory_viz = SimpleNamespace(
+        segsum=lambda data: "segment-summary",
+        trace=lambda data: "trace-summary",
+        trace_plot=lambda data, device=None: (_ for _ in ()).throw(
+            RuntimeError("trace_plot boom")
+        ),
+    )
+    monkeypatch.setattr(native_debug, "_load_memory_viz", lambda: fake_memory_viz)
+
+    files_written = native_debug.write_cuda_snapshot_artifacts(
+        tmp_path,
+        snapshot,
+        tensor_index,
+        history_recorded=True,
+        device=0,
+    )
+
+    assert native_debug.TRACE_HTML_FILENAME not in files_written
+    assert native_debug.TRACE_HTML_ANNOTATED_FILENAME in files_written
+    metadata = (tmp_path / native_debug.DEBUG_METADATA_FILENAME).read_text(
+        encoding="utf-8"
+    )
+    assert "trace_plot boom" in metadata
+    assert '"annotated_trace_html_written": true' in metadata
