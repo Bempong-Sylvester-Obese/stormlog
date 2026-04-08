@@ -518,7 +518,7 @@ html,body{height:100%;background:var(--bg);color:var(--text);
     <button class="tab-btn" onclick="switchTab('tab-segments', this)">Segment Explorer</button>
     <button class="tab-btn" onclick="switchTab('tab-active', this)">Active Memory Table</button>
   </div>
-  
+
   <div id="tab-timeline" class="tab-content active">
     <div class="timeline-layout">
       <div class="chart-area">
@@ -888,42 +888,42 @@ function buildSegments() {
     segPane.innerHTML = '<div style="color:var(--text2)">No segment data available in snapshot.</div>';
     return;
   }
-  
+
   const pools = { 'large': [], 'small': [], 'unknown': [] };
   segments.forEach(s => {
     if(pools[s.segment_type]) pools[s.segment_type].push(s);
     else pools['unknown'].push(s);
   });
-  
+
   let html = '';
   Object.entries(pools).forEach(([type, segs]) => {
     if (!segs.length) return;
-    
+
     html += `<div class="pool-title">
         <span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:var(--accent)"></span>
         ${type.toUpperCase()} POOL
         <span class="active-badge">${segs.length} Segments</span>
       </div>`;
-    
+
     segs.sort((a,b) => b.total_size - a.total_size).forEach(s => {
       const total = s.total_size;
       const allocated = s.allocated_size;
       const active = s.active_size;
       const pctAlloc = (allocated / total * 100).toFixed(1);
-      
+
       html += `<div style="margin-bottom:24px">`;
       html += `<div class="seg-meta">
         <span><b>0x${s.address.toString(16)}</b> — ${s.total_size_h} Total</span>
         <span>${fmtSize(allocated)} Alloc (${pctAlloc}%) · ${fmtSize(active)} Active</span>
       </div>`;
-      
+
       html += `<div class="segment-bar">`;
       s.blocks.forEach(b => {
         const pct = b.size / total * 100;
         let color = 'var(--border)'; // free
         if (b.state === 'active_allocated') color = colorFor(b.name);
         else if (b.state.includes('inactive')) color = '#d29922'; // yellow for fragmented
-        
+
         const title = `${b.state} | ${b.size_h} | ${b.name || ''}`;
         html += `<div class="seg-block" style="width:${pct}%; background:${color}" title="${title}"></div>`;
       });
@@ -940,12 +940,12 @@ const searchInput = document.getElementById('active-search');
 function renderActiveTable(query = '') {
   const activeTable = DATA.active_table || [];
   const q = query.toLowerCase();
-  
+
   let html = '';
-  const filtered = activeTable.filter(r => 
+  const filtered = activeTable.filter(r =>
     !q || r.name.toLowerCase().includes(q) || (r.dtype && r.dtype.toLowerCase().includes(q))
   );
-  
+
   filtered.forEach(r => {
     html += `<tr>
       <td><div class="t-name" style="color:${colorFor(r.name)}">${r.name}</div></td>
