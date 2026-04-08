@@ -2,7 +2,7 @@
 
 # Production Cookbook
 
-This cookbook packages Stormlog's profiling, tracking, diagnose, and TUI flows
+This cookbook packages Stormlog's profiling, tracking, diagnostic, and TUI flows
 into task-oriented recipes for production-facing work.
 
 Use these pages when you already know the tool is installed and want the
