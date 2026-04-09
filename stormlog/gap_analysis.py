@@ -7,6 +7,7 @@ from typing import Any, Callable, List, Mapping, Sequence
 import numpy as np
 from scipy import stats
 
+from .derived_fields import compute_event_fields
 from .telemetry import TelemetryEventV2
 
 _LOGGER = logging.getLogger(__name__)
@@ -198,10 +199,10 @@ def _detect_gap_fragmentation_pattern(
     """Detect fragmentation-like behaviour: high reserved-allocated ratio."""
     frag_ratios: List[float] = []
     for event in events:
-        reserved = event.allocator_reserved_bytes
-        allocated = event.allocator_allocated_bytes
-        if reserved > 0:
-            frag_ratios.append((reserved - allocated) / reserved)
+        derived = compute_event_fields(event)
+        frag = derived.get("fragmentation_ratio")
+        if frag is not None:
+            frag_ratios.append(frag)
 
     if not frag_ratios:
         return []

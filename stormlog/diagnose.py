@@ -13,6 +13,7 @@ from .cuda_native_debug import (
     cuda_memory_history,
     cuda_memory_history_supported,
 )
+from .derived_fields import compute_event_fields
 from .device_collectors import (
     build_device_memory_collector,
     detect_torch_runtime_backend,
@@ -229,7 +230,18 @@ def build_diagnostic_summary(
             total = sample.total_bytes or 0
             peak = max(allocated, reserved)
 
-    utilization_ratio = float(allocated / total) if total else 0.0
+    _synthetic_event = {
+        "allocator_allocated_bytes": allocated,
+        "allocator_reserved_bytes": reserved,
+        "device_total_bytes": total if total else None,
+        "collector": None,
+    }
+    _derived = compute_event_fields(_synthetic_event)
+    utilization_ratio = _derived["utilization_ratio"] or 0.0
+    hidden_gap_bytes: int = _derived["hidden_gap_bytes"]
+    # fragmentation_ratio comes from check_memory_fragmentation(), which uses
+    # torch.cuda.memory_stats() — a richer source than the simple
+    # (reserved - allocated) / reserved approximation in compute_event_fields.
     fragmentation_ratio = float(frag_info.get("fragmentation_ratio", 0))
     num_ooms = 0
     if (
@@ -259,6 +271,7 @@ def build_diagnostic_summary(
         "reserved_bytes": reserved,
         "peak_bytes": peak,
         "total_bytes": total,
+        "hidden_gap_bytes": hidden_gap_bytes,
         "utilization_ratio": utilization_ratio,
         "fragmentation_ratio": fragmentation_ratio,
         "num_ooms": num_ooms,

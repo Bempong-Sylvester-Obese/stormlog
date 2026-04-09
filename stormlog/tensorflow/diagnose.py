@@ -7,6 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+from stormlog.derived_fields import compute_event_fields
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -201,15 +202,25 @@ def build_diagnostic_summary(
         total_memory_mb = d.get("total_memory_mb")
         if isinstance(total_memory_mb, (int, float)) and total_memory_mb > 0:
             total_bytes = int(total_memory_mb * 1024 * 1024)
-            utilization_ratio = float(current_mb / total_memory_mb)
         else:
             total_bytes = 0
-            utilization_ratio = 0.0
     else:
         allocated = 0
         peak = 0
         total_bytes = 0
-        utilization_ratio = 0.0
+
+    # TensorFlow aliases reserved == allocated (no separate reserved counter).
+    # compute_event_fields gives us utilization_ratio and hidden_gap_bytes;
+    # fragmentation_ratio is always None here (TF does not expose it).
+    _synthetic_event = {
+        "allocator_allocated_bytes": allocated,
+        "allocator_reserved_bytes": allocated,
+        "device_total_bytes": total_bytes if total_bytes else None,
+        "collector": None,
+    }
+    _derived = compute_event_fields(_synthetic_event)
+    utilization_ratio = _derived["utilization_ratio"] or 0.0
+    hidden_gap_bytes: int = _derived["hidden_gap_bytes"]  # always 0 for TF
 
     # Risk flags (no OOM/fragmentation from TF API)
     oom_occurred = num_ooms > 0
@@ -222,9 +233,10 @@ def build_diagnostic_summary(
     summary: Dict[str, Any] = {
         "backend": backend,
         "allocated_bytes": allocated,
-        "reserved_bytes": allocated,
+        "reserved_bytes": allocated,  # TF: no separate reserved counter
         "peak_bytes": peak,
         "total_bytes": total_bytes,
+        "hidden_gap_bytes": hidden_gap_bytes,
         "utilization_ratio": utilization_ratio,
         "fragmentation_ratio": fragmentation_ratio,
         "num_ooms": num_ooms,
