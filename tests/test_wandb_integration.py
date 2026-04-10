@@ -1,0 +1,349 @@
+from __future__ import annotations
+
+import builtins
+import json
+import sys
+from argparse import Namespace
+from pathlib import Path
+from types import ModuleType
+from typing import Any
+
+import pytest
+
+from stormlog.session import create_session_summary
+from stormlog.wandb_integration import (
+    ensure_wandb_available,
+    export_diagnose_bundle_to_wandb,
+    export_tracking_run_to_wandb,
+    wandb_config_from_namespace,
+)
+
+
+class _FakeArtifact:
+    def __init__(self, name: str, type: str) -> None:
+        self.name = name
+        self.type = type
+        self.files: list[tuple[str, str | None]] = []
+        self.directories: list[tuple[str, str | None]] = []
+
+    def add_file(self, local_path: str, name: str | None = None) -> None:
+        self.files.append((local_path, name))
+
+    def add_dir(self, local_path: str, name: str | None = None) -> None:
+        self.directories.append((local_path, name))
+
+
+class _FakeTable:
+    def __init__(self, *, columns: list[str], data: list[list[Any]]) -> None:
+        self.columns = columns
+        self.data = data
+
+
+class _FakeHtml:
+    def __init__(self, html: str) -> None:
+        self.html = html
+
+
+class _FakeRun:
+    def __init__(self, owner: "_FakeWandbModule") -> None:
+        self.owner = owner
+        self.summary: dict[str, Any] = {}
+        self.logged: list[dict[str, Any]] = []
+        self.artifacts: list[_FakeArtifact] = []
+        self.finished = False
+
+    def log(self, payload: dict[str, Any]) -> None:
+        self.logged.append(payload)
+
+    def log_artifact(self, artifact: _FakeArtifact) -> None:
+        self.artifacts.append(artifact)
+
+    def finish(self) -> None:
+        self.finished = True
+        self.owner.run = None
+
+
+class _FakeWandbModule(ModuleType):
+    def __init__(self) -> None:
+        super().__init__("wandb")
+        self.run: _FakeRun | None = None
+        self.init_calls: list[dict[str, Any]] = []
+        self.created_runs: list[_FakeRun] = []
+        self.Artifact = _FakeArtifact
+        self.Table = _FakeTable
+        self.Html = _FakeHtml
+
+    def init(self, **kwargs: Any) -> _FakeRun:
+        self.init_calls.append(kwargs)
+        run = _FakeRun(self)
+        self.created_runs.append(run)
+        self.run = run
+        return run
+
+
+def test_wandb_config_from_namespace_collects_explicit_values() -> None:
+    config = wandb_config_from_namespace(
+        Namespace(
+            wandb=True,
+            wandb_project="stormlog-tests",
+            wandb_entity="team",
+            wandb_mode="offline",
+            wandb_run_id="run-123",
+            wandb_name="track smoke",
+            wandb_group="job-42",
+            wandb_job_type="stormlog-track",
+            wandb_log_artifacts=True,
+            wandb_log_attribution=True,
+        )
+    )
+
+    assert config.enabled is True
+    assert config.project == "stormlog-tests"
+    assert config.entity == "team"
+    assert config.mode == "offline"
+    assert config.run_id == "run-123"
+    assert config.run_name == "track smoke"
+    assert config.group == "job-42"
+    assert config.job_type == "stormlog-track"
+    assert config.log_tables is True
+    assert config.log_artifacts is True
+    assert config.log_attribution is True
+
+
+def test_ensure_wandb_available_reports_optional_dependency_guidance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_import = builtins.__import__
+
+    def _blocked_import(
+        name: str,
+        globals: dict[str, object] | None = None,
+        locals: dict[str, object] | None = None,
+        fromlist: tuple[str, ...] = (),
+        level: int = 0,
+    ) -> Any:
+        if name == "wandb" or name.startswith("wandb."):
+            raise ModuleNotFoundError("No module named 'wandb'", name="wandb")
+        return original_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", _blocked_import)
+
+    with pytest.raises(ImportError, match="stormlog\\[wandb\\]"):
+        ensure_wandb_available(wandb_config_from_namespace(Namespace(wandb=True)))
+
+
+def test_export_tracking_run_logs_metrics_tables_and_artifacts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+
+    output_path = tmp_path / "track.json"
+    output_path.write_text("{}", encoding="utf-8")
+
+    sink_dir = tmp_path / "sink"
+    sink_dir.mkdir()
+    (sink_dir / "manifest.json").write_text("{}", encoding="utf-8")
+
+    oom_dir = tmp_path / "oom"
+    oom_dir.mkdir()
+    (oom_dir / "cuda_allocator_state_history_annotated.html").write_text(
+        "<html><body>stormlog attribution</body></html>",
+        encoding="utf-8",
+    )
+    (oom_dir / "cuda_tensor_attribution.json").write_text(
+        json.dumps(
+            {
+                "attributed_storage_pointers": [
+                    {
+                        "storage_ptr": "0x1",
+                        "names": ["model.layer.weight"],
+                        "tensor_count": 1,
+                        "tensors": [
+                            {
+                                "shape": [4, 4],
+                                "dtype": "torch.float32",
+                                "size_bytes": 64,
+                            }
+                        ],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    session_summary = create_session_summary(
+        source="stormlog.tracker",
+        session_id="session-12345678",
+        job_id="train-42",
+        rank=2,
+        local_rank=0,
+        world_size=8,
+    )
+    config = wandb_config_from_namespace(
+        Namespace(
+            wandb=True,
+            wandb_project="stormlog-tests",
+            wandb_group=None,
+            wandb_job_type=None,
+            wandb_log_artifacts=True,
+            wandb_log_attribution=True,
+        )
+    )
+
+    export_tracking_run_to_wandb(
+        config,
+        command_name="stormlog-track",
+        session_summary=session_summary,
+        stats={
+            "backend": "cuda",
+            "peak_memory": 4096,
+            "total_events": 3,
+            "alert_count": 1,
+            "tracking_duration_seconds": 5.0,
+            "collector_health_status": "healthy",
+            "history_dropped_events": 0,
+        },
+        events=[
+            {
+                "timestamp": 10.0,
+                "event_type": "warning",
+                "context": "memory high",
+                "memory_allocated": 2048,
+                "memory_reserved": 4096,
+                "memory_change": 512,
+                "job_id": "train-42",
+                "rank": 2,
+            }
+        ],
+        output_path=output_path,
+        telemetry_sink_dir=sink_dir,
+        oom_dump_path=oom_dir,
+    )
+
+    assert fake_wandb.init_calls
+    assert fake_wandb.init_calls[0]["project"] == "stormlog-tests"
+    assert fake_wandb.init_calls[0]["group"] == "train-42"
+    assert fake_wandb.init_calls[0]["job_type"] == "stormlog-track"
+
+    run = fake_wandb.created_runs[0]
+    assert run.finished is True
+    assert run.summary["stormlog_session_id"] == "session-12345678"
+    assert run.summary["stormlog_backend"] == "cuda"
+    assert any("stormlog_peak_memory_bytes" in payload for payload in run.logged)
+    assert any("stormlog_alerts" in payload for payload in run.logged)
+    assert any("stormlog_attribution_html" in payload for payload in run.logged)
+    assert any("stormlog_tensor_attribution" in payload for payload in run.logged)
+    assert len(run.artifacts) == 3
+
+
+def test_export_diagnose_bundle_logs_summary_and_artifact(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+
+    artifact_dir = tmp_path / "stormlog-diagnose"
+    artifact_dir.mkdir()
+    session_summary = create_session_summary(
+        source="gpumemprof diagnose",
+        session_id="diag-12345678",
+        job_id="job-7",
+    )
+    (artifact_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "session": {
+                    "session_id": session_summary.session_id,
+                    "status": session_summary.status,
+                    "started_at_ns": session_summary.started_at_ns,
+                    "ended_at_ns": session_summary.ended_at_ns,
+                    "host": session_summary.host,
+                    "pid": session_summary.pid,
+                    "job_id": session_summary.job_id,
+                    "rank": session_summary.rank,
+                    "local_rank": session_summary.local_rank,
+                    "world_size": session_summary.world_size,
+                    "source": session_summary.source,
+                },
+                "risk_detected": True,
+                "exit_code": 2,
+                "native_history_enabled": True,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "diagnostic_summary.json").write_text(
+        json.dumps(
+            {
+                "allocated_bytes": 1024,
+                "reserved_bytes": 2048,
+                "peak_bytes": 4096,
+                "total_bytes": 8192,
+                "utilization_ratio": 0.8,
+                "fragmentation_ratio": 0.2,
+                "num_ooms": 1,
+                "risk_flags": {
+                    "oom_occurred": True,
+                    "high_utilization": False,
+                    "fragmentation_warning": False,
+                },
+                "suggestions": ["Reduce batch size"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (artifact_dir / "cuda_allocator_state_history_annotated.html").write_text(
+        "<html><body>attribution</body></html>",
+        encoding="utf-8",
+    )
+    (artifact_dir / "cuda_tensor_attribution.json").write_text(
+        json.dumps({"attributed_storage_pointers": []}),
+        encoding="utf-8",
+    )
+
+    config = wandb_config_from_namespace(
+        Namespace(
+            wandb=True,
+            wandb_project="stormlog-diag",
+            wandb_log_artifacts=True,
+            wandb_log_attribution=True,
+        )
+    )
+
+    export_diagnose_bundle_to_wandb(
+        config,
+        command_name="stormlog-diagnose",
+        artifact_dir=artifact_dir,
+    )
+
+    run = fake_wandb.created_runs[0]
+    assert run.finished is True
+    assert run.summary["stormlog_artifact_dir"] == "stormlog-diagnose"
+    assert run.summary["stormlog_session_id"] == "diag-12345678"
+    assert any("stormlog_allocated_bytes" in payload for payload in run.logged)
+    assert any("stormlog_diagnostic_suggestions" in payload for payload in run.logged)
+    assert any("stormlog_attribution_html" in payload for payload in run.logged)
+    assert len(run.artifacts) == 1
+
+
+def test_export_uses_active_wandb_run_without_creating_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_wandb = _FakeWandbModule()
+    active_run = _FakeRun(fake_wandb)
+    fake_wandb.run = active_run
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+
+    export_tracking_run_to_wandb(
+        wandb_config_from_namespace(Namespace(wandb=True)),
+        command_name="stormlog-track",
+        session_summary=create_session_summary(source="stormlog.tracker"),
+        stats={"peak_memory": 128},
+        events=[],
+    )
+
+    assert fake_wandb.init_calls == []
+    assert active_run.finished is False
+    assert any("stormlog_peak_memory_bytes" in payload for payload in active_run.logged)
