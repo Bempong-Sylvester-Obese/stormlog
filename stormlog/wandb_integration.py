@@ -58,6 +58,67 @@ def wandb_config_from_namespace(args: Any) -> WandbExportConfig:
     )
 
 
+def add_wandb_arguments(parser: Any) -> None:
+    """Attach shared optional W&B flags to a CLI parser."""
+    parser.add_argument(
+        "--wandb",
+        action="store_true",
+        help="Log Stormlog summaries to Weights & Biases",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        type=str,
+        default=None,
+        help="W&B project name (default: stormlog)",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        type=str,
+        default=None,
+        help="W&B entity or team name",
+    )
+    parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline"],
+        default=None,
+        help="W&B logging mode (default: online)",
+    )
+    parser.add_argument(
+        "--wandb-run-id",
+        type=str,
+        default=None,
+        help="Existing W&B run id to resume or attach to",
+    )
+    parser.add_argument(
+        "--wandb-name",
+        type=str,
+        default=None,
+        help="Explicit W&B run name",
+    )
+    parser.add_argument(
+        "--wandb-group",
+        type=str,
+        default=None,
+        help="W&B group override (default: Stormlog job id)",
+    )
+    parser.add_argument(
+        "--wandb-job-type",
+        type=str,
+        default=None,
+        help="W&B job type override (default: Stormlog command name)",
+    )
+    parser.add_argument(
+        "--wandb-log-artifacts",
+        action="store_true",
+        help="Upload Stormlog output bundles as W&B artifacts",
+    )
+    parser.add_argument(
+        "--wandb-log-attribution",
+        action="store_true",
+        help="Log attribution HTML and top offenders to W&B when available",
+    )
+
+
 def ensure_wandb_available(config: WandbExportConfig) -> None:
     """Fail fast when the W&B feature is enabled without dependencies installed."""
     if config.enabled:
@@ -616,6 +677,7 @@ def _read_json_if_exists(path: Path) -> dict[str, Any] | None:
 __all__ = [
     "WANDB_INSTALL_GUIDANCE",
     "WandbExportConfig",
+    "add_wandb_arguments",
     "ensure_wandb_available",
     "export_diagnose_bundle_to_wandb",
     "export_tracking_run_to_wandb",

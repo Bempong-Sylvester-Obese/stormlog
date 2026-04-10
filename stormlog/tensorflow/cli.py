@@ -22,6 +22,13 @@ except ImportError:
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
+from stormlog.wandb_integration import (
+    add_wandb_arguments,
+    ensure_wandb_available,
+    export_diagnose_bundle_to_wandb,
+    export_tracking_run_to_wandb,
+    wandb_config_from_namespace,
+)
 
 from .analyzer import MemoryAnalyzer
 from .diagnose import run_diagnose
@@ -73,6 +80,22 @@ def _build_telemetry_sink_config(
         * 1024
         * 1024,
     )
+
+
+def _resolve_wandb_config(args: argparse.Namespace) -> Any:
+    config = wandb_config_from_namespace(args)
+    if not config.enabled:
+        return config
+    try:
+        ensure_wandb_available(config)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return None
+    return config
+
+
+def _warn_wandb_export_failure(command_name: str, exc: Exception) -> None:
+    print(f"Warning: {command_name} W&B export skipped: {exc}", file=sys.stderr)
 
 
 def cmd_info(args: argparse.Namespace) -> int:
@@ -260,6 +283,9 @@ def cmd_track(args: argparse.Namespace) -> int:
     if not TF_AVAILABLE:
         print("Error: TensorFlow not available")
         return 1
+    wandb_config = _resolve_wandb_config(args)
+    if wandb_config is None:
+        return 1
 
     print("Starting background memory tracking...")
     job_id = getattr(args, "job_id", None)
@@ -381,6 +407,22 @@ def cmd_track(args: argparse.Namespace) -> int:
             )
         if final_stats.get("collector_last_error"):
             print(f"Last collector error: {final_stats.get('collector_last_error')}")
+
+        if wandb_config.enabled:
+            try:
+                export_tracking_run_to_wandb(
+                    wandb_config,
+                    command_name="tfmemprof-track",
+                    session_summary=tracker.get_session_summary(),
+                    stats=final_stats,
+                    events=results.events,
+                    output_path=args.output,
+                    telemetry_sink_dir=getattr(args, "telemetry_sink_dir", None),
+                    oom_dump_path=None,
+                )
+                print("W&B export completed.")
+            except Exception as exc:
+                _warn_wandb_export_failure("tfmemprof track", exc)
 
     return 0
 
@@ -542,6 +584,10 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         print("Error: --interval must be > 0", file=sys.stderr)
         return 1
 
+    wandb_config = _resolve_wandb_config(args)
+    if wandb_config is None:
+        return 1
+
     command_line = " ".join(sys.argv)
     try:
         artifact_dir, exit_code = run_diagnose(
@@ -582,6 +628,17 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             print("Findings: no memory risk detected")
     except (OSError, json.JSONDecodeError):
         pass
+
+    if wandb_config.enabled:
+        try:
+            export_diagnose_bundle_to_wandb(
+                wandb_config,
+                command_name="tfmemprof-diagnose",
+                artifact_dir=artifact_dir,
+            )
+            print("W&B export completed.")
+        except Exception as exc:
+            _warn_wandb_export_failure("tfmemprof diagnose", exc)
 
     return exit_code
 
@@ -705,6 +762,7 @@ Cookbook:
         default=512,
         help="Maximum retained telemetry sink size in MB (default: 512)",
     )
+    add_wandb_arguments(track_parser)
 
     # Analyze command
     analyze_parser = subparsers.add_parser("analyze", help="Analyze profiling results")
@@ -751,6 +809,7 @@ Cookbook:
         default=0.5,
         help="Sampling interval for timeline (default: 0.5)",
     )
+    add_wandb_arguments(diagnose_parser)
 
     args = parser.parse_args()
 
