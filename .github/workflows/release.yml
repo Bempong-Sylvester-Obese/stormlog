@@ -1,13 +1,14 @@
 name: Release
 
 on:
-    workflow_run:
-        workflows: ["CI"]
-        branches: [main]
-        types: [completed]
+    workflow_dispatch:
+        inputs:
+            version:
+                description: "Optional release version override. Defaults to the next stable version."
+                required: false
+                type: string
 
-permissions:
-    contents: write
+permissions: {}
 
 concurrency:
     group: release-main
@@ -15,54 +16,60 @@ concurrency:
 
 jobs:
     deploy:
-        if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'main'
         runs-on: ubuntu-latest
+        environment: pypi
+        permissions:
+            contents: write
+            id-token: write
         env:
             GH_TOKEN: ${{ github.token }}
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
               with:
-                  ref: ${{ github.event.workflow_run.head_sha }}
                   fetch-depth: 0
                   fetch-tags: true
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v4
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.10"
 
+            - name: Require main branch
+              run: |
+                  if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+                      echo "Release workflow must be dispatched from main." >&2
+                      exit 1
+                  fi
+
             - name: Resolve release version
               id: version
+              env:
+                  INPUT_VERSION: ${{ inputs.version }}
               run: |
                   git fetch --force --tags origin
 
-                  EXISTING_TAG="$(git tag --points-at HEAD --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1 || true)"
+                  VERSION="${INPUT_VERSION:-$(python3 -m stormlog.release_version)}"
+                  TAG="v${VERSION}"
+                  echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+                  echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+                  echo "Resolved release tag: ${TAG}"
+                  echo "Resolved package version: ${VERSION}"
 
-                  if [ -n "$EXISTING_TAG" ]; then
-                      VERSION="${EXISTING_TAG#v}"
-                  else
-                      VERSION="$(python3 -m stormlog.release_version)"
-                      EXISTING_TAG="v${VERSION}"
-
-                      if git rev-parse "${EXISTING_TAG}" >/dev/null 2>&1; then
-                          TAG_SHA="$(git rev-list -n 1 "${EXISTING_TAG}")"
-                          HEAD_SHA="$(git rev-parse HEAD)"
-                          if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
-                              echo "Tag ${EXISTING_TAG} already points to ${TAG_SHA}, not ${HEAD_SHA}." >&2
-                              exit 1
-                          fi
-                      else
-                          git tag "${EXISTING_TAG}" HEAD
-                          git push origin "${EXISTING_TAG}"
-                      fi
+                  if gh release view "${TAG}" >/dev/null 2>&1; then
+                      echo "Release ${TAG} already exists. Refusing to mutate an existing release." >&2
+                      exit 1
                   fi
 
-                  echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-                  echo "tag=${EXISTING_TAG}" >> "$GITHUB_OUTPUT"
-                  echo "SETUPTOOLS_SCM_PRETEND_VERSION=${VERSION}" >> "$GITHUB_ENV"
-                  echo "Resolved release tag: ${EXISTING_TAG}"
-                  echo "Resolved package version: ${VERSION}"
+                  if git rev-parse "${TAG}" >/dev/null 2>&1; then
+                      TAG_SHA="$(git rev-list -n 1 "${TAG}")"
+                      HEAD_SHA="$(git rev-parse HEAD)"
+                      if [ "${TAG_SHA}" != "${HEAD_SHA}" ]; then
+                          echo "Tag ${TAG} already points to ${TAG_SHA}, not ${HEAD_SHA}." >&2
+                          exit 1
+                      fi
+                  fi
 
             - name: Install build dependencies
               run: |
@@ -70,6 +77,8 @@ jobs:
                   pip install build twine
 
             - name: Build package
+              env:
+                  SETUPTOOLS_SCM_PRETEND_VERSION: ${{ steps.version.outputs.version }}
               run: |
                   rm -rf build dist
                   python3 -m build
@@ -79,11 +88,14 @@ jobs:
                   twine check dist/*
 
             - name: Verify artifact versions
+              env:
+                  EXPECTED_VERSION: ${{ steps.version.outputs.version }}
               run: |
                   python3 - <<'PY'
+                  import os
                   from pathlib import Path
 
-                  expected = "${{ steps.version.outputs.version }}"
+                  expected = os.environ["EXPECTED_VERSION"]
                   dist_files = sorted(Path("dist").glob("*"))
                   if not dist_files:
                       raise SystemExit("No build artifacts were produced.")
@@ -103,20 +115,15 @@ jobs:
                       exit 1
                   fi
 
-            - name: Publish to PyPI
-              env:
-                  TWINE_USERNAME: __token__
-                  TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-              run: |
-                  twine upload --skip-existing dist/*
+            - name: Publish to PyPI with Trusted Publishing
+              uses: pypa/gh-action-pypi-publish@ec4db0b4ddc65acdf4bff5fa45ac92d78b56bdf0 # v1.9.0
 
-            - name: Create or update GitHub release
+            - name: Create GitHub release
+              env:
+                  RELEASE_TAG: ${{ steps.version.outputs.tag }}
+                  RELEASE_TARGET: ${{ github.sha }}
               run: |
-                  if gh release view "${{ steps.version.outputs.tag }}" >/dev/null 2>&1; then
-                      gh release upload "${{ steps.version.outputs.tag }}" dist/* --clobber
-                  else
-                      gh release create "${{ steps.version.outputs.tag }}" dist/* \
-                          --target "${{ github.event.workflow_run.head_sha }}" \
-                          --title "${{ steps.version.outputs.tag }}" \
-                          --generate-notes
-                  fi
+                  gh release create "${RELEASE_TAG}" dist/* \
+                      --target "${RELEASE_TARGET}" \
+                      --title "${RELEASE_TAG}" \
+                      --generate-notes
