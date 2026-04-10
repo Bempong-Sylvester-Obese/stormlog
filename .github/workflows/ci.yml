@@ -8,10 +8,14 @@ on:
     schedule:
         - cron: "0 3 * * *"
 
+permissions: {}
+
 jobs:
     test:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
         strategy:
             fail-fast: false
             matrix:
@@ -22,20 +26,14 @@ jobs:
                       framework: tensorflow
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python ${{ matrix.python-version }}
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: ${{ matrix.python-version }}
-
-            - name: Cache pip dependencies
-              uses: actions/cache@v5
-              with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-${{ matrix.python-version }}-
 
             - name: Install base dependencies
               run: |
@@ -60,7 +58,7 @@ jobs:
                   fi
 
             - name: Upload coverage to Codecov
-              uses: codecov/codecov-action@v3
+              uses: codecov/codecov-action@ab904c41d6ece82784817410c45d8b8c02684457 # v3.1.6
               with:
                   file: ./coverage.xml
                   flags: unittests
@@ -69,22 +67,18 @@ jobs:
     tui-pr-gate:
         if: github.event_name == 'pull_request' || (github.event_name == 'push' && github.ref == 'refs/heads/develop')
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.11"
-
-            - name: Cache pip dependencies
-              uses: actions/cache@v5
-              with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-tui-pr-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-tui-pr-
 
             - name: Install TUI test dependencies
               run: |
@@ -100,22 +94,18 @@ jobs:
     tui-pty-smoke:
         if: github.event_name == 'schedule' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.11"
-
-            - name: Cache pip dependencies
-              uses: actions/cache@v5
-              with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-tui-pty-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-tui-pty-
 
             - name: Install PTY test dependencies
               run: |
@@ -131,15 +121,19 @@ jobs:
     lint:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
         strategy:
             matrix:
                 python-version: ["3.10"]
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python ${{ matrix.python-version }}
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: ${{ matrix.python-version }}
 
@@ -166,25 +160,46 @@ jobs:
               run: |
                   python3 -m mypy stormlog/
 
-    docs:
+    workflow-audit:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.11"
 
-            - name: Cache pip dependencies
-              uses: actions/cache@v5
+            - name: Install workflow audit tool
+              run: |
+                  python3 -m pip install --upgrade pip
+                  pip install zizmor
+
+            - name: Audit GitHub Actions workflows
+              run: |
+                  zizmor .github/workflows/*.yml
+
+    docs:
+        if: github.event_name != 'schedule'
+        runs-on: ubuntu-latest
+        permissions:
+            contents: read
+
+        steps:
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
               with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-docs-${{ hashFiles('pyproject.toml', 'docs/requirements-rtd.txt') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-docs-
+                  persist-credentials: false
+
+            - name: Set up Python
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+              with:
+                  python-version: "3.11"
 
             - name: Install docs dependencies
               run: |
@@ -199,13 +214,17 @@ jobs:
     build:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
-        needs: [test, lint, docs]
+        permissions:
+            contents: read
+        needs: [test, lint, workflow-audit, docs]
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.10"
 
@@ -223,7 +242,7 @@ jobs:
                   twine check dist/*
 
             - name: Upload build artifacts
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
               with:
                   name: dist
                   path: dist/
@@ -231,22 +250,18 @@ jobs:
     memory-regression-gate:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-24.04
+        permissions:
+            contents: read
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.10"
-
-            - name: Cache pip dependencies
-              uses: actions/cache@v5
-              with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-benchmark-regression-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-benchmark-regression-
 
             - name: Install benchmark regression dependencies
               run: |
@@ -270,7 +285,7 @@ jobs:
 
             - name: Upload benchmark regression artifacts
               if: always()
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
               with:
                   name: benchmark-regression-artifacts
                   path: artifacts/benchmarks/
@@ -278,22 +293,18 @@ jobs:
     memory-operability-budget:
         if: github.event_name == 'schedule'
         runs-on: ubuntu-24.04
+        permissions:
+            contents: read
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.10"
-
-            - name: Cache pip dependencies
-              uses: actions/cache@v5
-              with:
-                  path: ~/.cache/pip
-                  key: ${{ runner.os }}-pip-benchmark-budget-${{ hashFiles('pyproject.toml') }}
-                  restore-keys: |
-                      ${{ runner.os }}-pip-benchmark-budget-
 
             - name: Install benchmark budget dependencies
               run: |
@@ -316,7 +327,7 @@ jobs:
 
             - name: Upload nightly operability artifacts
               if: always()
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
               with:
                   name: benchmark-operability-artifacts
                   path: artifacts/benchmarks/
@@ -324,16 +335,18 @@ jobs:
     artifact-cli-smoke:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
         needs: [build]
 
         steps:
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.10"
 
             - name: Download build artifact
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
               with:
                   name: dist
                   path: dist
@@ -374,13 +387,17 @@ jobs:
     examples-smoke:
         if: github.event_name != 'schedule'
         runs-on: ubuntu-latest
+        permissions:
+            contents: read
         needs: [test, lint, docs]
 
         steps:
-            - uses: actions/checkout@v4
+            - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+              with:
+                  persist-credentials: false
 
             - name: Set up Python
-              uses: actions/setup-python@v6
+              uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
               with:
                   python-version: "3.10"
 
