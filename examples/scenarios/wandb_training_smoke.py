@@ -25,6 +25,10 @@ except ImportError as exc:  # pragma: no cover - exercised in runtime envs
         "Install with `pip install 'stormlog[wandb]'`."
     ) from exc
 
+from stormlog.cuda_native_debug import (
+    capture_cuda_snapshot_artifacts,
+    cuda_memory_history_supported,
+)
 from stormlog.cpu_profiler import CPUMemoryTracker
 from stormlog.telemetry_sink import TelemetrySinkConfig
 from stormlog.tracker import MemoryTracker
@@ -465,6 +469,24 @@ def _log_prediction_table(
         wandb.log({"evaluation/sample_predictions": table})
 
 
+def _capture_attribution_bundle(
+    output_dir: Path,
+    *,
+    device: torch.device,
+) -> Path | None:
+    if device.type != "cuda" or not cuda_memory_history_supported():
+        return None
+
+    bundle_dir = output_dir / "cuda_attribution"
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    capture_cuda_snapshot_artifacts(
+        bundle_dir,
+        device=device,
+        history_recorded=False,
+    )
+    return bundle_dir
+
+
 def main() -> None:
     args = _parse_args()
     output_dir = Path(args.output_dir).resolve()
@@ -579,6 +601,15 @@ def main() -> None:
         json.dumps(summary_payload, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
+    attribution_bundle_dir: Path | None = None
+    if args.wandb_log_attribution:
+        try:
+            attribution_bundle_dir = _capture_attribution_bundle(
+                output_dir,
+                device=device,
+            )
+        except Exception as exc:
+            print(f"Attribution snapshot export skipped: {exc}")
 
     export_tracking_run_to_wandb(
         WandbExportConfig(
@@ -592,7 +623,9 @@ def main() -> None:
         events=tracker.get_events(),
         output_path=summary_path,
         telemetry_sink_dir=telemetry_sink_dir,
-        oom_dump_path=getattr(tracker, "last_oom_dump_path", None),
+        oom_dump_path=(
+            attribution_bundle_dir or getattr(tracker, "last_oom_dump_path", None)
+        ),
     )
 
     wandb.finish()
