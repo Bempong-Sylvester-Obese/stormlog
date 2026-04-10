@@ -1,0 +1,39 @@
+version: 2
+updates:
+    - package-ecosystem: "pip"
+      directory: "/"
+      schedule:
+          interval: "weekly"
+      cooldown:
+          default-days: 7
+      commit-message:
+          prefix: "deps"
+      labels:
+          - "dependencies"
+      open-pull-requests-limit: 10
+
+    - package-ecosystem: "pip"
+      directory: "/docs"
+      schedule:
+          interval: "weekly"
+      cooldown:
+          default-days: 7
+      commit-message:
+          prefix: "docs"
+      labels:
+          - "dependencies"
+          - "docs"
+      open-pull-requests-limit: 5
+
+    - package-ecosystem: "github-actions"
+      directory: "/"
+      schedule:
+          interval: "weekly"
+      cooldown:
+          default-days: 7
+      commit-message:
+          prefix: "ci"
+      labels:
+          - "dependencies"
+          - "ci"
+      open-pull-requests-limit: 10
