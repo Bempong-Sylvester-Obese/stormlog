@@ -4,9 +4,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_release_uses_manual_dispatch_and_trusted_publishing() -> None:
-    content = (REPO_ROOT / ".github/workflows/release.yml").read_text(
-        encoding="utf-8"
-    )
+    content = (REPO_ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
 
     assert "workflow_dispatch:" in content
     assert "workflow_run:" not in content

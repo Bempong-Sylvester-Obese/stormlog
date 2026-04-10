@@ -3,6 +3,7 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
+
 def _optional_dependencies() -> dict[str, list[str]]:
     content = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     section_match = re.search(
