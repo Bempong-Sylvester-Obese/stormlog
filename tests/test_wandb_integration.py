@@ -44,16 +44,27 @@ class _FakeHtml:
         self.html = html
 
 
+class _FakePlotModule:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def line_series(self, **kwargs: Any) -> dict[str, Any]:
+        self.calls.append(kwargs)
+        return {"kind": "line_series", "kwargs": kwargs}
+
+
 class _FakeRun:
     def __init__(self, owner: "_FakeWandbModule") -> None:
         self.owner = owner
         self.summary: dict[str, Any] = {}
         self.logged: list[dict[str, Any]] = []
+        self.logged_steps: list[int | None] = []
         self.artifacts: list[_FakeArtifact] = []
         self.finished = False
 
-    def log(self, payload: dict[str, Any]) -> None:
+    def log(self, payload: dict[str, Any], step: int | None = None) -> None:
         self.logged.append(payload)
+        self.logged_steps.append(step)
 
     def log_artifact(self, artifact: _FakeArtifact) -> None:
         self.artifacts.append(artifact)
@@ -72,6 +83,7 @@ class _FakeWandbModule(ModuleType):
         self.Artifact = _FakeArtifact
         self.Table = _FakeTable
         self.Html = _FakeHtml
+        self.plot = _FakePlotModule()
 
     def init(self, **kwargs: Any) -> _FakeRun:
         self.init_calls.append(kwargs)
@@ -207,15 +219,41 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
         },
         events=[
             {
+                "timestamp": 9.5,
+                "event_type": "allocation",
+                "context": "warmup",
+                "memory_allocated": 1024,
+                "memory_reserved": 2048,
+                "memory_change": 1024,
+                "device_used": 2048,
+                "device_total": 8192,
+                "job_id": "train-42",
+                "rank": 2,
+            },
+            {
                 "timestamp": 10.0,
                 "event_type": "warning",
                 "context": "memory high",
                 "memory_allocated": 2048,
                 "memory_reserved": 4096,
                 "memory_change": 512,
+                "device_used": 4096,
+                "device_total": 8192,
                 "job_id": "train-42",
                 "rank": 2,
-            }
+            },
+            {
+                "timestamp": 10.5,
+                "event_type": "peak",
+                "context": "peak memory",
+                "memory_allocated": 3072,
+                "memory_reserved": 4096,
+                "memory_change": 1024,
+                "device_used": 5120,
+                "device_total": 8192,
+                "job_id": "train-42",
+                "rank": 2,
+            },
         ],
         output_path=output_path,
         telemetry_sink_dir=sink_dir,
@@ -231,8 +269,14 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
     assert run.finished is True
     assert run.summary["stormlog_session_id"] == "session-12345678"
     assert run.summary["stormlog_backend"] == "cuda"
-    assert any("stormlog_peak_memory_bytes" in payload for payload in run.logged)
+    assert run.summary["stormlog_peak_memory_bytes"] == 4096
+    assert run.summary["stormlog_total_events"] == 3
+    assert run.summary["stormlog_chart_point_count"] == 3
+    assert run.logged_steps.count(None) >= 3
     assert any("stormlog_alerts" in payload for payload in run.logged)
+    assert any("stormlog_memory_timeline_table" in payload for payload in run.logged)
+    assert any("stormlog_memory_timeline_plot" in payload for payload in run.logged)
+    assert any("stormlog_tracking_dashboard" in payload for payload in run.logged)
     assert any("stormlog_attribution_html" in payload for payload in run.logged)
     assert any("stormlog_tensor_attribution" in payload for payload in run.logged)
     assert len(run.artifacts) == 3
@@ -322,7 +366,7 @@ def test_export_diagnose_bundle_logs_summary_and_artifact(
     assert run.finished is True
     assert run.summary["stormlog_artifact_dir"] == "stormlog-diagnose"
     assert run.summary["stormlog_session_id"] == "diag-12345678"
-    assert any("stormlog_allocated_bytes" in payload for payload in run.logged)
+    assert run.summary["stormlog_allocated_bytes"] == 1024
     assert any("stormlog_diagnostic_suggestions" in payload for payload in run.logged)
     assert any("stormlog_attribution_html" in payload for payload in run.logged)
     assert len(run.artifacts) == 1
@@ -346,4 +390,4 @@ def test_export_uses_active_wandb_run_without_creating_another(
 
     assert fake_wandb.init_calls == []
     assert active_run.finished is False
-    assert any("stormlog_peak_memory_bytes" in payload for payload in active_run.logged)
+    assert active_run.summary["stormlog_peak_memory_bytes"] == 128

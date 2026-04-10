@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import html
 import json
+import math
 import re
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +21,10 @@ WANDB_INSTALL_GUIDANCE = (
     "Install with `pip install 'stormlog[wandb]'`."
 )
 _ALERT_EVENT_TYPES = frozenset({"warning", "critical", "error", "peak"})
+_TIMELINE_MAX_POINTS = 250
+_DASHBOARD_WIDTH = 720
+_DASHBOARD_HEIGHT = 260
+_DASHBOARD_PADDING = 18
 
 
 @dataclass(frozen=True)
@@ -147,17 +153,21 @@ def export_tracking_run_to_wandb(
     )
     try:
         metrics = _tracking_metrics(stats)
-        if metrics:
-            run.log(metrics)
-
         _update_summary(
             run,
-            _session_summary_fields(session_summary)
+            metrics
+            | {
+                "stormlog_chart_point_count": _tracking_chart_point_count(events),
+            }
+            | _session_summary_fields(session_summary)
             | _tracking_summary_fields(stats, output_path=output_path),
         )
 
+        _log_tracking_time_series(run, events)
+
         if config.log_tables:
             _log_alerts_table(wandb, run, events)
+            _log_tracking_visualizations(wandb, run, events)
 
         if config.log_artifacts:
             safe_session = _session_slug(session_summary)
@@ -227,12 +237,10 @@ def export_diagnose_bundle_to_wandb(
     )
     try:
         metrics = _diagnose_metrics(diagnostic_summary, manifest)
-        if metrics:
-            run.log(metrics)
-
         _update_summary(
             run,
-            _session_summary_fields(session_summary)
+            metrics
+            | _session_summary_fields(session_summary)
             | _diagnose_summary_fields(bundle_dir, manifest),
         )
 
@@ -424,17 +432,19 @@ def _session_summary_fields(summary: SessionSummary | None) -> dict[str, Any]:
 def _log_alerts_table(wandb: Any, run: Any, events: Sequence[Any]) -> None:
     rows: list[list[Any]] = []
     for event in events:
-        event_type = _event_value(event, "event_type")
+        event_type = _event_value(event, "event_type") or _event_value(event, "type")
         if event_type not in _ALERT_EVENT_TYPES:
             continue
         rows.append(
             [
-                _event_value(event, "timestamp"),
+                _event_timestamp_seconds(event),
                 event_type,
                 _event_value(event, "context"),
-                _event_value(event, "memory_allocated"),
-                _event_value(event, "memory_reserved"),
-                _event_value(event, "memory_change"),
+                _event_int_value(
+                    event, "memory_allocated", "allocator_allocated_bytes"
+                ),
+                _event_int_value(event, "memory_reserved", "allocator_reserved_bytes"),
+                _event_int_value(event, "memory_change", "allocator_change_bytes"),
                 _event_value(event, "job_id"),
                 _event_value(event, "rank"),
             ]
@@ -481,6 +491,99 @@ def _log_suggestions_table(
             )
         }
     )
+
+
+def _log_tracking_time_series(run: Any, events: Sequence[Any]) -> None:
+    rows = _tracking_timeline_rows(events)
+    for row in rows:
+        payload = {
+            "stormlog_timeline_elapsed_seconds": row["elapsed_seconds"],
+            "stormlog_timeline_allocated_bytes": row["allocated_bytes"],
+            "stormlog_timeline_reserved_bytes": row["reserved_bytes"],
+            "stormlog_timeline_change_bytes": row["change_bytes"],
+            "stormlog_timeline_device_used_bytes": row["device_used_bytes"],
+            "stormlog_timeline_utilization_percent": row["utilization_percent"],
+        }
+        filtered_payload = {
+            key: value for key, value in payload.items() if value is not None
+        }
+        if filtered_payload:
+            run.log(filtered_payload)
+
+
+def _log_tracking_visualizations(wandb: Any, run: Any, events: Sequence[Any]) -> None:
+    rows = _tracking_timeline_rows(events)
+    if not rows:
+        return
+
+    run.log(
+        {
+            "stormlog_memory_timeline_table": wandb.Table(
+                columns=[
+                    "sample_index",
+                    "elapsed_seconds",
+                    "event_type",
+                    "memory_allocated_bytes",
+                    "memory_reserved_bytes",
+                    "memory_change_bytes",
+                    "device_used_bytes",
+                    "utilization_percent",
+                    "context",
+                    "rank",
+                ],
+                data=[
+                    [
+                        row["sample_index"],
+                        row["elapsed_seconds"],
+                        row["event_type"],
+                        row["allocated_bytes"],
+                        row["reserved_bytes"],
+                        row["change_bytes"],
+                        row["device_used_bytes"],
+                        row["utilization_percent"],
+                        row["context"],
+                        row["rank"],
+                    ]
+                    for row in rows
+                ],
+            )
+        }
+    )
+
+    plot_api = getattr(wandb, "plot", None)
+    line_series = getattr(plot_api, "line_series", None)
+    if callable(line_series):
+        elapsed = [float(row["elapsed_seconds"]) for row in rows]
+        run.log(
+            {
+                "stormlog_memory_timeline_plot": line_series(
+                    xs=elapsed,
+                    ys=[
+                        [int(row["allocated_bytes"] or 0) for row in rows],
+                        [int(row["reserved_bytes"] or 0) for row in rows],
+                        [int(row["device_used_bytes"] or 0) for row in rows],
+                    ],
+                    keys=["allocated_bytes", "reserved_bytes", "device_used_bytes"],
+                    title="Stormlog Memory Timeline",
+                    xname="Elapsed Seconds",
+                )
+            }
+        )
+
+        if any(row["utilization_percent"] is not None for row in rows):
+            run.log(
+                {
+                    "stormlog_memory_utilization_plot": line_series(
+                        xs=elapsed,
+                        ys=[[float(row["utilization_percent"] or 0.0) for row in rows]],
+                        keys=["utilization_percent"],
+                        title="Stormlog Memory Utilization",
+                        xname="Elapsed Seconds",
+                    )
+                }
+            )
+
+    run.log({"stormlog_tracking_dashboard": wandb.Html(_tracking_dashboard_html(rows))})
 
 
 def _log_attribution_outputs(wandb: Any, run: Any, root: Path) -> None:
@@ -586,6 +689,212 @@ def _log_directory_artifact(
     run.log_artifact(artifact)
 
 
+def _tracking_chart_point_count(events: Sequence[Any]) -> int:
+    return len(_tracking_timeline_rows(events))
+
+
+def _tracking_timeline_rows(events: Sequence[Any]) -> list[dict[str, Any]]:
+    timeline_rows: list[dict[str, Any]] = []
+    first_timestamp: float | None = None
+
+    for event in events:
+        timestamp_s = _event_timestamp_seconds(event)
+        if timestamp_s is None:
+            continue
+        if first_timestamp is None:
+            first_timestamp = timestamp_s
+
+        allocated = _event_int_value(
+            event, "memory_allocated", "allocator_allocated_bytes"
+        )
+        reserved = _event_int_value(
+            event, "memory_reserved", "allocator_reserved_bytes"
+        )
+        change = _event_int_value(event, "memory_change", "allocator_change_bytes")
+        device_used = _event_int_value(event, "device_used", "device_used_bytes")
+        device_total = _event_int_value(event, "device_total", "device_total_bytes")
+
+        if device_used is None:
+            candidates = [value for value in (allocated, reserved) if value is not None]
+            device_used = max(candidates) if candidates else None
+
+        utilization_percent: float | None = None
+        if (
+            isinstance(device_used, int)
+            and isinstance(device_total, int)
+            and device_total > 0
+        ):
+            utilization_percent = (float(device_used) / float(device_total)) * 100.0
+
+        timeline_rows.append(
+            {
+                "sample_index": len(timeline_rows),
+                "elapsed_seconds": timestamp_s - first_timestamp,
+                "event_type": str(
+                    _event_value(event, "event_type")
+                    or _event_value(event, "type")
+                    or "sample"
+                ),
+                "allocated_bytes": allocated,
+                "reserved_bytes": reserved,
+                "change_bytes": change,
+                "device_used_bytes": device_used,
+                "utilization_percent": utilization_percent,
+                "context": _event_value(event, "context"),
+                "rank": _event_value(event, "rank"),
+            }
+        )
+
+    return _sample_timeline_rows(timeline_rows)
+
+
+def _sample_timeline_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    if len(rows) <= _TIMELINE_MAX_POINTS:
+        return list(rows)
+
+    stride = int(math.ceil(len(rows) / _TIMELINE_MAX_POINTS))
+    sampled = list(rows[::stride])
+    last_row = rows[-1]
+    if not sampled or sampled[-1]["sample_index"] != last_row["sample_index"]:
+        sampled.append(last_row)
+    return sampled
+
+
+def _tracking_dashboard_html(rows: Sequence[Mapping[str, Any]]) -> str:
+    allocated_series = [int(row.get("allocated_bytes") or 0) for row in rows]
+    reserved_series = [int(row.get("reserved_bytes") or 0) for row in rows]
+    utilization_values = [
+        float(value)
+        for value in (row.get("utilization_percent") for row in rows)
+        if isinstance(value, (int, float))
+    ]
+    alert_rows = [
+        row for row in rows if str(row.get("event_type", "")) in _ALERT_EVENT_TYPES
+    ][-8:]
+
+    chart_min = 0.0
+    chart_max = float(
+        max(allocated_series + reserved_series)
+        if allocated_series or reserved_series
+        else 1
+    )
+    allocated_points = _svg_polyline_points(
+        [float(value) for value in allocated_series],
+        width=_DASHBOARD_WIDTH,
+        height=_DASHBOARD_HEIGHT,
+        min_value=chart_min,
+        max_value=chart_max,
+    )
+    reserved_points = _svg_polyline_points(
+        [float(value) for value in reserved_series],
+        width=_DASHBOARD_WIDTH,
+        height=_DASHBOARD_HEIGHT,
+        min_value=chart_min,
+        max_value=chart_max,
+    )
+
+    cards = [
+        ("samples", str(len(rows))),
+        (
+            "peak allocated",
+            _format_bytes(max(allocated_series) if allocated_series else 0),
+        ),
+        (
+            "peak reserved",
+            _format_bytes(max(reserved_series) if reserved_series else 0),
+        ),
+        (
+            "max utilization",
+            f"{max(utilization_values):.1f}%" if utilization_values else "n/a",
+        ),
+    ]
+    card_html = "".join(
+        f"<div class='card'><div class='label'>{html.escape(label)}</div>"
+        f"<div class='value'>{html.escape(value)}</div></div>"
+        for label, value in cards
+    )
+    alerts_html = "".join(
+        "<tr>"
+        f"<td>{row.get('sample_index')}</td>"
+        f"<td>{html.escape(str(row.get('event_type', '')))}</td>"
+        f"<td>{row.get('elapsed_seconds', 0.0):.2f}</td>"
+        f"<td>{html.escape(str(row.get('context') or ''))}</td>"
+        "</tr>"
+        for row in alert_rows
+    )
+    alerts_body = (
+        alerts_html or "<tr><td colspan='4'>No alert events captured.</td></tr>"
+    )
+    return (
+        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
+        "<style>"
+        "body{font-family:system-ui,sans-serif;margin:18px;color:#1f2937;background:#fff;}"
+        ".cards{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:18px;}"
+        ".card{border:1px solid #dbe3ea;border-radius:12px;padding:12px;background:#f8fafc;}"
+        ".label{font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:#64748b;}"
+        ".value{font-size:22px;font-weight:700;margin-top:6px;}"
+        ".legend{display:flex;gap:18px;margin:10px 0 14px;font-size:13px;color:#475569;}"
+        ".swatch{display:inline-block;width:10px;height:10px;border-radius:999px;margin-right:6px;}"
+        "table{width:100%;border-collapse:collapse;margin-top:16px;font-size:13px;}"
+        "th,td{padding:8px 10px;border-bottom:1px solid #e2e8f0;text-align:left;}"
+        "th{color:#475569;font-weight:600;background:#f8fafc;}"
+        "h2{margin:0 0 12px;font-size:20px;}"
+        "p{margin:0 0 10px;color:#475569;}"
+        "</style></head><body>"
+        "<h2>Stormlog Tracking Dashboard</h2>"
+        "<p>Sampled timeline exported to Weights & Biases from Stormlog tracking events.</p>"
+        f"<div class='cards'>{card_html}</div>"
+        "<svg viewBox='0 0 720 260' width='100%' role='img' aria-label='Stormlog memory timeline'>"
+        "<rect x='0' y='0' width='720' height='260' fill='#ffffff' stroke='#e2e8f0' rx='12'/>"
+        f"<polyline fill='none' stroke='#2563eb' stroke-width='3' points='{allocated_points}'/>"
+        f"<polyline fill='none' stroke='#f97316' stroke-width='3' points='{reserved_points}'/>"
+        "</svg>"
+        "<div class='legend'>"
+        "<span><span class='swatch' style='background:#2563eb;'></span>Allocated</span>"
+        "<span><span class='swatch' style='background:#f97316;'></span>Reserved</span>"
+        "</div>"
+        "<table><thead><tr><th>sample</th><th>event</th><th>elapsed (s)</th><th>context</th></tr></thead>"
+        f"<tbody>{alerts_body}</tbody></table>"
+        "</body></html>"
+    )
+
+
+def _svg_polyline_points(
+    values: Sequence[float],
+    *,
+    width: int,
+    height: int,
+    min_value: float,
+    max_value: float,
+) -> str:
+    if not values:
+        return ""
+    inner_width = float(width - (_DASHBOARD_PADDING * 2))
+    inner_height = float(height - (_DASHBOARD_PADDING * 2))
+    span = max(max_value - min_value, 1.0)
+    point_count = max(len(values) - 1, 1)
+    points: list[str] = []
+    for index, value in enumerate(values):
+        x = _DASHBOARD_PADDING + (float(index) / float(point_count)) * inner_width
+        normalized = (float(value) - min_value) / span
+        y = height - _DASHBOARD_PADDING - (normalized * inner_height)
+        points.append(f"{x:.1f},{y:.1f}")
+    return " ".join(points)
+
+
+def _format_bytes(value: int) -> str:
+    if value < 1024:
+        return f"{value} B"
+    units = ["KB", "MB", "GB", "TB", "PB"]
+    scaled = float(value)
+    unit = "B"
+    for unit in units:
+        scaled /= 1024.0
+        if scaled < 1024.0:
+            return f"{scaled:.2f} {unit}"
+    return f"{scaled:.2f} {unit}"
+
+
 def _update_summary(run: Any, payload: Mapping[str, Any]) -> None:
     if not payload:
         return
@@ -638,6 +947,24 @@ def _event_value(event: Any, name: str) -> Any:
     if isinstance(event, Mapping):
         return event.get(name)
     return getattr(event, name, None)
+
+
+def _event_int_value(event: Any, *names: str) -> int | None:
+    for name in names:
+        value = _event_value(event, name)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return int(value)
+    return None
+
+
+def _event_timestamp_seconds(event: Any) -> float | None:
+    value = _event_value(event, "timestamp")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    value_ns = _event_value(event, "timestamp_ns")
+    if isinstance(value_ns, int) and not isinstance(value_ns, bool):
+        return float(value_ns) / 1_000_000_000.0
+    return None
 
 
 def _normalized_optional_string(value: Any) -> str | None:
