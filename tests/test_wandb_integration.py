@@ -285,6 +285,8 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
     assert any("stormlog_alerts" in payload for payload in run.logged)
     assert any("stormlog_memory_timeline_table" in payload for payload in run.logged)
     assert any("stormlog_memory_timeline_plot" in payload for payload in run.logged)
+    assert any("stormlog_tracking_dashboard" in payload for payload in run.logged)
+    assert any("stormlog_attribution_html" in payload for payload in run.logged)
     assert any("stormlog_tensor_attribution" in payload for payload in run.logged)
     assert {artifact.type for artifact in run.artifacts} == {
         "stormlog-attribution",
@@ -385,6 +387,7 @@ def test_export_diagnose_bundle_logs_summary_and_artifact(
         == "cuda_allocator_state_history_annotated.html"
     )
     assert any("stormlog_diagnostic_suggestions" in payload for payload in run.logged)
+    assert any("stormlog_attribution_html" in payload for payload in run.logged)
     assert {artifact.type for artifact in run.artifacts} == {
         "stormlog-attribution",
         "stormlog-diagnose",
@@ -417,6 +420,7 @@ def test_tracking_visual_artifacts_respect_log_artifacts_flag(
     run = fake_wandb.created_runs[0]
     assert run.artifacts == []
     assert "stormlog_tracking_dashboard_file" not in run.summary
+    assert any("stormlog_tracking_dashboard" in payload for payload in run.logged)
 
 
 def test_tracking_plots_preserve_missing_metric_values(

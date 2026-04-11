@@ -45,6 +45,13 @@ def log_attribution_outputs(
 
     html_path = root / TRACE_HTML_ANNOTATED_FILENAME
     if html_path.exists():
+        run.log(
+            {
+                "stormlog_attribution_html": wandb.Html(
+                    html_path.read_text(encoding="utf-8")
+                )
+            }
+        )
         summary_fields["stormlog_attribution_html_file"] = html_path.name
 
     tensor_rows = tensor_attribution_rows(root / TENSOR_ATTRIBUTION_FILENAME)

@@ -322,11 +322,14 @@ def log_tracking_visualizations(
                 }
             )
 
+    dashboard_html = tracking_dashboard_html(rows, alert_event_types=_ALERT_EVENT_TYPES)
+    run.log({"stormlog_tracking_dashboard": wandb.Html(dashboard_html)})
+
     if not allow_artifact_logging:
         return {}
 
     dashboard_path = materialize_html_file(
-        html_text=tracking_dashboard_html(rows, alert_event_types=_ALERT_EVENT_TYPES),
+        html_text=dashboard_html,
         file_name="stormlog_tracking_dashboard.html",
         output_root=dashboard_root,
     )
