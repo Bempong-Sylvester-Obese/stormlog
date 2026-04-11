@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import random
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,7 @@ except ImportError as exc:  # pragma: no cover - exercised in runtime envs
 
 from stormlog.cuda_native_debug import (
     capture_cuda_snapshot_artifacts,
+    cuda_memory_history,
     cuda_memory_history_supported,
 )
 from stormlog.cpu_profiler import CPUMemoryTracker
@@ -473,18 +475,30 @@ def _capture_attribution_bundle(
     output_dir: Path,
     *,
     device: torch.device,
+    history_recorded: bool,
 ) -> Path | None:
     if device.type != "cuda" or not cuda_memory_history_supported():
         return None
 
     bundle_dir = output_dir / "cuda_attribution"
     bundle_dir.mkdir(parents=True, exist_ok=True)
+    torch.cuda.synchronize(device)
     capture_cuda_snapshot_artifacts(
         bundle_dir,
         device=device,
-        history_recorded=False,
+        history_recorded=history_recorded,
     )
     return bundle_dir
+
+
+def _cuda_history_context(
+    *,
+    enabled: bool,
+    device: torch.device,
+) -> Any:
+    if enabled and device.type == "cuda" and cuda_memory_history_supported():
+        return cuda_memory_history(device=device)
+    return nullcontext()
 
 
 def main() -> None:
@@ -528,61 +542,80 @@ def main() -> None:
         device=device,
     )
     tracker.start_tracking()
+    history_enabled = bool(
+        args.wandb_log_attribution
+        and device.type == "cuda"
+        and cuda_memory_history_supported()
+    )
+    history: list[dict[str, float]] = []
+    attribution_bundle_dir: Path | None = None
 
     try:
-        model = CharacterCNN(num_classes=len(class_names)).to(device)
-        optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4, weight_decay=1e-4)
-        criterion = nn.CrossEntropyLoss()
-        history: list[dict[str, float]] = []
-
-        for epoch_index in range(args.epochs):
-            train_metrics = _train_one_epoch(
-                model,
-                train_loader,
-                optimizer=optimizer,
-                criterion=criterion,
-                device=device,
-                epoch_index=epoch_index,
+        with _cuda_history_context(enabled=history_enabled, device=device):
+            model = CharacterCNN(num_classes=len(class_names)).to(device)
+            optimizer = torch.optim.AdamW(
+                model.parameters(), lr=3e-4, weight_decay=1e-4
             )
-            val_metrics = _evaluate(
+            criterion = nn.CrossEntropyLoss()
+
+            for epoch_index in range(args.epochs):
+                train_metrics = _train_one_epoch(
+                    model,
+                    train_loader,
+                    optimizer=optimizer,
+                    criterion=criterion,
+                    device=device,
+                    epoch_index=epoch_index,
+                )
+                val_metrics = _evaluate(
+                    model,
+                    val_loader,
+                    criterion=criterion,
+                    device=device,
+                )
+                epoch_summary = {
+                    "epoch": epoch_index + 1,
+                    "train_loss": train_metrics["loss"],
+                    "train_accuracy": train_metrics["accuracy"],
+                    "val_loss": val_metrics["loss"],
+                    "val_accuracy": val_metrics["accuracy"],
+                }
+                history.append(epoch_summary)
+                wandb.log(
+                    {
+                        "train/epoch_loss": train_metrics["loss"],
+                        "train/epoch_accuracy": train_metrics["accuracy"],
+                        "validation/loss": val_metrics["loss"],
+                        "validation/accuracy": val_metrics["accuracy"],
+                        "epoch": epoch_index + 1,
+                    },
+                    step=(epoch_index + 1) * len(train_loader),
+                )
+                print(
+                    f"Epoch {epoch_index + 1}/{args.epochs}:"
+                    f" train_loss={train_metrics['loss']:.4f}"
+                    f" train_acc={train_metrics['accuracy']:.4f}"
+                    f" val_loss={val_metrics['loss']:.4f}"
+                    f" val_acc={val_metrics['accuracy']:.4f}"
+                )
+
+            _log_prediction_table(
                 model,
                 val_loader,
-                criterion=criterion,
                 device=device,
-            )
-            epoch_summary = {
-                "epoch": epoch_index + 1,
-                "train_loss": train_metrics["loss"],
-                "train_accuracy": train_metrics["accuracy"],
-                "val_loss": val_metrics["loss"],
-                "val_accuracy": val_metrics["accuracy"],
-            }
-            history.append(epoch_summary)
-            wandb.log(
-                {
-                    "train/epoch_loss": train_metrics["loss"],
-                    "train/epoch_accuracy": train_metrics["accuracy"],
-                    "validation/loss": val_metrics["loss"],
-                    "validation/accuracy": val_metrics["accuracy"],
-                    "epoch": epoch_index + 1,
-                },
-                step=(epoch_index + 1) * len(train_loader),
-            )
-            print(
-                f"Epoch {epoch_index + 1}/{args.epochs}:"
-                f" train_loss={train_metrics['loss']:.4f}"
-                f" train_acc={train_metrics['accuracy']:.4f}"
-                f" val_loss={val_metrics['loss']:.4f}"
-                f" val_acc={val_metrics['accuracy']:.4f}"
+                class_names=class_names,
+                row_limit=args.sample_predictions,
             )
 
-        _log_prediction_table(
-            model,
-            val_loader,
-            device=device,
-            class_names=class_names,
-            row_limit=args.sample_predictions,
-        )
+            if args.wandb_log_attribution:
+                try:
+                    attribution_bundle_dir = _capture_attribution_bundle(
+                        output_dir,
+                        device=device,
+                        history_recorded=history_enabled,
+                    )
+                except Exception as exc:
+                    print(f"Attribution snapshot export skipped: {exc}")
     finally:
         tracker.stop_tracking()
 
@@ -601,16 +634,6 @@ def main() -> None:
         json.dumps(summary_payload, indent=2, default=str) + "\n",
         encoding="utf-8",
     )
-    attribution_bundle_dir: Path | None = None
-    if args.wandb_log_attribution:
-        try:
-            attribution_bundle_dir = _capture_attribution_bundle(
-                output_dir,
-                device=device,
-            )
-        except Exception as exc:
-            print(f"Attribution snapshot export skipped: {exc}")
-
     export_tracking_run_to_wandb(
         WandbExportConfig(
             enabled=True,
@@ -623,9 +646,8 @@ def main() -> None:
         events=tracker.get_events(),
         output_path=summary_path,
         telemetry_sink_dir=telemetry_sink_dir,
-        oom_dump_path=(
-            attribution_bundle_dir or getattr(tracker, "last_oom_dump_path", None)
-        ),
+        oom_dump_path=getattr(tracker, "last_oom_dump_path", None),
+        attribution_bundle_dir=attribution_bundle_dir,
     )
 
     wandb.finish()
