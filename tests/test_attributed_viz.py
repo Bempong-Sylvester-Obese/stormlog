@@ -201,6 +201,55 @@ def test_process_snapshot_offenders_only_include_snapshot_active_allocations() -
     assert [offender["name"] for offender in payload["offenders"]] == ["active.tensor"]
 
 
+def test_process_snapshot_without_history_uses_active_snapshot_summary() -> None:
+    snapshot = {
+        "segments": [
+            {
+                "address": 4096,
+                "segment_type": "large",
+                "total_size": 256,
+                "allocated_size": 128,
+                "active_size": 128,
+                "blocks": [
+                    {
+                        "address": 8192,
+                        "size": 128,
+                        "state": "active_allocated",
+                        "frames": [],
+                    }
+                ],
+            }
+        ],
+        "device_traces": [[]],
+    }
+    tensor_index = {
+        "storage_pointer_count": 1,
+        "attributed_storage_pointers": [
+            {
+                "storage_ptr_int": 8192,
+                "names": ["model.linear.weight"],
+                "tensors": [
+                    {
+                        "shape": [16, 8],
+                        "dtype": "torch.float32",
+                        "size_bytes": 128,
+                    }
+                ],
+            }
+        ],
+    }
+
+    payload = attributed_viz._process_snapshot(  # noqa: SLF001 - regression coverage
+        snapshot,
+        tensor_index,
+    )
+
+    assert payload["history_recorded"] is False
+    assert payload["peak"] == 128
+    assert payload["peak_label"] == "Active Alloc"
+    assert payload["events_display"] == "n/a"
+
+
 def test_render_attributed_html_embeds_timeline_segment_and_active_views() -> None:
     snapshot = {
         "segments": [

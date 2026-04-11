@@ -367,6 +367,11 @@ def _process_snapshot(
 
     active_memory_table.sort(key=lambda x: x["size"], reverse=True)
     offenders = _build_snapshot_offenders(active_memory_table)
+    active_allocated = sum(int(row.get("size", 0)) for row in active_memory_table)
+    history_recorded = bool(traces)
+    peak_value = peak if history_recorded else active_allocated
+    peak_label = "Peak Alloc" if history_recorded else "Active Alloc"
+    events_display = str(len(events)) if history_recorded else "n/a"
 
     # Summary of current segments
     total_reserved = sum(s.get("total_size", 0) for s in raw_segments)
@@ -374,13 +379,16 @@ def _process_snapshot(
     return {
         "events": events,
         "offenders": offenders[:50],
-        "peak": peak,
-        "peak_h": _sz(peak),
+        "peak": peak_value,
+        "peak_h": _sz(peak_value),
+        "peak_label": peak_label,
         "total_reserved": total_reserved,
         "total_reserved_h": _sz(total_reserved),
         "num_events": len(events),
+        "events_display": events_display,
         "num_segments": len(raw_segments),
         "attribution_count": tensor_index.get("storage_pointer_count", 0),
+        "history_recorded": history_recorded,
         "segments": formatted_segments,
         "active_table": active_memory_table,
     }
@@ -510,8 +518,8 @@ html,body{height:100%;background:var(--bg);color:var(--text);
   <div class="header">
     <h1>⚡ Stormlog GPU Attribution</h1>
     <div class="stats">
-      <div class="stat"><div class="val" id="stat-peak">—</div><div class="lbl">Peak Alloc</div></div>
-      <div class="stat"><div class="val" id="stat-events">—</div><div class="lbl">Events</div></div>
+      <div class="stat"><div class="val" id="stat-peak">—</div><div class="lbl" id="stat-peak-label">Peak Alloc</div></div>
+      <div class="stat"><div class="val" id="stat-events">—</div><div class="lbl" id="stat-events-label">Events</div></div>
       <div class="stat"><div class="val" id="stat-tensors">—</div><div class="lbl">Tensors Tracked</div></div>
       <div class="stat"><div class="val" id="stat-segments">—</div><div class="lbl">Segments</div></div>
     </div>
@@ -576,6 +584,9 @@ function fmtTime(ms){
   if(ms>=1000)return(ms/1000).toFixed(2)+'s';
   return ms.toFixed(1)+'ms';
 }
+const HISTORY_NOTE = DATA.history_recorded
+  ? ''
+  : 'Trace history was not recorded for this snapshot. Timeline stats reflect the live snapshot state only.';
 
 // === COLOR PALETTE ===
 const COLORS = [
@@ -596,9 +607,15 @@ function colorFor(name){
 
 // === POPULATE STATS ===
 document.getElementById('stat-peak').textContent = DATA.peak_h;
-document.getElementById('stat-events').textContent = DATA.num_events.toLocaleString();
+document.getElementById('stat-peak-label').textContent = DATA.peak_label;
+document.getElementById('stat-events').textContent = DATA.events_display;
+document.getElementById('stat-events-label').textContent = DATA.history_recorded ? 'Events' : 'Trace Events';
 document.getElementById('stat-tensors').textContent = DATA.attribution_count;
 document.getElementById('stat-segments').textContent = DATA.num_segments;
+if (HISTORY_NOTE) {
+  const dp = document.getElementById('detail-panel');
+  dp.innerHTML = `<div class="detail-title">${HISTORY_NOTE}</div>`;
+}
 
 // === BUILD OFFENDER LIST ===
 const offList = document.getElementById('offender-list');
