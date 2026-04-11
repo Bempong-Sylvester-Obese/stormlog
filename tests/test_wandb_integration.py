@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import json
+import math
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -272,14 +273,26 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
     assert run.summary["stormlog_peak_memory_bytes"] == 4096
     assert run.summary["stormlog_total_events"] == 3
     assert run.summary["stormlog_chart_point_count"] == 3
+    assert (
+        run.summary["stormlog_tracking_dashboard_file"]
+        == "stormlog_tracking_dashboard.html"
+    )
+    assert (
+        run.summary["stormlog_attribution_html_file"]
+        == "cuda_allocator_state_history_annotated.html"
+    )
     assert run.logged_steps.count(None) >= 3
     assert any("stormlog_alerts" in payload for payload in run.logged)
     assert any("stormlog_memory_timeline_table" in payload for payload in run.logged)
     assert any("stormlog_memory_timeline_plot" in payload for payload in run.logged)
-    assert any("stormlog_tracking_dashboard" in payload for payload in run.logged)
-    assert any("stormlog_attribution_html" in payload for payload in run.logged)
     assert any("stormlog_tensor_attribution" in payload for payload in run.logged)
-    assert len(run.artifacts) == 3
+    assert {artifact.type for artifact in run.artifacts} == {
+        "stormlog-attribution",
+        "stormlog-oom-dump",
+        "stormlog-telemetry-sink",
+        "stormlog-track-output",
+        "stormlog-tracking-dashboard",
+    }
 
 
 def test_export_diagnose_bundle_logs_summary_and_artifact(
@@ -367,9 +380,79 @@ def test_export_diagnose_bundle_logs_summary_and_artifact(
     assert run.summary["stormlog_artifact_dir"] == "stormlog-diagnose"
     assert run.summary["stormlog_session_id"] == "diag-12345678"
     assert run.summary["stormlog_allocated_bytes"] == 1024
+    assert (
+        run.summary["stormlog_attribution_html_file"]
+        == "cuda_allocator_state_history_annotated.html"
+    )
     assert any("stormlog_diagnostic_suggestions" in payload for payload in run.logged)
-    assert any("stormlog_attribution_html" in payload for payload in run.logged)
-    assert len(run.artifacts) == 1
+    assert {artifact.type for artifact in run.artifacts} == {
+        "stormlog-attribution",
+        "stormlog-diagnose",
+    }
+
+
+def test_tracking_visual_artifacts_respect_log_artifacts_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+
+    export_tracking_run_to_wandb(
+        wandb_config_from_namespace(Namespace(wandb=True)),
+        command_name="stormlog-track",
+        session_summary=create_session_summary(source="stormlog.tracker"),
+        stats={"peak_memory": 128},
+        events=[
+            {
+                "timestamp": 1.0,
+                "event_type": "sample",
+                "memory_allocated": 128,
+                "memory_reserved": 256,
+                "device_used": 256,
+                "device_total": 1024,
+            }
+        ],
+    )
+
+    run = fake_wandb.created_runs[0]
+    assert run.artifacts == []
+    assert "stormlog_tracking_dashboard_file" not in run.summary
+
+
+def test_tracking_plots_preserve_missing_metric_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+
+    export_tracking_run_to_wandb(
+        wandb_config_from_namespace(Namespace(wandb=True)),
+        command_name="stormlog-track",
+        session_summary=create_session_summary(source="stormlog.tracker"),
+        stats={"peak_memory": 128},
+        events=[
+            {
+                "timestamp": 1.0,
+                "event_type": "sample",
+                "memory_reserved": 256,
+                "device_used": 256,
+            },
+            {
+                "timestamp": 2.0,
+                "event_type": "sample",
+                "memory_reserved": 512,
+                "device_used": 512,
+            },
+        ],
+    )
+
+    memory_plot_call = next(
+        call
+        for call in fake_wandb.plot.calls
+        if call.get("title") == "Stormlog Memory Timeline"
+    )
+    assert memory_plot_call["keys"] == ["reserved_bytes", "device_used_bytes"]
+    assert all(not math.isnan(value) for value in memory_plot_call["ys"][0])
 
 
 def test_export_uses_active_wandb_run_without_creating_another(
