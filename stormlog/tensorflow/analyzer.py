@@ -14,6 +14,7 @@ from stormlog.collective_attribution import (
     resolve_collective_attribution_config,
 )
 from stormlog.gap_analysis import GapFinding, analyze_hidden_memory_gaps
+from stormlog.phases import PhaseTimelineResolver
 from stormlog.telemetry import TelemetryEventV2
 
 from .utils import format_memory
@@ -346,7 +347,12 @@ class MemoryAnalyzer:
     # Hidden-memory gap analysis (operates on TelemetryEventV2 series)
     # ------------------------------------------------------------------
 
-    def analyze_memory_gaps(self, events: List[TelemetryEventV2]) -> List[GapFinding]:
+    def analyze_memory_gaps(
+        self,
+        events: List[TelemetryEventV2],
+        *,
+        phase_resolver: PhaseTimelineResolver | None = None,
+    ) -> List[GapFinding]:
         """Classify allocator-vs-device hidden memory gaps over time.
 
         Args:
@@ -360,15 +366,20 @@ class MemoryAnalyzer:
             thresholds=self.thresholds,
             format_memory=format_memory,
             remediation_by_classification=_GAP_REMEDIATION_BY_CLASSIFICATION,
+            phase_resolver=phase_resolver,
         )
 
     def analyze_collective_attribution(
-        self, events: List[TelemetryEventV2]
+        self,
+        events: List[TelemetryEventV2],
+        *,
+        phase_resolver: PhaseTimelineResolver | None = None,
     ) -> List[CollectiveAttributionResult]:
         """Attribute hidden-memory spikes to collective communication phases."""
         return attribute_collective_memory(
             events=events,
             config=self.collective_attribution_config,
+            phase_resolver=phase_resolver,
         )
 
     def score_optimization(
@@ -442,8 +453,15 @@ class MemoryAnalyzer:
 
         # Hidden-memory gap analysis (only when telemetry events are supplied).
         if events is not None:
-            gap_findings = self.analyze_memory_gaps(events)
-            collective_attribution = self.analyze_collective_attribution(events)
+            phase_resolver = PhaseTimelineResolver.from_events(events)
+            gap_findings = self.analyze_memory_gaps(
+                events,
+                phase_resolver=phase_resolver,
+            )
+            collective_attribution = self.analyze_collective_attribution(
+                events,
+                phase_resolver=phase_resolver,
+            )
             optimization_score["gap_analysis"] = [asdict(f) for f in gap_findings]
             optimization_score["collective_attribution"] = [
                 asdict(result) for result in collective_attribution

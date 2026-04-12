@@ -491,11 +491,59 @@ def summarize_phase_attribution(attribution: PhaseAttribution | None) -> str | N
     return None
 
 
+def merge_phase_attributions(
+    first: PhaseAttribution | None,
+    second: PhaseAttribution | None,
+) -> PhaseAttribution | None:
+    """Merge two attribution candidates without inventing a false unique path."""
+    if first is None:
+        return second
+    if second is None:
+        return first
+
+    first_paths = _phase_paths(first)
+    second_paths = _phase_paths(second)
+    if not first_paths:
+        return second
+    if not second_paths:
+        return first
+
+    merged_paths = sorted(set(first_paths) | set(second_paths))
+    if len(merged_paths) == 1:
+        phase_path = merged_paths[0]
+        if (
+            first.phase_resolution == "unique"
+            and second.phase_resolution == "unique"
+            and first.phase_path == second.phase_path
+            and first.scope_id == second.scope_id
+            and first.thread_id == second.thread_id
+        ):
+            return first
+        return PhaseAttribution(
+            phase_resolution="unique",
+            phase_path=phase_path,
+            phase_paths=[phase_path],
+        )
+
+    return PhaseAttribution(
+        phase_resolution="ambiguous",
+        phase_paths=merged_paths,
+    )
+
+
 def _normalize_phase_name(name: str) -> str:
     normalized = str(name).strip()
     if not normalized:
         raise ValueError("phase name must be a non-empty string")
     return normalized
+
+
+def _phase_paths(attribution: PhaseAttribution) -> list[str]:
+    if attribution.phase_paths:
+        return [path for path in attribution.phase_paths if path]
+    if attribution.phase_path:
+        return [attribution.phase_path]
+    return []
 
 
 def _phase_scope_payload(active: _ActivePhase, *, action: str) -> dict[str, Any]:
@@ -532,5 +580,6 @@ __all__ = [
     "extract_phase_scope",
     "format_phase_path",
     "is_phase_boundary_event",
+    "merge_phase_attributions",
     "summarize_phase_attribution",
 ]

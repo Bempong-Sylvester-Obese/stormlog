@@ -12,7 +12,7 @@ import pytest
 
 import stormlog.cli as gpumemprof_cli
 from stormlog.cli import cmd_analyze
-from stormlog.telemetry import telemetry_event_to_dict
+from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 
@@ -49,6 +49,135 @@ def _build_cross_rank_events() -> list:
     return events
 
 
+def _build_cross_rank_events_with_phases() -> list:
+    session_id = "session-cli-phase"
+    events = []
+    for rank in range(3):
+        events.append(
+            telemetry_event_from_record(
+                {
+                    "schema_version": 3,
+                    "session_id": session_id,
+                    "timestamp_ns": BASE_NS - 1_000_000 + rank * 100_000,
+                    "event_type": "phase_enter",
+                    "collector": "stormlog.cuda_tracker",
+                    "sampling_interval_ms": 100,
+                    "pid": 1,
+                    "host": f"host-{rank}",
+                    "job_id": "cli-job",
+                    "rank": rank,
+                    "local_rank": rank,
+                    "world_size": 3,
+                    "device_id": 0,
+                    "allocator_allocated_bytes": 1 * _GB,
+                    "allocator_reserved_bytes": 1 * _GB,
+                    "allocator_active_bytes": None,
+                    "allocator_inactive_bytes": None,
+                    "allocator_change_bytes": 0,
+                    "device_used_bytes": 1 * _GB,
+                    "device_free_bytes": 15 * _GB,
+                    "device_total_bytes": 16 * _GB,
+                    "context": "Phase entered: train / forward",
+                    "metadata": {
+                        "phase_scope": {
+                            "action": "enter",
+                            "name": "forward",
+                            "path": ["train", "forward"],
+                            "depth": 2,
+                            "scope_id": f"phase-{rank}",
+                            "parent_scope_id": "phase-train",
+                            "thread_id": 1,
+                            "thread_name": "MainThread",
+                            "sequence": rank + 1,
+                        }
+                    },
+                }
+            )
+        )
+    for event in _build_cross_rank_events():
+        record = telemetry_event_to_dict(event)
+        record["schema_version"] = 3
+        record["session_id"] = session_id
+        events.append(telemetry_event_from_record(record))
+    return events
+
+
+def _build_single_rank_gap_events_with_phase() -> list:
+    session_id = "session-cli-gap-phase"
+    events = [
+        telemetry_event_from_record(
+            {
+                "schema_version": 3,
+                "session_id": session_id,
+                "timestamp_ns": BASE_NS - 1_000_000,
+                "event_type": "phase_enter",
+                "collector": "stormlog.cuda_tracker",
+                "sampling_interval_ms": 100,
+                "pid": 1,
+                "host": "host-0",
+                "job_id": "cli-gap-job",
+                "rank": 0,
+                "local_rank": 0,
+                "world_size": 1,
+                "device_id": 0,
+                "allocator_allocated_bytes": 2_000_000_000,
+                "allocator_reserved_bytes": 2_500_000_000,
+                "allocator_active_bytes": None,
+                "allocator_inactive_bytes": None,
+                "allocator_change_bytes": 0,
+                "device_used_bytes": 2_500_000_000,
+                "device_free_bytes": 13 * _GB,
+                "device_total_bytes": 16 * _GB,
+                "context": "Phase entered: train / forward",
+                "metadata": {
+                    "phase_scope": {
+                        "action": "enter",
+                        "name": "forward",
+                        "path": ["train", "forward"],
+                        "depth": 2,
+                        "scope_id": "phase-gap",
+                        "parent_scope_id": "phase-train",
+                        "thread_id": 1,
+                        "thread_name": "MainThread",
+                        "sequence": 1,
+                    }
+                },
+            }
+        )
+    ]
+    for index in range(12):
+        events.append(
+            telemetry_event_from_record(
+                {
+                    "schema_version": 3,
+                    "session_id": session_id,
+                    "timestamp_ns": BASE_NS + index * INTERVAL_NS,
+                    "event_type": "sample",
+                    "collector": "stormlog.cuda_tracker",
+                    "sampling_interval_ms": 100,
+                    "pid": 1,
+                    "host": "host-0",
+                    "job_id": "cli-gap-job",
+                    "rank": 0,
+                    "local_rank": 0,
+                    "world_size": 1,
+                    "device_id": 0,
+                    "allocator_allocated_bytes": 2_000_000_000,
+                    "allocator_reserved_bytes": 2_500_000_000,
+                    "allocator_active_bytes": None,
+                    "allocator_inactive_bytes": None,
+                    "allocator_change_bytes": 0,
+                    "device_used_bytes": 3_000_000_000 + index * 150_000_000,
+                    "device_free_bytes": None,
+                    "device_total_bytes": 16 * _GB,
+                    "context": "sample",
+                    "metadata": {},
+                }
+            )
+        )
+    return events
+
+
 def test_cmd_analyze_reports_cross_rank_findings_and_writes_artifacts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -81,6 +210,64 @@ def test_cmd_analyze_reports_cross_rank_findings_and_writes_artifacts(
 
     report = json.loads(report_path.read_text(encoding="utf-8"))
     assert report["cross_rank_analysis"]["first_cause_suspects"][0]["rank"] == 2
+
+
+def test_cmd_analyze_surfaces_phase_summaries_when_present(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    input_path = tmp_path / "telemetry.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                telemetry_event_to_dict(event)
+                for event in _build_cross_rank_events_with_phases()
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_analyze(
+        argparse.Namespace(
+            input_file=str(input_path),
+            output=None,
+            format="json",
+            visualization=False,
+            plot_dir=str(tmp_path / "plots"),
+        )
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "Suspect phase: train / forward" in stdout
+
+
+def test_cmd_analyze_surfaces_gap_phase_summary_when_present(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    input_path = tmp_path / "telemetry-gap.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                telemetry_event_to_dict(event)
+                for event in _build_single_rank_gap_events_with_phase()
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_analyze(
+        argparse.Namespace(
+            input_file=str(input_path),
+            output=None,
+            format="json",
+            visualization=False,
+            plot_dir=str(tmp_path / "plots"),
+        )
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "Top gap phase: train / forward" in stdout
 
 
 def test_cmd_analyze_non_telemetry_falls_back_gracefully(
