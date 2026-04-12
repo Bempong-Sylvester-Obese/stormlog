@@ -189,6 +189,39 @@ print(f"Peak memory: {stats.get('peak_memory', 0) / (1024**3):.2f} GB")
 print(f"Events: {stats.get('total_events', 0)}")
 ```
 
+### Mark workload phases explicitly
+
+Use structured phases when you want later analysis to answer not only when
+memory changed, but what part of the workload was active at that time.
+
+```python
+from stormlog import MemoryTracker
+
+tracker = MemoryTracker(sampling_interval=0.5)
+tracker.start_tracking()
+
+with tracker.phase("train", metadata={"epoch": 3}):
+    with tracker.phase("load_batch"):
+        load_next_batch()
+    with tracker.phase("forward"):
+        loss = model(batch).sum()
+    with tracker.phase("backward"):
+        loss.backward()
+
+tracker.stop_tracking()
+tracker.export_events("track.json", format="json")
+```
+
+Notes:
+
+- `phase(name, metadata=None)` is a nested context manager
+- `enter_phase(name, metadata=None)` returns a `PhaseHandle` for manual enter/exit control
+- phases are optional; if you never instrument them, exported telemetry and analysis still work as before
+- nested paths are deterministic per thread, for example `train / forward`
+
+When phase records are present, `gpumemprof analyze` and the TUI Diagnostics tab
+surface phase-aware anomaly summaries instead of only raw timestamps.
+
 If the underlying collector becomes unstable, `MemoryTracker` keeps the tracking
 session alive, exposes collector health through `get_statistics()`, and emits
 `collector_degraded` / `collector_recovered` events instead of exporting
@@ -245,6 +278,10 @@ print(stats["total_events"])
 print(stats["final_retained_files"])
 print(stats["history_dropped_events"])
 ```
+
+`CPUMemoryTracker` supports the same `phase()` and `enter_phase()` APIs, which
+makes it a convenient place to validate phase-aware instrumentation on machines
+without a GPU runtime.
 
 ## Reusing a sink directory across runs
 

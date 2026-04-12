@@ -78,6 +78,11 @@ session begins after tracker startup succeeds and before the first record is
 persisted, and it is marked `completed` only after clean shutdown finalization
 finishes.
 
+If your Python workload instruments phases with `tracker.phase(...)` or
+`tracker.enter_phase(...)`, the same `track` output also includes structured
+`phase_enter` / `phase_exit` companion records. Phase records are optional and
+do not change the `track` CLI surface in v1.
+
 For long-running tracking sessions, Stormlog now degrades gracefully when a
 collector becomes unhealthy:
 
@@ -155,6 +160,15 @@ When multiple sessions are present, `gpumemprof analyze` selects:
 3. otherwise the newest `incomplete` session
 
 Use `--session-id` to analyze a specific capture instead of the default one.
+
+When phase records are present, `gpumemprof analyze` also reports the top
+phase-attributed gap finding and the top first-cause suspect phase in the text
+summary. The JSON report keeps the structured `phase_attribution` payload next
+to:
+
+- `gap_analysis`
+- `collective_attribution`
+- `cross_rank_analysis.first_cause_suspects`
 
 For always-on deployment posture and incident response checklists, continue with
 [Always-on Tracking](cookbook/always_on.md) and
@@ -247,6 +261,10 @@ The same session rules apply to TensorFlow tracking:
 - one session id per `tfmemprof track` run
 - sink recovery marks old running sessions as `interrupted`
 - loaders and diagnostics separate same-host runs by `session_id`, not by job or rank alone
+
+Like the PyTorch and CPU trackers, TensorFlow tracking also preserves optional
+structured phase companion records when you instrument the tracker through the
+Python API.
 
 ### Analyze TensorFlow results
 
