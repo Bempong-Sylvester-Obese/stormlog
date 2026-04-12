@@ -1,0 +1,209 @@
+"""Tests for structured phase replay and attribution."""
+
+from __future__ import annotations
+
+from stormlog.phases import (
+    PHASE_ENTER_EVENT,
+    PHASE_EXIT_EVENT,
+    PHASE_SCOPE_METADATA_KEY,
+    PhaseTimelineResolver,
+)
+from stormlog.telemetry import SCHEMA_VERSION_V3, telemetry_event_from_record
+
+
+def _make_event(
+    *,
+    timestamp_ns: int,
+    event_type: str = "sample",
+    session_id: str = "session-1",
+    rank: int = 0,
+    metadata: dict[str, object] | None = None,
+) -> object:
+    return telemetry_event_from_record(
+        {
+            "schema_version": SCHEMA_VERSION_V3,
+            "session_id": session_id,
+            "timestamp_ns": timestamp_ns,
+            "event_type": event_type,
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1234,
+            "host": "test-host",
+            "device_id": 0,
+            "allocator_allocated_bytes": 1,
+            "allocator_reserved_bytes": 1,
+            "allocator_active_bytes": 1,
+            "allocator_inactive_bytes": 0,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": 1,
+            "device_free_bytes": 1,
+            "device_total_bytes": 2,
+            "context": event_type,
+            "job_id": "job-1",
+            "rank": rank,
+            "local_rank": rank,
+            "world_size": 2,
+            "metadata": metadata or {},
+        },
+        permissive_legacy=False,
+    )
+
+
+def _phase_scope(
+    *,
+    action: str,
+    name: str,
+    path: list[str],
+    scope_id: str,
+    sequence: int,
+    thread_id: int,
+) -> dict[str, object]:
+    return {
+        PHASE_SCOPE_METADATA_KEY: {
+            "action": action,
+            "name": name,
+            "path": path,
+            "depth": len(path),
+            "scope_id": scope_id,
+            "parent_scope_id": scope_id.rsplit(":", 1)[0] if len(path) > 1 else None,
+            "thread_id": thread_id,
+            "thread_name": f"thread-{thread_id}",
+            "sequence": sequence,
+        }
+    }
+
+
+def test_phase_timeline_resolver_prefers_deepest_nested_path() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(
+            timestamp_ns=120,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="step",
+                path=["train", "step"],
+                scope_id="session-1:2",
+                sequence=2,
+                thread_id=11,
+            ),
+        ),
+        _make_event(timestamp_ns=140),
+    ]
+
+    resolver = PhaseTimelineResolver.from_events(events)
+    attribution = resolver.resolve_for_event(events[-1])
+
+    assert attribution is not None
+    assert attribution.phase_resolution == "unique"
+    assert attribution.phase_path == "train / step"
+
+
+def test_phase_timeline_resolver_treats_same_timestamp_exit_as_active() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_EXIT_EVENT,
+            metadata=_phase_scope(
+                action="exit",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=2,
+                thread_id=11,
+            ),
+        ),
+        _make_event(timestamp_ns=100),
+    ]
+
+    resolver = PhaseTimelineResolver.from_events(events)
+    attribution = resolver.resolve_for_event(events[-1])
+
+    assert attribution is not None
+    assert attribution.phase_resolution == "unique"
+    assert attribution.phase_path == "train"
+
+
+def test_phase_timeline_resolver_synthesizes_open_scope_until_session_end() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="evaluate",
+                path=["evaluate"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(timestamp_ns=200),
+    ]
+
+    resolver = PhaseTimelineResolver.from_events(events)
+    attribution = resolver.resolve_for_event(events[-1])
+
+    assert attribution is not None
+    assert attribution.phase_resolution == "unique"
+    assert attribution.phase_path == "evaluate"
+
+
+def test_phase_timeline_resolver_marks_multi_thread_overlap_ambiguous() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(
+            timestamp_ns=110,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="evaluate",
+                path=["evaluate"],
+                scope_id="session-1:2",
+                sequence=2,
+                thread_id=12,
+            ),
+        ),
+        _make_event(timestamp_ns=120),
+    ]
+
+    resolver = PhaseTimelineResolver.from_events(events)
+    attribution = resolver.resolve_for_event(events[-1])
+
+    assert attribution is not None
+    assert attribution.phase_resolution == "ambiguous"
+    assert attribution.phase_paths == ["evaluate", "train"]

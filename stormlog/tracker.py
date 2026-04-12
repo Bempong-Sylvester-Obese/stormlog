@@ -40,6 +40,7 @@ from .oom_flight_recorder import (
     OOMFlightRecorderConfig,
     classify_oom_exception,
 )
+from .phases import PHASE_EXIT_EVENT, PhaseHandle, TrackerPhaseState
 from .session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -182,6 +183,7 @@ class MemoryTracker:
         self._collector_retry_backoff_initial_s = 1.0
         self._collector_retry_backoff_factor = 2.0
         self._collector_retry_backoff_cap_s = 30.0
+        self._phase_state = TrackerPhaseState()
 
         # Memory thresholds for alerts
         self.thresholds: Dict[str, float] = {
@@ -570,6 +572,7 @@ class MemoryTracker:
         self._reset_collector_session_state()
         self._reset_tracking_state_for_new_session()
         self._session_summary = None
+        self._phase_state.reset()
         self._ensure_telemetry_sink()
         self._stop_event.clear()
         self.stats["tracking_start_time"] = time.time()
@@ -602,6 +605,7 @@ class MemoryTracker:
                 self._session_summary,
                 ended_at_ns=now_ns(),
             )
+        self._phase_state.reset()
 
     def _tracking_loop(self) -> None:
         """Main tracking loop running in background thread."""
@@ -671,6 +675,63 @@ class MemoryTracker:
                     callback(event)
                 except Exception as exc:
                     logger.debug("Alert callback error (suppressed): %s", exc)
+
+    def enter_phase(
+        self, name: str, *, metadata: Optional[Dict[str, Any]] = None
+    ) -> PhaseHandle:
+        """Enter one structured workload phase while tracking is active."""
+        if not self.is_tracking:
+            raise RuntimeError("Tracking must be active before entering a phase.")
+        session = self._open_session()
+        boundary = self._phase_state.enter_phase(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            name=name,
+            metadata=metadata,
+        )
+        self._add_event(
+            boundary.event_type,
+            0,
+            boundary.context,
+            metadata=boundary.metadata,
+        )
+        return PhaseHandle(
+            scope_id=boundary.scope_id,
+            name=name,
+            path=boundary.path,
+            close_callback=lambda: self._emit_phase_exit(boundary.scope_id),
+        )
+
+    @contextmanager
+    def phase(self, name: str, *, metadata: Optional[Dict[str, Any]] = None) -> Any:
+        """Context manager that emits structured phase enter and exit records."""
+        handle = self.enter_phase(name, metadata=metadata)
+        try:
+            yield handle
+        finally:
+            self._close_phase_handle(handle)
+
+    def _close_phase_handle(self, handle: PhaseHandle) -> None:
+        handle.close()
+
+    def _emit_phase_exit(self, scope_id: str) -> None:
+        session = self._session_summary
+        if session is None:
+            return
+        boundary = self._phase_state.exit_phase(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            scope_id=scope_id,
+            thread_id=int(threading.current_thread().ident or 0),
+        )
+        if boundary is None:
+            return
+        self._add_event(
+            PHASE_EXIT_EVENT,
+            0,
+            boundary.context,
+            metadata=boundary.metadata,
+        )
 
     def _check_alerts(
         self,
