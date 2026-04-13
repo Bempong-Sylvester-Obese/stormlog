@@ -178,6 +178,63 @@ def _build_single_rank_gap_events_with_phase() -> list:
     return events
 
 
+def _build_single_rank_gap_events_with_ambiguous_phase() -> list:
+    session_id = "session-cli-gap-ambiguous"
+    phase_events = []
+    for thread_id, sequence, scope_id in (
+        (1, 1, "phase-gap-a"),
+        (2, 2, "phase-gap-b"),
+    ):
+        phase_events.append(
+            telemetry_event_from_record(
+                {
+                    "schema_version": 3,
+                    "session_id": session_id,
+                    "timestamp_ns": BASE_NS - 1_000_000 + sequence,
+                    "event_type": "phase_enter",
+                    "collector": "stormlog.cuda_tracker",
+                    "sampling_interval_ms": 100,
+                    "pid": 1,
+                    "host": "host-0",
+                    "job_id": "cli-gap-job",
+                    "rank": 0,
+                    "local_rank": 0,
+                    "world_size": 1,
+                    "device_id": 0,
+                    "allocator_allocated_bytes": 2_000_000_000,
+                    "allocator_reserved_bytes": 2_500_000_000,
+                    "allocator_active_bytes": None,
+                    "allocator_inactive_bytes": None,
+                    "allocator_change_bytes": 0,
+                    "device_used_bytes": 2_500_000_000,
+                    "device_free_bytes": 13 * _GB,
+                    "device_total_bytes": 16 * _GB,
+                    "context": "Phase entered: train / forward",
+                    "metadata": {
+                        "phase_scope": {
+                            "action": "enter",
+                            "name": "forward",
+                            "path": ["train", "forward"],
+                            "depth": 2,
+                            "scope_id": scope_id,
+                            "parent_scope_id": "phase-train",
+                            "thread_id": thread_id,
+                            "thread_name": f"thread-{thread_id}",
+                            "sequence": sequence,
+                        }
+                    },
+                }
+            )
+        )
+    sample_events = []
+    for event in _build_single_rank_gap_events_with_phase()[1:]:
+        record = telemetry_event_to_dict(event)
+        record["schema_version"] = 3
+        record["session_id"] = session_id
+        sample_events.append(telemetry_event_from_record(record))
+    return [*phase_events, *sample_events]
+
+
 def test_cmd_analyze_reports_cross_rank_findings_and_writes_artifacts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -268,6 +325,35 @@ def test_cmd_analyze_surfaces_gap_phase_summary_when_present(
     assert exit_code == 0
     stdout = capsys.readouterr().out
     assert "Top gap phase: train / forward" in stdout
+
+
+def test_cmd_analyze_marks_ambiguous_gap_phase_summary(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    input_path = tmp_path / "telemetry-gap-ambiguous.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                telemetry_event_to_dict(event)
+                for event in _build_single_rank_gap_events_with_ambiguous_phase()
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_analyze(
+        argparse.Namespace(
+            input_file=str(input_path),
+            output=None,
+            format="json",
+            visualization=False,
+            plot_dir=str(tmp_path / "plots"),
+        )
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "Top gap phase: (ambiguous) train / forward" in stdout
 
 
 def test_cmd_analyze_non_telemetry_falls_back_gracefully(

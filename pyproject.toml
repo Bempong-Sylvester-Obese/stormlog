@@ -74,7 +74,7 @@ dev = [
     "pexpect>=4.9.0",
     "pytest-textual-snapshot>=1.1.0",
     "jsonschema>=4.0.0",
-    "black>=21.0.0",
+    "black==24.3.0",
     "flake8>=3.8.0",
     "mypy>=0.910",
     "isort>=5.9.0",
@@ -143,6 +143,7 @@ stormlog = ["*.txt", "*.md"]
 # Code formatting and linting
 [tool.black]
 line-length = 88
+required-version = "24.3.0"
 target-version = ['py310', 'py311', 'py312']
 include = '\.pyi?$'
 extend-exclude = '''

@@ -13,6 +13,7 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
+from .phases import summarize_phase_resolution
 from .telemetry_sink import TelemetrySinkConfig
 from .utils import (
     _detect_gpu_hardware,
@@ -879,15 +880,19 @@ def _input_artifact_size_bytes(path: Path) -> int:
 def _phase_summary_from_payload(payload: Any) -> str | None:
     if not isinstance(payload, dict):
         return None
-    resolution = payload.get("phase_resolution")
     phase_path = payload.get("phase_path")
     phase_paths = payload.get("phase_paths")
-    if resolution == "unique" and isinstance(phase_path, str) and phase_path:
-        return phase_path
-    if resolution == "ambiguous" and isinstance(phase_paths, list):
-        labels = [str(path) for path in phase_paths if str(path)]
-        return " | ".join(labels) if labels else None
-    return None
+    normalized_phase_path = phase_path if isinstance(phase_path, str) else None
+    normalized_phase_paths = (
+        [str(path) for path in phase_paths if str(path)]
+        if isinstance(phase_paths, list)
+        else None
+    )
+    return summarize_phase_resolution(
+        phase_resolution=payload.get("phase_resolution"),
+        phase_path=normalized_phase_path,
+        phase_paths=normalized_phase_paths,
+    )
 
 
 def _build_analyze_summary(

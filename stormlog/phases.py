@@ -484,10 +484,29 @@ def summarize_phase_attribution(attribution: PhaseAttribution | None) -> str | N
     """Return a user-facing summary string for one phase attribution."""
     if attribution is None:
         return None
-    if attribution.phase_resolution == "unique" and attribution.phase_path:
-        return attribution.phase_path
-    if attribution.phase_resolution == "ambiguous" and attribution.phase_paths:
-        return " | ".join(attribution.phase_paths)
+    return summarize_phase_resolution(
+        phase_resolution=attribution.phase_resolution,
+        phase_path=attribution.phase_path,
+        phase_paths=attribution.phase_paths,
+    )
+
+
+def summarize_phase_resolution(
+    *,
+    phase_resolution: str | None,
+    phase_path: str | None = None,
+    phase_paths: Sequence[str] | None = None,
+) -> str | None:
+    """Render one phase resolution without hiding ambiguity semantics."""
+    labels = [path for path in (phase_paths or ()) if path]
+    if phase_resolution == "unique":
+        if phase_path:
+            return phase_path
+        if len(labels) == 1:
+            return labels[0]
+        return None
+    if phase_resolution == "ambiguous" and labels:
+        return f"(ambiguous) {' | '.join(labels)}"
     return None
 
 
@@ -520,8 +539,7 @@ def merge_phase_attributions(
         ):
             return first
         return PhaseAttribution(
-            phase_resolution="unique",
-            phase_path=phase_path,
+            phase_resolution="ambiguous",
             phase_paths=[phase_path],
         )
 
@@ -582,4 +600,5 @@ __all__ = [
     "is_phase_boundary_event",
     "merge_phase_attributions",
     "summarize_phase_attribution",
+    "summarize_phase_resolution",
 ]

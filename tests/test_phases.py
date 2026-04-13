@@ -6,7 +6,10 @@ from stormlog.phases import (
     PHASE_ENTER_EVENT,
     PHASE_EXIT_EVENT,
     PHASE_SCOPE_METADATA_KEY,
+    PhaseAttribution,
     PhaseTimelineResolver,
+    merge_phase_attributions,
+    summarize_phase_attribution,
 )
 from stormlog.telemetry import SCHEMA_VERSION_V3, telemetry_event_from_record
 
@@ -207,3 +210,42 @@ def test_phase_timeline_resolver_marks_multi_thread_overlap_ambiguous() -> None:
     assert attribution is not None
     assert attribution.phase_resolution == "ambiguous"
     assert attribution.phase_paths == ["evaluate", "train"]
+
+
+def test_merge_phase_attributions_keeps_same_label_multi_thread_overlap_ambiguous() -> (
+    None
+):
+    merged = merge_phase_attributions(
+        PhaseAttribution(
+            phase_resolution="unique",
+            phase_path="train / step",
+            phase_paths=["train / step"],
+            scope_id="scope-1",
+            thread_id=11,
+            thread_name="thread-11",
+        ),
+        PhaseAttribution(
+            phase_resolution="unique",
+            phase_path="train / step",
+            phase_paths=["train / step"],
+            scope_id="scope-2",
+            thread_id=12,
+            thread_name="thread-12",
+        ),
+    )
+
+    assert merged is not None
+    assert merged.phase_resolution == "ambiguous"
+    assert merged.phase_paths == ["train / step"]
+    assert merged.phase_path is None
+
+
+def test_summarize_phase_attribution_marks_ambiguous_single_label() -> None:
+    summary = summarize_phase_attribution(
+        PhaseAttribution(
+            phase_resolution="ambiguous",
+            phase_paths=["train / step"],
+        )
+    )
+
+    assert summary == "(ambiguous) train / step"
