@@ -13,6 +13,7 @@ from typing import Any
 import pytest
 
 import stormlog.cuda_native_debug as native_debug
+from stormlog._wandb.core import read_json_if_exists
 from stormlog.session import create_session_summary
 from stormlog.wandb_integration import (
     ensure_wandb_available,
@@ -123,6 +124,13 @@ def test_wandb_config_from_namespace_collects_explicit_values() -> None:
     assert config.log_tables is True
     assert config.log_artifacts is True
     assert config.log_attribution is True
+
+
+def test_read_json_if_exists_ignores_non_object_payloads(tmp_path: Path) -> None:
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text('["not", "an", "object"]', encoding="utf-8")
+
+    assert read_json_if_exists(payload_path) is None
 
 
 def test_ensure_wandb_available_reports_optional_dependency_guidance(

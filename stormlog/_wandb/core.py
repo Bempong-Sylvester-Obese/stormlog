@@ -237,9 +237,12 @@ def read_json_if_exists(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
+    if isinstance(payload, dict):
+        return payload
+    return None
 
 
 def log_file_artifact(
