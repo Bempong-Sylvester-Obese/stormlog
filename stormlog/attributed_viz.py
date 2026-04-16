@@ -1112,16 +1112,22 @@ def _render_preview_chart(
         '<stop offset="0%" stop-color="#58a6ff" stop-opacity="0.26"/>'
         '<stop offset="100%" stop-color="#58a6ff" stop-opacity="0.04"/>'
         "</linearGradient>"
+        '<clipPath id="stormlogPreviewPlotClip">'
+        f'<rect x="{margin_left}" y="{margin_top}" width="{chart_width}" '
+        f'height="{chart_height}"/>'
+        "</clipPath>"
         "</defs>"
-        + f'<rect x="{margin_left}" y="{baseline:.2f}" width="{chart_width}" '
-        f'height="{margin_bottom}" class="preview-axis-band"/>'
         + "".join(grid)
-        + f'<line x1="{margin_left}" x2="{width - margin_right}" '
-        f'y1="{baseline:.2f}" y2="{baseline:.2f}" class="preview-axis-line"/>'
-        + "".join(x_ticks)
+        + '<g clip-path="url(#stormlogPreviewPlotClip)">'
         + f'<path d="{area}" fill="url(#stormlogPreviewArea)"/>'
         + f'<path d="{path}" fill="none" stroke="#58a6ff" stroke-width="2"/>'
         + "".join(marker_nodes)
+        + "</g>"
+        + f'<rect x="{margin_left}" y="{baseline:.2f}" width="{chart_width}" '
+        f'height="{margin_bottom}" class="preview-axis-band"/>'
+        + f'<line x1="{margin_left}" x2="{width - margin_right}" '
+        f'y1="{baseline:.2f}" y2="{baseline:.2f}" class="preview-axis-line"/>'
+        + "".join(x_ticks)
         + "</svg>"
     )
 

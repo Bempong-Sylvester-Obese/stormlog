@@ -398,4 +398,8 @@ def test_render_attributed_wandb_preview_html_is_static_and_sampled() -> None:
     assert "<script>" not in preview_html
     assert 'dominant-baseline="hanging"' in preview_html
     assert "preview-axis-band" in preview_html
+    assert "stormlogPreviewPlotClip" in preview_html
+    assert preview_html.index('fill="url(#stormlogPreviewArea)"') < preview_html.index(
+        'class="preview-axis-band"'
+    )
     assert len(preview_html) < len(full_html)
