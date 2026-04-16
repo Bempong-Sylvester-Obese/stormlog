@@ -12,6 +12,7 @@ from typing import Any
 
 import pytest
 
+import stormlog.cuda_native_debug as native_debug
 from stormlog.session import create_session_summary
 from stormlog.wandb_integration import (
     ensure_wandb_available,
@@ -19,7 +20,6 @@ from stormlog.wandb_integration import (
     export_tracking_run_to_wandb,
     wandb_config_from_namespace,
 )
-import stormlog.cuda_native_debug as native_debug
 
 
 class _FakeArtifact:

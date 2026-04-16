@@ -15,9 +15,9 @@ Usage::
 
 from __future__ import annotations
 
-from html import escape
 import json
 import logging
+from html import escape
 from typing import Any, Dict, List
 
 logger = logging.getLogger(__name__)

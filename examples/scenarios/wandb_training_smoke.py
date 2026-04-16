@@ -26,12 +26,12 @@ except ImportError as exc:  # pragma: no cover - exercised in runtime envs
         "Install with `pip install 'stormlog[wandb]'`."
     ) from exc
 
+from stormlog.cpu_profiler import CPUMemoryTracker
 from stormlog.cuda_native_debug import (
     capture_cuda_snapshot_artifacts,
     cuda_memory_history,
     cuda_memory_history_supported,
 )
-from stormlog.cpu_profiler import CPUMemoryTracker
 from stormlog.telemetry_sink import TelemetrySinkConfig
 from stormlog.tracker import MemoryTracker
 from stormlog.wandb_integration import WandbExportConfig, export_tracking_run_to_wandb
