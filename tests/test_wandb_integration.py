@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import json
 import math
+import pickle
 import sys
 from argparse import Namespace
 from pathlib import Path
@@ -18,6 +19,7 @@ from stormlog.wandb_integration import (
     export_tracking_run_to_wandb,
     wandb_config_from_namespace,
 )
+import stormlog.cuda_native_debug as native_debug
 
 
 class _FakeArtifact:
@@ -164,12 +166,47 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
         "<html><body>stormlog attribution</body></html>",
         encoding="utf-8",
     )
+    with (oom_dir / native_debug.SNAPSHOT_PICKLE_FILENAME).open("wb") as handle:
+        pickle.dump(
+            {
+                "segments": [
+                    {
+                        "address": 4096,
+                        "segment_type": "large",
+                        "total_size": 128,
+                        "allocated_size": 64,
+                        "active_size": 64,
+                        "blocks": [
+                            {
+                                "address": 8192,
+                                "size": 64,
+                                "state": "active_allocated",
+                                "frames": [],
+                            }
+                        ],
+                    }
+                ],
+                "device_traces": [
+                    [
+                        {
+                            "action": "alloc",
+                            "addr": 8192,
+                            "size": 64,
+                            "time_us": 100,
+                            "frames": [],
+                        }
+                    ]
+                ],
+            },
+            handle,
+        )
     (oom_dir / "cuda_tensor_attribution.json").write_text(
         json.dumps(
             {
                 "attributed_storage_pointers": [
                     {
                         "storage_ptr": "0x1",
+                        "storage_ptr_int": 8192,
                         "names": ["model.layer.weight"],
                         "tensor_count": 1,
                         "tensors": [
@@ -288,6 +325,13 @@ def test_export_tracking_run_logs_metrics_tables_and_artifacts(
     assert any("stormlog_tracking_dashboard" in payload for payload in run.logged)
     assert any("stormlog_attribution_html" in payload for payload in run.logged)
     assert any("stormlog_tensor_attribution" in payload for payload in run.logged)
+    attribution_html = next(
+        payload["stormlog_attribution_html"].html
+        for payload in run.logged
+        if "stormlog_attribution_html" in payload
+    )
+    assert "Stormlog GPU Attribution Preview" in attribution_html
+    assert "<script>" not in attribution_html
     assert {artifact.type for artifact in run.artifacts} == {
         "stormlog-attribution",
         "stormlog-oom-dump",
@@ -388,6 +432,13 @@ def test_export_diagnose_bundle_logs_summary_and_artifact(
     )
     assert any("stormlog_diagnostic_suggestions" in payload for payload in run.logged)
     assert any("stormlog_attribution_html" in payload for payload in run.logged)
+    attribution_html = next(
+        payload["stormlog_attribution_html"].html
+        for payload in run.logged
+        if "stormlog_attribution_html" in payload
+    )
+    assert "Stormlog GPU Attribution Preview" in attribution_html
+    assert "<script>" not in attribution_html
     assert {artifact.type for artifact in run.artifacts} == {
         "stormlog-attribution",
         "stormlog-diagnose",

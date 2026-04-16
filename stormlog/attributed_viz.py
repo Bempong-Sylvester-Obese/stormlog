@@ -15,6 +15,7 @@ Usage::
 
 from __future__ import annotations
 
+from html import escape
 import json
 import logging
 from typing import Any, Dict, List
@@ -990,6 +991,415 @@ renderActiveTable();
 </script>
 </body>
 </html>"""
+
+
+def _sample_indices(length: int, limit: int) -> List[int]:
+    if length <= 0:
+        return []
+    if limit <= 0 or length <= limit:
+        return list(range(length))
+
+    indices: List[int] = []
+    seen: set[int] = set()
+    for i in range(limit):
+        idx = round(i * (length - 1) / (limit - 1))
+        if idx in seen:
+            continue
+        indices.append(idx)
+        seen.add(idx)
+    if indices[-1] != length - 1:
+        indices.append(length - 1)
+    return indices
+
+
+def _sample_items(items: List[Dict[str, Any]], limit: int) -> List[Dict[str, Any]]:
+    return [items[idx] for idx in _sample_indices(len(items), limit)]
+
+
+def _render_preview_chart(
+    timeline: List[Dict[str, Any]],
+    alloc_markers: List[Dict[str, Any]],
+) -> str:
+    width = 900
+    height = 320
+    margin_left = 56
+    margin_right = 20
+    margin_top = 16
+    margin_bottom = 28
+    chart_width = width - margin_left - margin_right
+    chart_height = height - margin_top - margin_bottom
+    baseline = margin_top + chart_height
+
+    if not timeline:
+        return (
+            '<div class="preview-empty">'
+            "Trace history was unavailable for this snapshot."
+            "</div>"
+        )
+
+    t_min = float(timeline[0]["t"])
+    t_max = float(timeline[-1]["t"])
+    cum_max = max(float(point["cum"]) for point in timeline)
+    cum_max = max(cum_max, 1.0)
+
+    def x_scale(t: float) -> float:
+        span = t_max - t_min
+        if span <= 0:
+            return margin_left
+        return margin_left + ((t - t_min) / span) * chart_width
+
+    def y_scale(v: float) -> float:
+        return margin_top + chart_height - (v / cum_max) * chart_height
+
+    line_points = [
+        (x_scale(float(point["t"])), y_scale(float(point["cum"]))) for point in timeline
+    ]
+    path = " ".join(
+        f"{'M' if idx == 0 else 'L'} {x:.2f} {y:.2f}"
+        for idx, (x, y) in enumerate(line_points)
+    )
+    area = (
+        path
+        + f" L {line_points[-1][0]:.2f} {baseline:.2f}"
+        + f" L {line_points[0][0]:.2f} {baseline:.2f} Z"
+    )
+
+    grid = []
+    for tick in range(5):
+        value = cum_max * tick / 4
+        y = y_scale(value)
+        label = escape(_sz(int(value)))
+        grid.append(
+            f'<line x1="{margin_left}" x2="{width - margin_right}" '
+            f'y1="{y:.2f}" y2="{y:.2f}" class="preview-grid"/>'
+        )
+        grid.append(
+            f'<text x="{margin_left - 8}" y="{y + 4:.2f}" text-anchor="end" '
+            f'class="preview-axis">{label}</text>'
+        )
+
+    x_ticks = []
+    for tick in range(5):
+        time_value = t_min + ((t_max - t_min) * tick / 4 if t_max > t_min else 0)
+        x = x_scale(time_value)
+        x_ticks.append(
+            f'<text x="{x:.2f}" y="{height - 6}" text-anchor="middle" '
+            f'class="preview-axis">{escape(_fmt_preview_time(time_value))}</text>'
+        )
+
+    marker_nodes = []
+    for marker in alloc_markers:
+        x = x_scale(float(marker["t"]))
+        y = y_scale(float(marker["cum"]))
+        color = escape(marker["color"])
+        title = escape(f'{marker["name"]} · {marker["size_h"]}')
+        marker_nodes.append(
+            f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3" fill="{color}">'
+            f"<title>{title}</title></circle>"
+        )
+
+    return (
+        f'<svg viewBox="0 0 {width} {height}" class="preview-chart" '
+        'role="img" aria-label="Sampled attribution timeline">'
+        "<defs>"
+        '<linearGradient id="stormlogPreviewArea" x1="0" y1="0" x2="0" y2="1">'
+        '<stop offset="0%" stop-color="#58a6ff" stop-opacity="0.26"/>'
+        '<stop offset="100%" stop-color="#58a6ff" stop-opacity="0.04"/>'
+        "</linearGradient>"
+        "</defs>"
+        + "".join(grid)
+        + "".join(x_ticks)
+        + f'<path d="{area}" fill="url(#stormlogPreviewArea)"/>'
+        + f'<path d="{path}" fill="none" stroke="#58a6ff" stroke-width="2"/>'
+        + "".join(marker_nodes)
+        + "</svg>"
+    )
+
+
+def _fmt_preview_time(value_ms: float) -> str:
+    if value_ms >= 1000:
+        return f"{value_ms / 1000:.2f}s"
+    return f"{value_ms:.1f}ms"
+
+
+def render_attributed_wandb_preview_html(
+    snapshot: Any,
+    tensor_index: Dict[str, Any],
+    *,
+    device: int = 0,
+    max_timeline_points: int = 480,
+    max_marker_points: int = 80,
+    max_offenders: int = 12,
+    max_active_rows: int = 12,
+) -> str:
+    payload = _process_snapshot(snapshot, tensor_index, device=device)
+    timeline = _sample_items(payload["events"], max_timeline_points)
+    alloc_markers = [
+        {
+            "t": event["t"],
+            "cum": event["cum"],
+            "name": event["name"],
+            "size_h": event["size_h"],
+            "color": _preview_color(event["name"]),
+        }
+        for event in timeline
+        if event.get("action") == "alloc" and event.get("name")
+    ]
+    alloc_markers = _sample_items(alloc_markers, max_marker_points)
+    offenders = payload["offenders"][:max_offenders]
+    active_rows = payload["active_table"][:max_active_rows]
+    preview_chart = _render_preview_chart(timeline, alloc_markers)
+    note = (
+        "Sampled W&B preview: "
+        f"{len(timeline)} plotted points from {payload['num_events']:,} recorded events. "
+        "Download the attribution artifact for the full interactive explorer."
+    )
+    history_note = (
+        ""
+        if payload["history_recorded"]
+        else "Trace history was unavailable for this snapshot. The preview reflects the live allocator state only."
+    )
+
+    offender_items = "".join(
+        (
+            '<li class="preview-offender">'
+            f'<div class="preview-offender-name">{escape(str(item["name"]))}</div>'
+            f'<div class="preview-offender-meta">{escape(str(item["shape"]))}'
+            f" · {escape(str(item['dtype']))}</div>"
+            f'<div class="preview-offender-size">{escape(str(item["size_h"]))}</div>'
+            "</li>"
+        )
+        for item in offenders
+    )
+    active_rows_html = "".join(
+        (
+            "<tr>"
+            f'<td>{escape(str(row["name"]))}</td>'
+            f'<td>{escape(str(row["size_h"]))}</td>'
+            f'<td>{escape(str(row.get("shape", "—") or "—"))}</td>'
+            f'<td>{escape(str(row.get("dtype", "—") or "—"))}</td>'
+            "</tr>"
+        )
+        for row in active_rows
+    )
+
+    history_banner = (
+        ""
+        if not history_note
+        else f'<div class="preview-banner preview-banner-warn">{escape(history_note)}</div>'
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Stormlog GPU Attribution Preview</title>
+<style>
+body {{
+  margin: 0;
+  background: #0d1117;
+  color: #e6edf3;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}}
+.preview-shell {{
+  padding: 20px;
+}}
+.preview-header {{
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+  margin-bottom: 16px;
+}}
+.preview-title {{
+  font-size: 20px;
+  font-weight: 700;
+}}
+.preview-subtitle {{
+  margin-top: 6px;
+  color: #8b949e;
+  max-width: 720px;
+}}
+.preview-stats {{
+  display: grid;
+  grid-template-columns: repeat(4, minmax(88px, 1fr));
+  gap: 12px;
+  min-width: 360px;
+}}
+.preview-stat {{
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  padding: 10px 12px;
+}}
+.preview-stat-value {{
+  color: #58a6ff;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 18px;
+  font-weight: 700;
+}}
+.preview-stat-label {{
+  color: #8b949e;
+  font-size: 11px;
+  margin-top: 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}}
+.preview-banner {{
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #30363d;
+  background: #161b22;
+  color: #c9d1d9;
+}}
+.preview-banner-warn {{
+  border-color: #d29922;
+}}
+.preview-grid {{
+  stroke: #21262d;
+  stroke-width: 1;
+}}
+.preview-axis {{
+  fill: #8b949e;
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}}
+.preview-chart {{
+  display: block;
+  width: 100%;
+  height: auto;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  background: #0d1117;
+}}
+.preview-empty {{
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 24px;
+  background: #161b22;
+  color: #8b949e;
+}}
+.preview-grid-panels {{
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(280px, 0.9fr);
+  gap: 16px;
+  align-items: start;
+}}
+.preview-panel {{
+  background: #161b22;
+  border: 1px solid #30363d;
+  border-radius: 12px;
+  padding: 16px;
+}}
+.preview-panel h2 {{
+  margin: 0 0 12px;
+  font-size: 15px;
+}}
+.preview-offenders {{
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}}
+.preview-offender {{
+  padding: 10px 0;
+  border-top: 1px solid #21262d;
+}}
+.preview-offender:first-child {{
+  border-top: none;
+  padding-top: 0;
+}}
+.preview-offender-name {{
+  font-weight: 600;
+}}
+.preview-offender-meta {{
+  margin-top: 4px;
+  color: #8b949e;
+  font-size: 12px;
+}}
+.preview-offender-size {{
+  margin-top: 6px;
+  color: #58a6ff;
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+  font-weight: 700;
+}}
+.preview-table {{
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}}
+.preview-table th,
+.preview-table td {{
+  padding: 8px 0;
+  border-top: 1px solid #21262d;
+  text-align: left;
+  vertical-align: top;
+}}
+.preview-table th {{
+  color: #8b949e;
+  border-top: none;
+  padding-top: 0;
+  font-weight: 600;
+}}
+.preview-table td {{
+  color: #e6edf3;
+}}
+</style>
+</head>
+<body>
+  <div class="preview-shell">
+    <div class="preview-header">
+      <div>
+        <div class="preview-title">Stormlog GPU Attribution Preview</div>
+        <div class="preview-subtitle">{escape(note)}</div>
+      </div>
+      <div class="preview-stats">
+        <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["peak_h"]))}</div><div class="preview-stat-label">{escape(str(payload["peak_label"]))}</div></div>
+        <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["events_display"]))}</div><div class="preview-stat-label">Events</div></div>
+        <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["attribution_count"]))}</div><div class="preview-stat-label">Tensors</div></div>
+        <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["num_segments"]))}</div><div class="preview-stat-label">Segments</div></div>
+      </div>
+    </div>
+    {history_banner}
+    <div class="preview-grid-panels">
+      <div class="preview-panel">
+        <h2>Sampled Memory Timeline</h2>
+        {preview_chart}
+      </div>
+      <div class="preview-panel">
+        <h2>Top Memory Offenders</h2>
+        <ol class="preview-offenders">{offender_items}</ol>
+      </div>
+    </div>
+    <div class="preview-panel" style="margin-top:16px">
+      <h2>Largest Active Allocations</h2>
+      <table class="preview-table">
+        <thead><tr><th>Name</th><th>Size</th><th>Shape</th><th>Dtype</th></tr></thead>
+        <tbody>{active_rows_html}</tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>"""
+
+
+def _preview_color(name: str) -> str:
+    colors = [
+        "#58a6ff",
+        "#f0883e",
+        "#e15759",
+        "#3fb950",
+        "#bc8cff",
+        "#edc949",
+        "#ff9da7",
+        "#76b7b2",
+    ]
+    if not name:
+        return "#58a6ff"
+    idx = sum(ord(char) for char in name) % len(colors)
+    return colors[idx]
 
 
 # ---------------------------------------------------------------------------

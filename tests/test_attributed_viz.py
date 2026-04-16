@@ -320,3 +320,80 @@ def test_render_attributed_html_embeds_timeline_segment_and_active_views() -> No
     assert payload["segments"][0]["blocks"][0]["name"] == "model.linear.weight"
     assert payload["active_table"][0]["name"] == "model.linear.weight"
     assert payload["offenders"][0]["name"] == "model.linear.weight"
+
+
+def test_render_attributed_wandb_preview_html_is_static_and_sampled() -> None:
+    traces = []
+    for index in range(120):
+        address = 8192 + index * 64
+        traces.append(
+            {
+                "action": "alloc",
+                "addr": address,
+                "size": 64,
+                "time_us": 100 + (index * 10),
+                "frames": [
+                    {"name": "forward", "filename": "linear.py", "line": index + 1}
+                ],
+            }
+        )
+        traces.append(
+            {
+                "action": "free_completed",
+                "addr": address,
+                "size": 64,
+                "time_us": 105 + (index * 10),
+                "frames": [],
+            }
+        )
+
+    snapshot = {
+        "segments": [
+            {
+                "address": 4096,
+                "segment_type": "large",
+                "total_size": 512,
+                "allocated_size": 256,
+                "active_size": 256,
+                "blocks": [
+                    {
+                        "address": 16384,
+                        "size": 256,
+                        "state": "active_allocated",
+                        "frames": [],
+                    }
+                ],
+            }
+        ],
+        "device_traces": [traces],
+    }
+    tensor_index = {
+        "storage_pointer_count": 1,
+        "attributed_storage_pointers": [
+            {
+                "storage_ptr_int": 16384,
+                "names": ["model.linear.weight"],
+                "tensors": [
+                    {
+                        "shape": [32, 8],
+                        "dtype": "torch.float32",
+                        "size_bytes": 256,
+                    }
+                ],
+            }
+        ],
+    }
+
+    full_html = attributed_viz.render_attributed_html(snapshot, tensor_index)
+    preview_html = attributed_viz.render_attributed_wandb_preview_html(
+        snapshot,
+        tensor_index,
+        max_timeline_points=24,
+        max_marker_points=8,
+    )
+
+    assert "Stormlog GPU Attribution Preview" in preview_html
+    assert "Sampled W&amp;B preview" in preview_html
+    assert "model.linear.weight" in preview_html
+    assert "<script>" not in preview_html
+    assert len(preview_html) < len(full_html)
