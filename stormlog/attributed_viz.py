@@ -1022,10 +1022,10 @@ def _render_preview_chart(
 ) -> str:
     width = 900
     height = 320
-    margin_left = 56
+    margin_left = 88
     margin_right = 20
     margin_top = 16
-    margin_bottom = 28
+    margin_bottom = 34
     chart_width = width - margin_left - margin_right
     chart_height = height - margin_top - margin_bottom
     baseline = margin_top + chart_height
@@ -1074,7 +1074,7 @@ def _render_preview_chart(
             f'y1="{y:.2f}" y2="{y:.2f}" class="preview-grid"/>'
         )
         grid.append(
-            f'<text x="{margin_left - 8}" y="{y + 4:.2f}" text-anchor="end" '
+            f'<text x="{margin_left - 12}" y="{y + 4:.2f}" text-anchor="end" '
             f'class="preview-axis">{label}</text>'
         )
 
@@ -1263,8 +1263,13 @@ body {{
 }}
 .preview-axis {{
   fill: #8b949e;
-  font-size: 11px;
+  font-size: 12px;
   font-family: ui-monospace, SFMono-Regular, monospace;
+  font-variant-numeric: tabular-nums;
+  paint-order: stroke;
+  stroke: #0d1117;
+  stroke-width: 3px;
+  stroke-linejoin: round;
 }}
 .preview-chart {{
   display: block;
