@@ -396,4 +396,6 @@ def test_render_attributed_wandb_preview_html_is_static_and_sampled() -> None:
     assert "Sampled W&amp;B preview" in preview_html
     assert "model.linear.weight" in preview_html
     assert "<script>" not in preview_html
+    assert 'dominant-baseline="hanging"' in preview_html
+    assert "preview-axis-band" in preview_html
     assert len(preview_html) < len(full_html)

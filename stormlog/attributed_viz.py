@@ -1021,11 +1021,11 @@ def _render_preview_chart(
     alloc_markers: List[Dict[str, Any]],
 ) -> str:
     width = 900
-    height = 320
+    height = 344
     margin_left = 88
     margin_right = 20
     margin_top = 16
-    margin_bottom = 34
+    margin_bottom = 52
     chart_width = width - margin_left - margin_right
     chart_height = height - margin_top - margin_bottom
     baseline = margin_top + chart_height
@@ -1082,9 +1082,15 @@ def _render_preview_chart(
     for tick in range(5):
         time_value = t_min + ((t_max - t_min) * tick / 4 if t_max > t_min else 0)
         x = x_scale(time_value)
+        text_anchor = "middle"
+        if tick == 0:
+            text_anchor = "start"
+        elif tick == 4:
+            text_anchor = "end"
         x_ticks.append(
-            f'<text x="{x:.2f}" y="{height - 6}" text-anchor="middle" '
-            f'class="preview-axis">{escape(_fmt_preview_time(time_value))}</text>'
+            f'<text x="{x:.2f}" y="{baseline + 12:.2f}" text-anchor="{text_anchor}" '
+            f'dominant-baseline="hanging" class="preview-axis">'
+            f"{escape(_fmt_preview_time(time_value))}</text>"
         )
 
     marker_nodes = []
@@ -1107,7 +1113,11 @@ def _render_preview_chart(
         '<stop offset="100%" stop-color="#58a6ff" stop-opacity="0.04"/>'
         "</linearGradient>"
         "</defs>"
+        + f'<rect x="{margin_left}" y="{baseline:.2f}" width="{chart_width}" '
+        f'height="{margin_bottom}" class="preview-axis-band"/>'
         + "".join(grid)
+        + f'<line x1="{margin_left}" x2="{width - margin_right}" '
+        f'y1="{baseline:.2f}" y2="{baseline:.2f}" class="preview-axis-line"/>'
         + "".join(x_ticks)
         + f'<path d="{area}" fill="url(#stormlogPreviewArea)"/>'
         + f'<path d="{path}" fill="none" stroke="#58a6ff" stroke-width="2"/>'
@@ -1259,6 +1269,13 @@ body {{
 }}
 .preview-grid {{
   stroke: #21262d;
+  stroke-width: 1;
+}}
+.preview-axis-band {{
+  fill: rgba(13, 17, 23, 0.96);
+}}
+.preview-axis-line {{
+  stroke: #30363d;
   stroke-width: 1;
 }}
 .preview-axis {{
