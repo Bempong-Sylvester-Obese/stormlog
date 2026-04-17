@@ -103,6 +103,19 @@ This demo shows:
 - watchdog cleanup flow
 - exported CSV and JSON tracker events
 
+### Phase-aware tracking
+
+```bash
+python -m examples.advanced.phase_tracking_demo
+```
+
+This demo shows:
+
+- nested `phase()` scopes on a long-running tracker
+- deterministic phase paths such as `train / epoch / forward`
+- exported JSON telemetry that can be reloaded by `gpumemprof analyze`
+- a portable CPU-only way to validate phase-aware instrumentation
+
 ## Scenario modules
 
 These are the closest examples to real operational workflows:

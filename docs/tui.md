@@ -82,6 +82,7 @@ The export buttons only work after timeline samples exist. If you have not start
 - rebuilds rank-level diagnostics
 - supports rank filters such as `all`, `0,2,4-7`
 - highlights anomaly indicators and focused rank timelines
+- surfaces the first anomaly phase path when the capture includes structured phase records
 
 ![Diagnostics tab](tui-diagnostics-current.png)
 
@@ -89,6 +90,12 @@ The artifact input field accepts comma-separated paths. Use `Load Artifacts`
 first, then `Refresh` after changing the path set. When multiple sessions are
 found, the Diagnostics tab defaults to the newest `completed` session and lets
 you switch to another one by entering its session id.
+
+If the loaded capture includes `phase_enter` / `phase_exit` telemetry, the
+Diagnostics table shows the first anomaly phase path per rank and the indicator
+details include the resolved phase label. If multiple threads have overlapping
+active phases at the same timestamp, the UI preserves that ambiguity instead of
+guessing one synthetic path.
 
 ### CLI & Actions
 

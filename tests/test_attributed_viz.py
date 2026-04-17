@@ -1,16 +1,17 @@
 from __future__ import annotations
 
 import json
+from typing import Any, cast
 
 import stormlog.attributed_viz as attributed_viz
 import stormlog.cuda_native_debug as native_debug
 
 
-def _extract_embedded_payload(html: str) -> dict[str, object]:
+def _extract_embedded_payload(html: str) -> dict[str, Any]:
     prefix = "const DATA = "
     start = html.index(prefix) + len(prefix)
     end = html.index(";\n\n// === UTILS ===", start)
-    return json.loads(html[start:end].replace("<\\/", "</"))
+    return cast(dict[str, Any], json.loads(html[start:end].replace("<\\/", "</")))
 
 
 def test_render_attributed_html_is_self_contained() -> None:

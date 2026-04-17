@@ -10,12 +10,14 @@ import socket
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import psutil
 
+from stormlog.phases import PhaseHandle, TrackerPhaseState
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -267,6 +269,7 @@ class CPUMemoryTracker:
         self._session_summary: Optional[SessionSummary] = None
         self._history_dropped_events = 0
         self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
+        self._phase_state = TrackerPhaseState()
 
         self.stats: Dict[str, Any] = {
             "tracking_start_time": None,
@@ -321,6 +324,7 @@ class CPUMemoryTracker:
         if self.is_tracking:
             return
         self._session_summary = None
+        self._phase_state.reset()
         self._ensure_telemetry_sink()
         self._stop_event.clear()
         with self._events_lock:
@@ -353,6 +357,7 @@ class CPUMemoryTracker:
                 self._session_summary,
                 ended_at_ns=now_ns(),
             )
+        self._phase_state.reset()
 
     def _tracking_loop(self) -> None:
         last_rss = self._current_rss()
@@ -395,7 +400,13 @@ class CPUMemoryTracker:
             last_rss = current_rss
             self._flush_telemetry_sink()
 
-    def _add_event(self, event_type: str, memory_change: int, context: str) -> None:
+    def _add_event(
+        self,
+        event_type: str,
+        memory_change: int,
+        context: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
         rss = self._current_rss()
         event = TrackingEvent(
             timestamp=time.time(),
@@ -414,12 +425,67 @@ class CPUMemoryTracker:
             rank=self.distributed_identity["rank"],
             local_rank=self.distributed_identity["local_rank"],
             world_size=self.distributed_identity["world_size"],
+            metadata=dict(metadata or {}),
         )
         with self._events_lock:
             if len(self.events) == self.max_events:
                 self._history_dropped_events += 1
             self.events.append(event)
         self._append_to_telemetry_sink(event)
+
+    def enter_phase(
+        self, name: str, *, metadata: Optional[Dict[str, Any]] = None
+    ) -> PhaseHandle:
+        """Enter one structured CPU tracking phase."""
+        if not self.is_tracking:
+            raise RuntimeError("Tracking must be active before entering a phase.")
+        session = self._open_session()
+        boundary = self._phase_state.enter_phase(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            name=name,
+            metadata=metadata,
+        )
+        self._add_event(
+            boundary.event_type,
+            0,
+            boundary.context,
+            metadata=boundary.metadata,
+        )
+        return PhaseHandle(
+            scope_id=boundary.scope_id,
+            name=name,
+            path=boundary.path,
+            close_callback=lambda: self._emit_phase_exit(boundary.scope_id),
+        )
+
+    @contextmanager
+    def phase(self, name: str, *, metadata: Optional[Dict[str, Any]] = None) -> Any:
+        """Context manager that emits structured CPU phase telemetry."""
+        handle = self.enter_phase(name, metadata=metadata)
+        try:
+            yield handle
+        finally:
+            handle.close()
+
+    def _emit_phase_exit(self, scope_id: str) -> None:
+        session = self._session_summary
+        if session is None:
+            return
+        boundary = self._phase_state.exit_phase(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            scope_id=scope_id,
+            thread_id=int(threading.current_thread().ident or 0),
+        )
+        if boundary is None:
+            return
+        self._add_event(
+            boundary.event_type,
+            0,
+            boundary.context,
+            metadata=boundary.metadata,
+        )
 
     def _telemetry_record_from_event(self, event: TrackingEvent) -> Dict[str, Any]:
         host = socket.gethostname()
@@ -445,6 +511,7 @@ class CPUMemoryTracker:
                     "rank": event.rank,
                     "local_rank": event.local_rank,
                     "world_size": event.world_size,
+                    "metadata": dict(event.metadata or {}),
                     "collector": "stormlog.cpu_tracker",
                     "sampling_interval_ms": sampling_interval_ms,
                     "pid": pid,

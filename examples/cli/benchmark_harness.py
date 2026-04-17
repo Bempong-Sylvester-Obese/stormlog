@@ -10,6 +10,7 @@ import math
 import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, TypedDict
@@ -381,7 +382,6 @@ def _run_tracked_scenario(
     session = spec.factory(scenario_dir, spec.default_interval, sink_overrides)
     session_started = False
     session_report: dict[str, Any] | None = None
-    scenario_failed = False
     try:
         session.start()
         session_started = True
@@ -412,15 +412,10 @@ def _run_tracked_scenario(
 
         session_report = session.finish()
     except Exception:
-        scenario_failed = True
-        raise
-    finally:
-        if session_started and session_report is None:
-            try:
+        if session_started:
+            with suppress(Exception):
                 session.finish()
-            except Exception:
-                if not scenario_failed:
-                    raise
+        raise
 
     assert session_report is not None
     stats = dict(session_report["stats"])
@@ -584,7 +579,6 @@ def _run_soak_scenario(
     session = spec.factory(scenario_dir, spec.default_interval, None)
     session_started = False
     session_report: dict[str, Any] | None = None
-    scenario_failed = False
     try:
         session.start()
         session_started = True
@@ -612,15 +606,10 @@ def _run_soak_scenario(
 
         session_report = session.finish()
     except Exception:
-        scenario_failed = True
-        raise
-    finally:
-        if session_started and session_report is None:
-            try:
+        if session_started:
+            with suppress(Exception):
                 session.finish()
-            except Exception:
-                if not scenario_failed:
-                    raise
+        raise
 
     assert session_report is not None
     final_rss = _process_rss_bytes()
@@ -675,7 +664,6 @@ def _run_retention_validation(
     session = spec.factory(scenario_dir, spec.default_interval, overrides)
     session_started = False
     session_report: dict[str, Any] | None = None
-    scenario_failed = False
     try:
         session.start()
         session_started = True
@@ -696,15 +684,10 @@ def _run_retention_validation(
 
         session_report = session.finish()
     except Exception:
-        scenario_failed = True
-        raise
-    finally:
-        if session_started and session_report is None:
-            try:
+        if session_started:
+            with suppress(Exception):
                 session.finish()
-            except Exception:
-                if not scenario_failed:
-                    raise
+        raise
 
     assert session_report is not None
     stats = dict(session_report["stats"])

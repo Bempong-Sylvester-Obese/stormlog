@@ -111,10 +111,90 @@ Tracker exports may also emit these lifecycle events:
 - `collector_recovered`
 - `start`
 - `stop`
+- `phase_enter`
+- `phase_exit`
 
 When the collector cannot produce core metrics, Stormlog pauses sample emission
 until the next retry window and records the degraded state instead of exporting
 synthetic zero-valued samples.
+
+## Phase scope records
+
+Long-running trackers can optionally emit structured workload phases as
+companion telemetry records instead of duplicating phase labels on every sample.
+
+Phase boundaries use normal canonical records with:
+
+- `event_type: "phase_enter"`
+- `event_type: "phase_exit"`
+- the normal top-level session, rank, host, pid, collector, and allocator/device fields
+- authoritative structured phase data under `metadata["phase_scope"]`
+
+The `phase_scope` payload contains:
+
+- `action` (`"enter"` or `"exit"`)
+- `name`
+- `path` (ordered list of nested phase names)
+- `depth`
+- `scope_id`
+- `parent_scope_id`
+- `thread_id`
+- `thread_name`
+- `sequence`
+- optional `attributes` (user-supplied phase metadata)
+
+Example:
+
+```json
+{
+  "schema_version": 3,
+  "session_id": "run-123",
+  "timestamp_ns": 1700000000000000000,
+  "event_type": "phase_enter",
+  "collector": "stormlog.cuda_tracker",
+  "sampling_interval_ms": 100,
+  "pid": 1234,
+  "host": "trainer-a",
+  "device_id": 0,
+  "allocator_allocated_bytes": 2147483648,
+  "allocator_reserved_bytes": 2415919104,
+  "allocator_active_bytes": 2147483648,
+  "allocator_inactive_bytes": 268435456,
+  "allocator_change_bytes": 0,
+  "device_used_bytes": 2684354560,
+  "device_free_bytes": 14495514624,
+  "device_total_bytes": 17179869184,
+  "context": "Phase entered: train / forward",
+  "job_id": "train-42",
+  "rank": 0,
+  "local_rank": 0,
+  "world_size": 8,
+  "metadata": {
+    "phase_scope": {
+      "action": "enter",
+      "name": "forward",
+      "path": ["train", "forward"],
+      "depth": 2,
+      "scope_id": "run-123:9",
+      "parent_scope_id": "run-123:4",
+      "thread_id": 140735,
+      "thread_name": "MainThread",
+      "sequence": 9,
+      "attributes": {"microbatch": 12}
+    }
+  }
+}
+```
+
+Semantics:
+
+- phase records are optional; existing workflows remain valid when they are absent
+- nesting is deterministic per `(session_id, rank, thread_id)`
+- `path` is authoritative; `context` is only a human-readable mirror
+- if multiple threads expose overlapping active paths at the same timestamp,
+  analysis reports the attribution as ambiguous instead of inventing one path
+- if a capture ends with an open phase, analysis treats it as active until the
+  session end for attribution only; the raw record stream is unchanged
 
 ## Legacy compatibility
 

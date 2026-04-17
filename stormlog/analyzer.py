@@ -16,6 +16,7 @@ from .collective_attribution import (
 )
 from .distributed_analysis import summarize_cross_rank_analysis
 from .gap_analysis import GapFinding, analyze_hidden_memory_gaps
+from .phases import PhaseTimelineResolver
 from .profiler import GPUMemoryProfiler, ProfileResult
 from .telemetry import TelemetryEventV2
 from .utils import format_bytes
@@ -700,7 +701,12 @@ class MemoryAnalyzer:
     # Hidden-memory gap analysis (operates on TelemetryEventV2 series)
     # ------------------------------------------------------------------
 
-    def analyze_memory_gaps(self, events: List[TelemetryEventV2]) -> List[GapFinding]:
+    def analyze_memory_gaps(
+        self,
+        events: List[TelemetryEventV2],
+        *,
+        phase_resolver: PhaseTimelineResolver | None = None,
+    ) -> List[GapFinding]:
         """Classify allocator-vs-device hidden memory gaps over time.
 
         Args:
@@ -714,22 +720,30 @@ class MemoryAnalyzer:
             thresholds=self.thresholds,
             format_memory=format_bytes,
             remediation_by_classification=_GAP_REMEDIATION_BY_CLASSIFICATION,
+            phase_resolver=phase_resolver,
         )
 
     def analyze_cross_rank_timeline(
-        self, events: List[TelemetryEventV2]
+        self,
+        events: List[TelemetryEventV2],
+        *,
+        phase_resolver: PhaseTimelineResolver | None = None,
     ) -> Dict[str, Any]:
         """Merge rank timelines and detect the earliest cluster-wide spike cause."""
 
-        return summarize_cross_rank_analysis(events)
+        return summarize_cross_rank_analysis(events, phase_resolver=phase_resolver)
 
     def analyze_collective_attribution(
-        self, events: List[TelemetryEventV2]
+        self,
+        events: List[TelemetryEventV2],
+        *,
+        phase_resolver: PhaseTimelineResolver | None = None,
     ) -> List[CollectiveAttributionResult]:
         """Attribute hidden-memory spikes to collective communication phases."""
         return attribute_collective_memory(
             events=events,
             config=self.collective_attribution_config,
+            phase_resolver=phase_resolver,
         )
 
     def generate_optimization_report(
@@ -791,14 +805,24 @@ class MemoryAnalyzer:
 
         # Hidden-memory gap analysis (only when telemetry events are supplied).
         if events is not None:
-            gap_findings = self.analyze_memory_gaps(events)
-            collective_attribution = self.analyze_collective_attribution(events)
+            phase_resolver = PhaseTimelineResolver.from_events(events)
+            gap_findings = self.analyze_memory_gaps(
+                events,
+                phase_resolver=phase_resolver,
+            )
+            collective_attribution = self.analyze_collective_attribution(
+                events,
+                phase_resolver=phase_resolver,
+            )
             report["gap_analysis"] = [asdict(f) for f in gap_findings]
             report["collective_attribution"] = [
                 asdict(result) for result in collective_attribution
             ]
             if len({event.rank for event in events}) > 1:
-                report["cross_rank_analysis"] = self.analyze_cross_rank_timeline(events)
+                report["cross_rank_analysis"] = self.analyze_cross_rank_timeline(
+                    events,
+                    phase_resolver=phase_resolver,
+                )
 
         return report
 
