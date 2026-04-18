@@ -397,6 +397,12 @@ class CPUMemoryTracker:
                     f"RSS decreased by {self._format_bytes(abs(change))}",
                 )
 
+            self._add_event(
+                "sample",
+                0,
+                "Collected CPU telemetry sample.",
+            )
+
             last_rss = current_rss
             self._flush_telemetry_sink()
 

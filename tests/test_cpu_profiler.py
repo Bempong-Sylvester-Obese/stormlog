@@ -86,6 +86,23 @@ class _FailingSink:
             raise OSError("disk full")
 
 
+class _SequencedStopEvent:
+    def __init__(self, waits: list[bool]) -> None:
+        self._waits = list(waits)
+
+    def wait(self, timeout: float | None = None) -> bool:
+        _ = timeout
+        if self._waits:
+            return self._waits.pop(0)
+        return True
+
+    def set(self) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # CPUMemorySnapshot
 # ---------------------------------------------------------------------------
@@ -577,6 +594,26 @@ class TestCPUMemoryTracker:
         stats = tracker.get_statistics()
         assert stats["final_retained_files"] == 1
         assert stats["rollover_count"] == 0
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_emits_sample_event_during_healthy_iteration(
+        self, mock_cls: Any
+    ) -> None:
+        mock_cls.return_value = _make_mock_process(rss=100)
+        tracker = CPUMemoryTracker(sampling_interval=0.01)
+        tracker._stop_event = cast(Any, _SequencedStopEvent([False, True]))
+        rss_values = iter([100, 128])
+
+        def _current_rss() -> int:
+            return next(rss_values)
+
+        tracker._current_rss = _current_rss  # type: ignore[method-assign]
+
+        tracker._tracking_loop()
+
+        event_types = [event.event_type for event in tracker.get_events()]
+        assert event_types == ["peak", "allocation", "sample"]
+        assert tracker.get_events()[-1].context == "Collected CPU telemetry sample."
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_tracker_recreates_sink_on_restart(

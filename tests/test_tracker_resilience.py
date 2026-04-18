@@ -347,6 +347,22 @@ def test_memory_tracker_export_preserves_health_metadata(
     assert "device_total_bytes" in payload
 
 
+def test_memory_tracker_emits_sample_event_on_healthy_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+
+    last_allocated = tracker._run_tracking_iteration(0)
+
+    assert last_allocated == 128
+    event_types = [event.event_type for event in tracker.get_events()]
+    assert event_types == ["peak", "allocation", "sample"]
+    assert tracker.get_events()[-1].context == "Collected telemetry sample."
+
+
 def test_memory_tracker_streams_events_to_append_only_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -371,10 +387,10 @@ def test_memory_tracker_streams_events_to_append_only_sink(
 
     segment = tmp_path / "sink" / "segment-000001.jsonl"
     lines = [line for line in segment.read_text(encoding="utf-8").splitlines() if line]
-    assert len(lines) == 2
+    assert len(lines) == 3
     payload = tracker_mod.json.loads(lines[-1])
     assert payload["collector"] == "stormlog.cuda_tracker"
-    assert payload["event_type"] == "allocation"
+    assert payload["event_type"] == "sample"
     assert payload["allocator_allocated_bytes"] == 128
     stats = tracker.get_statistics()
     assert stats["final_retained_files"] == 1
