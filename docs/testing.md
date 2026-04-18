@@ -88,6 +88,7 @@ python3 -m examples.scenarios.mps_telemetry_scenario
 python3 -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
 python3 -m examples.scenarios.tf_end_to_end_scenario
 python3 -m examples.scenarios.wandb_training_smoke --device cuda --wandb-mode offline
+python3 -m torch.distributed.run --nnodes=1 --nproc_per_node=2 -m examples.scenarios.torchrun_ddp_reference
 ```
 
 ### CLI-only validation (pip install)

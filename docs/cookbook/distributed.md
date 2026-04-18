@@ -39,6 +39,117 @@ Success signal:
 - you need TUI diagnostics to keep ranks separate instead of flattening them
 - you want hidden-memory-gap or collective-attribution analysis with more than one rank
 
+## Recipe: validate a reference `torchrun` DDP run on Jarvis
+
+Use this when you want one real multi-GPU training run based on the official
+PyTorch DDP tutorial pattern, not a manually stitched set of rank-local
+captures.
+
+This workflow was validated against:
+
+- PyTorch DDP tutorial: `https://docs.pytorch.org/tutorials/intermediate/ddp_tutorial.html`
+- PyTorch tutorial-series example repo:
+  `https://github.com/pytorch/examples/tree/main/distributed/ddp-tutorial-series`
+- local adaptation: `examples.scenarios.torchrun_ddp_reference`
+
+Validated environment:
+
+- Jarvis container instance
+- `2xL4`
+- PyTorch template
+- single node with `torchrun`
+
+Assume the source checkout is already present on the instance at
+`/home/gpu-memory-profiler`.
+
+```bash
+jl create \
+  --gpu L4 \
+  --num-gpus 2 \
+  --template pytorch \
+  --region IN2 \
+  --storage 80 \
+  --name stormlog-ddp-reference \
+  --yes \
+  --json
+```
+
+Prepare the project environment on the instance:
+
+```bash
+cd /home/gpu-memory-profiler
+python3 -m venv --system-site-packages .venv
+. .venv/bin/activate
+python -m pip install -U pip
+python -m pip install -e .
+```
+
+Run the reference training job with `torchrun`:
+
+```bash
+cd /home/gpu-memory-profiler
+. .venv/bin/activate
+PYTHONPATH=/home/gpu-memory-profiler \
+OMP_NUM_THREADS=1 \
+python -m torch.distributed.run \
+  --nnodes=1 \
+  --nproc_per_node=2 \
+  --master_addr=127.0.0.1 \
+  --master_port=29501 \
+  -m examples.scenarios.torchrun_ddp_reference \
+  --epochs 2 \
+  --batch-size 128 \
+  --dataset-size 4096 \
+  --interval 0.1 \
+  --job-id jarvis-torchrun-reference \
+  --output-dir artifacts/jarvis_torchrun_reference \
+  2>&1 | tee artifacts/jarvis_torchrun_reference/run.log
+```
+
+Expected console output shape:
+
+- one loss line per rank per epoch
+- rank-local and global loss values
+- a final `Reference summary saved to .../ddp_reference_summary.json`
+
+Expected artifacts:
+
+- `artifacts/jarvis_torchrun_reference/ddp_reference_summary.json`
+- `artifacts/jarvis_torchrun_reference/rank0/telemetry_sink/`
+- `artifacts/jarvis_torchrun_reference/rank1/telemetry_sink/`
+- `artifacts/jarvis_torchrun_reference/reference_checkpoint.pt`
+- `artifacts/jarvis_torchrun_reference/run.log`
+
+The validated reference run produced:
+
+- `world_size = 2`
+- `rank_summaries = 2`
+- `12` sample events per rank
+- `133` `phase_enter` and `133` `phase_exit` events per rank
+
+Download the artifact root locally, then load both rank sinks together in the
+TUI Diagnostics tab:
+
+```bash
+stormlog
+```
+
+Then:
+
+1. Open `Diagnostics`.
+2. Enter the two sink paths as a comma-separated list.
+3. Click `Load Artifacts`.
+4. Leave session selection on `auto`.
+5. Confirm `present_ranks` shows `0,1`.
+
+For this reference run, Diagnostics selected a merged synthetic session and
+reported:
+
+- `present_ranks = [0, 1]`
+- `expected_ranks = [0, 1]`
+- `missing_ranks = []`
+- one diagnostics row per rank
+
 ## Recipe: capture rank-aware PyTorch artifacts
 
 ```bash

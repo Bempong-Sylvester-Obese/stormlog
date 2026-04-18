@@ -126,6 +126,7 @@ python -m examples.scenarios.mps_telemetry_scenario
 python -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
 python -m examples.scenarios.tf_end_to_end_scenario
 python -m examples.scenarios.wandb_training_smoke --device cuda --wandb-mode offline
+python -m torch.distributed.run --nnodes=1 --nproc_per_node=2 -m examples.scenarios.torchrun_ddp_reference
 ```
 
 ### When to use them
@@ -137,6 +138,9 @@ python -m examples.scenarios.wandb_training_smoke --device cuda --wandb-mode off
 - `wandb_training_smoke`: run a short real PyTorch training loop that writes a
   summary bundle, an append-only sink, offline W&B files, and structured phase
   boundaries you can reload in `gpumemprof analyze` and the TUI
+- `torchrun_ddp_reference`: run a reference single-node DDP training job
+  derived from the official PyTorch `torchrun` tutorial pattern, with one
+  telemetry sink per rank and a shared distributed summary
 
 ## Daily workflow mapping
 
