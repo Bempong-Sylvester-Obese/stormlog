@@ -7,6 +7,11 @@ from typing import Any, Callable, List, Mapping, Sequence
 import numpy as np
 from scipy import stats
 
+try:
+    from .phases import PhaseAttribution, PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 from .telemetry import TelemetryEventV2
 
 _LOGGER = logging.getLogger(__name__)
@@ -22,6 +27,8 @@ class GapFinding:
     evidence: dict[str, Any]
     description: str
     remediation: List[str]
+    evidence_timestamp_ns: int | None = None
+    phase_attribution: PhaseAttribution | None = None
 
 
 def analyze_hidden_memory_gaps(
@@ -29,6 +36,7 @@ def analyze_hidden_memory_gaps(
     thresholds: Mapping[str, float],
     format_memory: Callable[[int], str],
     remediation_by_classification: Mapping[str, List[str]],
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> List[GapFinding]:
     """Classify allocator-vs-device hidden memory gaps over time."""
     gaps: List[float] = []
@@ -37,6 +45,8 @@ def analyze_hidden_memory_gaps(
     usable_events: List[TelemetryEventV2] = []
 
     for event in events:
+        if str(event.event_type).strip().lower() != "sample":
+            continue
         if event.device_total_bytes is None or event.device_total_bytes <= 0:
             continue
         gap = event.device_used_bytes - event.allocator_reserved_bytes
@@ -59,18 +69,22 @@ def analyze_hidden_memory_gaps(
     findings: List[GapFinding] = []
     findings.extend(
         _detect_gap_transient_spikes(
+            events=usable_events,
             gaps=gaps,
             z_threshold=thresholds["gap_spike_zscore"],
             remediation=remediation_by_classification.get("transient_spike", []),
+            phase_resolver=phase_resolver,
         )
     )
     findings.extend(
         _detect_gap_persistent_drift(
+            events=usable_events,
             gaps=gaps,
             timestamps_ns=timestamps_ns,
             drift_r_squared_threshold=thresholds["gap_drift_r_squared"],
             format_memory=format_memory,
             remediation=remediation_by_classification.get("persistent_drift", []),
+            phase_resolver=phase_resolver,
         )
     )
     findings.extend(
@@ -79,6 +93,7 @@ def analyze_hidden_memory_gaps(
             gaps=gaps,
             fragmentation_threshold=thresholds["gap_fragmentation_ratio"],
             remediation=remediation_by_classification.get("fragmentation_like", []),
+            phase_resolver=phase_resolver,
         )
     )
 
@@ -95,9 +110,11 @@ def analyze_hidden_memory_gaps(
 
 
 def _detect_gap_transient_spikes(
+    events: Sequence[TelemetryEventV2],
     gaps: List[float],
     z_threshold: float,
     remediation: List[str],
+    phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
     """Detect transient spikes in the gap series using z-score."""
     arr = np.asarray(gaps, dtype=float)
@@ -117,6 +134,7 @@ def _detect_gap_transient_spikes(
     max_idx = int(np.argmax(arr))
     max_gap = float(arr[max_idx])
     max_z = (max_gap - mean) / std
+    phase_event = events[max_idx]
 
     severity = "critical" if max_z > 2 * z_threshold else "warning"
     confidence = min(1.0, max_z / (3 * z_threshold))
@@ -138,16 +156,20 @@ def _detect_gap_transient_spikes(
                 f"device-vs-allocator gap (max z-score {max_z:.1f})."
             ),
             remediation=list(remediation),
+            evidence_timestamp_ns=phase_event.timestamp_ns,
+            phase_attribution=_resolve_phase_attribution(phase_resolver, phase_event),
         )
     ]
 
 
 def _detect_gap_persistent_drift(
+    events: Sequence[TelemetryEventV2],
     gaps: List[float],
     timestamps_ns: List[int],
     drift_r_squared_threshold: float,
     format_memory: Callable[[int], str],
     remediation: List[str],
+    phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
     """Detect persistent upward drift in the gap via linear regression."""
     if len(gaps) < 5:
@@ -166,6 +188,7 @@ def _detect_gap_persistent_drift(
     severity = "critical" if r_squared > 0.85 else "warning"
     confidence = round(min(1.0, r_squared), 3)
     slope_bytes_per_sec = slope * 1e9
+    phase_event = events[-1]
 
     return [
         GapFinding(
@@ -185,6 +208,8 @@ def _detect_gap_persistent_drift(
                 f"(R²={r_squared:.2f})."
             ),
             remediation=list(remediation),
+            evidence_timestamp_ns=phase_event.timestamp_ns,
+            phase_attribution=_resolve_phase_attribution(phase_resolver, phase_event),
         )
     ]
 
@@ -194,14 +219,17 @@ def _detect_gap_fragmentation_pattern(
     gaps: List[float],
     fragmentation_threshold: float,
     remediation: List[str],
+    phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
     """Detect fragmentation-like behaviour: high reserved-allocated ratio."""
     frag_ratios: List[float] = []
+    frag_events: List[TelemetryEventV2] = []
     for event in events:
         reserved = event.allocator_reserved_bytes
         allocated = event.allocator_allocated_bytes
         if reserved > 0:
             frag_ratios.append((reserved - allocated) / reserved)
+            frag_events.append(event)
 
     if not frag_ratios:
         return []
@@ -213,6 +241,7 @@ def _detect_gap_fragmentation_pattern(
 
     severity = "critical" if avg_frag > 0.5 else "warning"
     confidence = round(min(1.0, avg_frag / 0.6), 3)
+    phase_event = frag_events[int(np.argmax(frag_ratios))]
 
     return [
         GapFinding(
@@ -230,5 +259,18 @@ def _detect_gap_fragmentation_pattern(
                 f"reserved-but-unused memory is inflating the device footprint."
             ),
             remediation=list(remediation),
+            evidence_timestamp_ns=phase_event.timestamp_ns,
+            phase_attribution=_resolve_phase_attribution(phase_resolver, phase_event),
         )
     ]
+
+
+def _resolve_phase_attribution(
+    phase_resolver: PhaseReplayIndex | None,
+    event: TelemetryEventV2,
+) -> PhaseAttribution | None:
+    if phase_resolver is None:
+        return None
+    if not hasattr(phase_resolver, "resolve_for_event"):
+        return None
+    return phase_resolver.resolve_for_event(event)

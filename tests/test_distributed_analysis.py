@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from typing import Any, cast
+
+import pytest
 
 from stormlog.analyzer import MemoryAnalyzer
 from stormlog.distributed_analysis import (
     analyze_cross_rank_events,
     merge_cross_rank_timelines,
 )
+
+try:
+    from stormlog.phases import PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseReplayIndex = None  # type: ignore[assignment]
+from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 
 _GB = 1024**3
@@ -79,6 +88,101 @@ def _build_cross_rank_fixture(world_size: int = 4) -> list:
         )
     )
     return events
+
+
+def _canonicalize_phase_events(events: list[Any], *, session_id: str) -> list[Any]:
+    canonical_events: list[Any] = []
+    observed_ranks = sorted({event.rank for event in events})
+    for offset, rank in enumerate(observed_ranks, start=1):
+        canonical_events.append(
+            telemetry_event_from_record(
+                {
+                    "schema_version": 3,
+                    "session_id": session_id,
+                    "timestamp_ns": BASE_NS - 1_000_000 + rank * 100_000,
+                    "event_type": "phase_enter",
+                    "collector": "stormlog.cuda_tracker",
+                    "sampling_interval_ms": 100,
+                    "pid": 1,
+                    "host": f"host-{rank // 2}",
+                    "job_id": "job-28",
+                    "rank": rank,
+                    "local_rank": rank % 2,
+                    "world_size": len(observed_ranks),
+                    "device_id": 0,
+                    "allocator_allocated_bytes": 1 * _GB,
+                    "allocator_reserved_bytes": 1 * _GB,
+                    "allocator_active_bytes": None,
+                    "allocator_inactive_bytes": None,
+                    "allocator_change_bytes": 0,
+                    "device_used_bytes": 1 * _GB,
+                    "device_free_bytes": 15 * _GB,
+                    "device_total_bytes": 16 * _GB,
+                    "context": "Phase entered: train / forward",
+                    "metadata": {
+                        "phase_scope": {
+                            "action": "enter",
+                            "name": "forward",
+                            "path": ["train", "forward"],
+                            "depth": 2,
+                            "scope_id": f"phase-{rank}",
+                            "parent_scope_id": "phase-train",
+                            "thread_id": 1,
+                            "thread_name": "MainThread",
+                            "sequence": offset,
+                        }
+                    },
+                }
+            )
+        )
+    for event in events:
+        record = telemetry_event_to_dict(event)
+        record["schema_version"] = 3
+        record["session_id"] = session_id
+        canonical_events.append(telemetry_event_from_record(record))
+    for offset, rank in enumerate(observed_ranks, start=len(observed_ranks) + 1):
+        canonical_events.append(
+            telemetry_event_from_record(
+                {
+                    "schema_version": 3,
+                    "session_id": session_id,
+                    "timestamp_ns": BASE_NS + 5 * INTERVAL_NS + rank * 100_000,
+                    "event_type": "phase_exit",
+                    "collector": "stormlog.cuda_tracker",
+                    "sampling_interval_ms": 100,
+                    "pid": 1,
+                    "host": f"host-{rank // 2}",
+                    "job_id": "job-28",
+                    "rank": rank,
+                    "local_rank": rank % 2,
+                    "world_size": len(observed_ranks),
+                    "device_id": 0,
+                    "allocator_allocated_bytes": 1 * _GB,
+                    "allocator_reserved_bytes": 1 * _GB,
+                    "allocator_active_bytes": None,
+                    "allocator_inactive_bytes": None,
+                    "allocator_change_bytes": 0,
+                    "device_used_bytes": 1 * _GB,
+                    "device_free_bytes": 15 * _GB,
+                    "device_total_bytes": 16 * _GB,
+                    "context": "Phase exited: train / forward",
+                    "metadata": {
+                        "phase_scope": {
+                            "action": "exit",
+                            "name": "forward",
+                            "path": ["train", "forward"],
+                            "depth": 2,
+                            "scope_id": f"phase-{rank}",
+                            "parent_scope_id": "phase-train",
+                            "thread_id": 1,
+                            "thread_name": "MainThread",
+                            "sequence": offset,
+                        }
+                    },
+                }
+            )
+        )
+    return canonical_events
 
 
 class TestCrossRankMerge:
@@ -330,6 +434,28 @@ class TestCrossRankMerge:
         _, first_cause = analyze_cross_rank_events(events)
 
         assert first_cause.suspects[0].rank == 1
+
+    def test_first_cause_suspects_include_phase_attribution_when_available(
+        self,
+    ) -> None:
+        if PhaseReplayIndex is None:
+            pytest.skip("stormlog.phases is not available in this slice")
+
+        events = _canonicalize_phase_events(
+            _build_cross_rank_fixture(),
+            session_id="session-cross-rank-phase",
+        )
+
+        _, first_cause = analyze_cross_rank_events(
+            cast(Any, events),
+            phase_resolver=PhaseReplayIndex.from_events(events),
+        )
+
+        assert first_cause.suspects
+        assert first_cause.suspects[0].phase_attribution is not None
+        assert first_cause.suspects[0].phase_attribution.phase_path == (
+            "train / forward"
+        )
 
 
 class TestAnalyzerIntegration:

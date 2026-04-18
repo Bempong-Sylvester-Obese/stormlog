@@ -354,6 +354,7 @@ def _train_one_epoch(
     model: nn.Module,
     loader: DataLoader[Any],
     *,
+    tracker: Any,
     optimizer: torch.optim.Optimizer,
     criterion: nn.Module,
     device: torch.device,
@@ -363,30 +364,65 @@ def _train_one_epoch(
     total_loss = 0.0
     total_accuracy = 0.0
 
-    for step_index, (inputs, targets) in enumerate(loader, start=1):
-        inputs = inputs.to(device)
-        targets = targets.to(device)
+    with tracker.phase(
+        "train_epoch",
+        metadata={
+            "epoch": epoch_index + 1,
+            "batches": len(loader),
+        },
+    ):
+        for step_index, (inputs, targets) in enumerate(loader, start=1):
+            with tracker.phase(
+                "train_step",
+                metadata={
+                    "epoch": epoch_index + 1,
+                    "step": step_index,
+                },
+            ):
+                inputs = inputs.to(device)
+                targets = targets.to(device)
 
-        optimizer.zero_grad(set_to_none=True)
-        logits = model(inputs)
-        loss = criterion(logits, targets)
-        loss.backward()
-        optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                with tracker.phase(
+                    "forward",
+                    metadata={
+                        "epoch": epoch_index + 1,
+                        "step": step_index,
+                    },
+                ):
+                    logits = model(inputs)
+                    loss = criterion(logits, targets)
+                with tracker.phase(
+                    "backward",
+                    metadata={
+                        "epoch": epoch_index + 1,
+                        "step": step_index,
+                    },
+                ):
+                    loss.backward()
+                with tracker.phase(
+                    "optimizer_step",
+                    metadata={
+                        "epoch": epoch_index + 1,
+                        "step": step_index,
+                    },
+                ):
+                    optimizer.step()
 
-        batch_loss = float(loss.detach().cpu().item())
-        batch_accuracy = _accuracy(logits.detach(), targets.detach())
-        total_loss += batch_loss
-        total_accuracy += batch_accuracy
+                batch_loss = float(loss.detach().cpu().item())
+                batch_accuracy = _accuracy(logits.detach(), targets.detach())
+                total_loss += batch_loss
+                total_accuracy += batch_accuracy
 
-        global_step = epoch_index * len(loader) + step_index
-        wandb.log(
-            {
-                "train/step_loss": batch_loss,
-                "train/step_accuracy": batch_accuracy,
-                "train/global_step": global_step,
-            },
-            step=global_step,
-        )
+                global_step = epoch_index * len(loader) + step_index
+                wandb.log(
+                    {
+                        "train/step_loss": batch_loss,
+                        "train/step_accuracy": batch_accuracy,
+                        "train/global_step": global_step,
+                    },
+                    step=global_step,
+                )
 
     batch_count = max(1, len(loader))
     return {
@@ -400,6 +436,7 @@ def _evaluate(
     model: nn.Module,
     loader: DataLoader[Any],
     *,
+    tracker: Any,
     criterion: nn.Module,
     device: torch.device,
 ) -> dict[str, float]:
@@ -407,12 +444,22 @@ def _evaluate(
     total_loss = 0.0
     total_accuracy = 0.0
 
-    for inputs, targets in loader:
-        inputs = inputs.to(device)
-        targets = targets.to(device)
-        logits = model(inputs)
-        total_loss += float(criterion(logits, targets).detach().cpu().item())
-        total_accuracy += _accuracy(logits, targets)
+    with tracker.phase(
+        "evaluate",
+        metadata={
+            "batches": len(loader),
+        },
+    ):
+        for batch_index, (inputs, targets) in enumerate(loader, start=1):
+            with tracker.phase(
+                "eval_step",
+                metadata={"step": batch_index},
+            ):
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+                logits = model(inputs)
+                total_loss += float(criterion(logits, targets).detach().cpu().item())
+                total_accuracy += _accuracy(logits, targets)
 
     batch_count = max(1, len(loader))
     return {
@@ -426,6 +473,7 @@ def _log_prediction_table(
     model: nn.Module,
     loader: DataLoader[Any],
     *,
+    tracker: Any,
     device: torch.device,
     class_names: list[str],
     row_limit: int,
@@ -439,33 +487,37 @@ def _log_prediction_table(
     )
     added_rows = 0
 
-    for inputs, targets in loader:
-        logits = model(inputs.to(device))
-        probabilities = torch.softmax(logits, dim=1).cpu()
-        predictions = probabilities.argmax(dim=1)
+    with tracker.phase(
+        "prediction_table",
+        metadata={"row_limit": row_limit},
+    ):
+        for inputs, targets in loader:
+            logits = model(inputs.to(device))
+            probabilities = torch.softmax(logits, dim=1).cpu()
+            predictions = probabilities.argmax(dim=1)
 
-        for idx in range(inputs.size(0)):
-            confidence = float(probabilities[idx, predictions[idx]].item())
-            target_index = int(targets[idx].item())
-            prediction_index = int(predictions[idx].item())
-            image_tensor = inputs[idx].squeeze(0)
-            image_pixels = (
-                ((image_tensor + 1.0) * 127.5)
-                .clamp(min=0, max=255)
-                .to(torch.uint8)
-                .numpy()
-            )
-            table.add_data(
-                added_rows,
-                class_names[target_index],
-                class_names[prediction_index],
-                confidence,
-                wandb.Image(image_pixels),
-            )
-            added_rows += 1
-            if added_rows >= row_limit:
-                wandb.log({"evaluation/sample_predictions": table})
-                return
+            for idx in range(inputs.size(0)):
+                confidence = float(probabilities[idx, predictions[idx]].item())
+                target_index = int(targets[idx].item())
+                prediction_index = int(predictions[idx].item())
+                image_tensor = inputs[idx].squeeze(0)
+                image_pixels = (
+                    ((image_tensor + 1.0) * 127.5)
+                    .clamp(min=0, max=255)
+                    .to(torch.uint8)
+                    .numpy()
+                )
+                table.add_data(
+                    added_rows,
+                    class_names[target_index],
+                    class_names[prediction_index],
+                    confidence,
+                    wandb.Image(image_pixels),
+                )
+                added_rows += 1
+                if added_rows >= row_limit:
+                    wandb.log({"evaluation/sample_predictions": table})
+                    return
 
     if added_rows > 0:
         wandb.log({"evaluation/sample_predictions": table})
@@ -552,60 +604,75 @@ def main() -> None:
 
     try:
         with _cuda_history_context(enabled=history_enabled, device=device):
-            model = CharacterCNN(num_classes=len(class_names)).to(device)
-            optimizer = torch.optim.AdamW(
-                model.parameters(), lr=3e-4, weight_decay=1e-4
-            )
-            criterion = nn.CrossEntropyLoss()
-
-            for epoch_index in range(args.epochs):
-                train_metrics = _train_one_epoch(
-                    model,
-                    train_loader,
-                    optimizer=optimizer,
-                    criterion=criterion,
-                    device=device,
-                    epoch_index=epoch_index,
+            with tracker.phase(
+                "run",
+                metadata={
+                    "dataset": args.dataset,
+                    "device_type": device.type,
+                    "epochs": args.epochs,
+                },
+            ):
+                model = CharacterCNN(num_classes=len(class_names)).to(device)
+                optimizer = torch.optim.AdamW(
+                    model.parameters(), lr=3e-4, weight_decay=1e-4
                 )
-                val_metrics = _evaluate(
+                criterion = nn.CrossEntropyLoss()
+
+                for epoch_index in range(args.epochs):
+                    with tracker.phase(
+                        "epoch",
+                        metadata={"epoch": epoch_index + 1},
+                    ):
+                        train_metrics = _train_one_epoch(
+                            model,
+                            train_loader,
+                            tracker=tracker,
+                            optimizer=optimizer,
+                            criterion=criterion,
+                            device=device,
+                            epoch_index=epoch_index,
+                        )
+                        val_metrics = _evaluate(
+                            model,
+                            val_loader,
+                            tracker=tracker,
+                            criterion=criterion,
+                            device=device,
+                        )
+                        epoch_summary = {
+                            "epoch": epoch_index + 1,
+                            "train_loss": train_metrics["loss"],
+                            "train_accuracy": train_metrics["accuracy"],
+                            "val_loss": val_metrics["loss"],
+                            "val_accuracy": val_metrics["accuracy"],
+                        }
+                        history.append(epoch_summary)
+                        wandb.log(
+                            {
+                                "train/epoch_loss": train_metrics["loss"],
+                                "train/epoch_accuracy": train_metrics["accuracy"],
+                                "validation/loss": val_metrics["loss"],
+                                "validation/accuracy": val_metrics["accuracy"],
+                                "epoch": epoch_index + 1,
+                            },
+                            step=(epoch_index + 1) * len(train_loader),
+                        )
+                        print(
+                            f"Epoch {epoch_index + 1}/{args.epochs}:"
+                            f" train_loss={train_metrics['loss']:.4f}"
+                            f" train_acc={train_metrics['accuracy']:.4f}"
+                            f" val_loss={val_metrics['loss']:.4f}"
+                            f" val_acc={val_metrics['accuracy']:.4f}"
+                        )
+
+                _log_prediction_table(
                     model,
                     val_loader,
-                    criterion=criterion,
+                    tracker=tracker,
                     device=device,
+                    class_names=class_names,
+                    row_limit=args.sample_predictions,
                 )
-                epoch_summary = {
-                    "epoch": epoch_index + 1,
-                    "train_loss": train_metrics["loss"],
-                    "train_accuracy": train_metrics["accuracy"],
-                    "val_loss": val_metrics["loss"],
-                    "val_accuracy": val_metrics["accuracy"],
-                }
-                history.append(epoch_summary)
-                wandb.log(
-                    {
-                        "train/epoch_loss": train_metrics["loss"],
-                        "train/epoch_accuracy": train_metrics["accuracy"],
-                        "validation/loss": val_metrics["loss"],
-                        "validation/accuracy": val_metrics["accuracy"],
-                        "epoch": epoch_index + 1,
-                    },
-                    step=(epoch_index + 1) * len(train_loader),
-                )
-                print(
-                    f"Epoch {epoch_index + 1}/{args.epochs}:"
-                    f" train_loss={train_metrics['loss']:.4f}"
-                    f" train_acc={train_metrics['accuracy']:.4f}"
-                    f" val_loss={val_metrics['loss']:.4f}"
-                    f" val_acc={val_metrics['accuracy']:.4f}"
-                )
-
-            _log_prediction_table(
-                model,
-                val_loader,
-                device=device,
-                class_names=class_names,
-                row_limit=args.sample_predictions,
-            )
 
             if args.wandb_log_attribution:
                 try:

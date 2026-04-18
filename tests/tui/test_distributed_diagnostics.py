@@ -8,6 +8,11 @@ from typing import cast
 
 import pytest
 
+try:
+    import stormlog.phases as _stormlog_phases
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    _stormlog_phases = None
+
 from stormlog.telemetry import (
     TelemetryEvent,
     TelemetryEventV2,
@@ -26,6 +31,7 @@ def _make_event(
     timestamp: float,
     rank: int,
     world_size: int,
+    session_id: str | None = None,
     event_type: str = "sample",
     allocated: int = 0,
     reserved: int = 0,
@@ -34,8 +40,35 @@ def _make_event(
     context: str = "",
     metadata: dict[str, object] | None = None,
 ) -> TelemetryEvent:
-    return telemetry_event_from_record(
-        {
+    if session_id is not None:
+        used_bytes = used or reserved
+        record: dict[str, object] = {
+            "schema_version": 3,
+            "session_id": session_id,
+            "timestamp_ns": int(timestamp * 1_000_000_000),
+            "event_type": event_type,
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1234,
+            "host": "test-host",
+            "device_id": 0,
+            "allocator_allocated_bytes": allocated,
+            "allocator_reserved_bytes": reserved,
+            "allocator_active_bytes": None,
+            "allocator_inactive_bytes": None,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": used_bytes,
+            "device_free_bytes": None if total is None else max(0, total - used_bytes),
+            "device_total_bytes": total,
+            "context": context,
+            "job_id": "job-1",
+            "rank": rank,
+            "local_rank": rank,
+            "world_size": world_size,
+            "metadata": metadata or {},
+        }
+    else:
+        record = {
             "timestamp": timestamp,
             "event_type": event_type,
             "memory_allocated": allocated,
@@ -54,7 +87,9 @@ def _make_event(
             "local_rank": rank,
             "world_size": world_size,
             "metadata": metadata or {},
-        },
+        }
+    return telemetry_event_from_record(
+        record,
         permissive_legacy=True,
         default_collector="stormlog.cuda_tracker",
         default_sampling_interval_ms=100,
@@ -241,6 +276,96 @@ def test_build_distributed_model_surfaces_collective_attribution_signals() -> No
         assert indicator.confidence is not None
         assert indicator.reason_codes
         assert "marker_collective_token" in indicator.reason_codes
+
+
+def test_build_distributed_model_surfaces_phase_paths_in_rows_and_indicators() -> None:
+    if _stormlog_phases is None:
+        pytest.skip("stormlog.phases is not available in this slice")
+
+    session_id = "session-diagnostics-phase"
+    events = [
+        _make_event(
+            timestamp=0.9,
+            session_id=session_id,
+            rank=0,
+            world_size=2,
+            event_type="phase_enter",
+            allocated=10,
+            reserved=10,
+            used=10,
+            total=100,
+            context="Phase entered: train / forward",
+            metadata={
+                "phase_scope": {
+                    "action": "enter",
+                    "name": "forward",
+                    "path": ["train", "forward"],
+                    "depth": 2,
+                    "scope_id": "phase-0",
+                    "parent_scope_id": "phase-train",
+                    "thread_id": 1,
+                    "thread_name": "MainThread",
+                    "sequence": 1,
+                }
+            },
+        ),
+        _make_event(
+            timestamp=1.0,
+            session_id=session_id,
+            rank=0,
+            world_size=2,
+            allocated=10,
+            reserved=15,
+            used=30,
+            total=100,
+            context="gap breach",
+        ),
+        _make_event(
+            timestamp=1.1,
+            session_id=session_id,
+            rank=1,
+            world_size=2,
+            allocated=12,
+            reserved=12,
+            used=12,
+            total=100,
+        ),
+        _make_event(
+            timestamp=1.2,
+            session_id=session_id,
+            rank=0,
+            world_size=2,
+            event_type="phase_exit",
+            allocated=10,
+            reserved=10,
+            used=10,
+            total=100,
+            context="Phase exited: train / forward",
+            metadata={
+                "phase_scope": {
+                    "action": "exit",
+                    "name": "forward",
+                    "path": ["train", "forward"],
+                    "depth": 2,
+                    "scope_id": "phase-0",
+                    "parent_scope_id": "phase-train",
+                    "thread_id": 1,
+                    "thread_name": "MainThread",
+                    "sequence": 2,
+                }
+            },
+        ),
+    ]
+
+    model = build_distributed_model(events)
+    row_rank_0 = next(row for row in model.rows if row.rank == 0)
+    earliest_indicator = next(
+        indicator for indicator in model.indicators if indicator.kind == "earliest"
+    )
+
+    assert row_rank_0.first_anomaly_phase_path == "train / forward"
+    assert earliest_indicator.phase_path == "train / forward"
+    assert "Phase: train / forward." in earliest_indicator.details
 
 
 def test_load_distributed_artifacts_merges_json_and_csv_inputs(

@@ -7,6 +7,14 @@ from dataclasses import asdict, dataclass, field
 from statistics import median
 from typing import Any, Sequence
 
+try:
+    from .phases import PhaseAttribution, PhaseReplayIndex, phase_attribution_to_payload
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def phase_attribution_to_payload(_: Any) -> Any:
+        return None
 from .telemetry import TelemetryEventV2
 
 _SPIKE_MIN_BYTES = 64 * 1024**2
@@ -52,6 +60,7 @@ class FirstCauseSuspect:
     lead_over_cluster_onset_ns: int
     confidence: str
     evidence: dict[str, int | str]
+    phase_attribution: PhaseAttribution | None = None
 
 
 @dataclass
@@ -66,6 +75,7 @@ class FirstCauseAnalysisResult:
 @dataclass
 class _RankSpikeCandidate:
     rank: int
+    session_id: str | None
     first_spike_timestamp_ns: int
     aligned_first_spike_timestamp_ns: int
     peak_delta_bytes: int
@@ -286,6 +296,7 @@ def _find_rank_spike_candidate(
         spike_event = rank_events[index]
         return _RankSpikeCandidate(
             rank=spike_event.rank,
+            session_id=getattr(spike_event, "session_id", None),
             first_spike_timestamp_ns=spike_event.timestamp_ns,
             aligned_first_spike_timestamp_ns=spike_event.timestamp_ns - offset_ns,
             peak_delta_bytes=cumulative_delta,
@@ -298,6 +309,7 @@ def _find_rank_spike_candidate(
 def _detect_first_cause_spikes(
     grouped: dict[int, list[TelemetryEventV2]],
     merge_result: CrossRankMergeResult,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> FirstCauseAnalysisResult:
     if not grouped:
         return FirstCauseAnalysisResult(
@@ -417,6 +429,17 @@ def _detect_first_cause_spikes(
                     "device_used_delta_bytes": candidate.peak_delta_bytes,
                     "supporting_ranks_at_or_before_onset": support_count,
                 },
+                phase_attribution=(
+                    phase_resolver.resolve(
+                        timestamp_ns=candidate.first_spike_timestamp_ns,
+                        session_id=candidate.session_id,
+                        rank=candidate.rank,
+                    )
+                    if phase_resolver is not None
+                    and candidate.session_id is not None
+                    and hasattr(phase_resolver, "resolve")
+                    else None
+                ),
             )
         )
 
@@ -429,6 +452,8 @@ def _detect_first_cause_spikes(
 
 def analyze_cross_rank_events(
     events: Sequence[TelemetryEventV2],
+    *,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> tuple[CrossRankMergeResult, FirstCauseAnalysisResult]:
     """Analyze distributed telemetry for merged timelines and first-cause spikes."""
 
@@ -441,14 +466,25 @@ def analyze_cross_rank_events(
             notes=selection_notes or list(merge_result.notes),
         )
     grouped = _group_events_by_rank(analysis_events)
-    first_cause_result = _detect_first_cause_spikes(grouped, merge_result)
+    first_cause_result = _detect_first_cause_spikes(
+        grouped,
+        merge_result,
+        phase_resolver=phase_resolver,
+    )
     return merge_result, first_cause_result
 
 
-def summarize_cross_rank_analysis(events: Sequence[TelemetryEventV2]) -> dict[str, Any]:
+def summarize_cross_rank_analysis(
+    events: Sequence[TelemetryEventV2],
+    *,
+    phase_resolver: PhaseReplayIndex | None = None,
+) -> dict[str, Any]:
     """Return a JSON-serializable cross-rank analysis summary."""
 
-    merge_result, first_cause_result = analyze_cross_rank_events(events)
+    merge_result, first_cause_result = analyze_cross_rank_events(
+        events,
+        phase_resolver=phase_resolver,
+    )
     notes = list(dict.fromkeys([*merge_result.notes, *first_cause_result.notes]))
     return {
         "job_id": merge_result.job_id,
@@ -464,10 +500,19 @@ def summarize_cross_rank_analysis(events: Sequence[TelemetryEventV2]) -> dict[st
         },
         "cluster_onset_timestamp_ns": first_cause_result.cluster_onset_timestamp_ns,
         "first_cause_suspects": [
-            asdict(suspect) for suspect in first_cause_result.suspects
+            _serialize_first_cause_suspect(suspect)
+            for suspect in first_cause_result.suspects
         ],
         "notes": notes,
     }
+
+
+def _serialize_first_cause_suspect(suspect: FirstCauseSuspect) -> dict[str, Any]:
+    payload = asdict(suspect)
+    payload["phase_attribution"] = phase_attribution_to_payload(
+        suspect.phase_attribution
+    )
+    return payload
 
 
 __all__ = [

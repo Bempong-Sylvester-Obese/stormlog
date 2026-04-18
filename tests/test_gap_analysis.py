@@ -2,8 +2,21 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
+import pytest
+
 from stormlog.analyzer import MemoryAnalyzer
-from stormlog.telemetry import SCHEMA_VERSION_V2, TelemetryEventV2
+
+try:
+    from stormlog.phases import PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseReplayIndex = None  # type: ignore[assignment]
+from stormlog.telemetry import (
+    SCHEMA_VERSION_V2,
+    TelemetryEventV2,
+    telemetry_event_from_record,
+)
 from tests.gap_test_helpers import build_gap_event
 
 # ---------------------------------------------------------------------------
@@ -63,6 +76,86 @@ def _make_collective_event(
         local_rank=rank,
         world_size=world_size,
         metadata=metadata or {},
+    )
+
+
+def _make_phase_sample_event(
+    *,
+    session_id: str,
+    timestamp_ns: int,
+    allocator_allocated: int,
+    allocator_reserved: int,
+    device_used: int,
+    rank: int = 0,
+    world_size: int = 1,
+    event_type: str = "sample",
+    context: str | None = None,
+    metadata: dict | None = None,
+) -> object:
+    total_bytes = 16 * 1024**3
+    return telemetry_event_from_record(
+        {
+            "schema_version": 3,
+            "session_id": session_id,
+            "timestamp_ns": timestamp_ns,
+            "event_type": event_type,
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1,
+            "host": "test",
+            "device_id": 0,
+            "allocator_allocated_bytes": allocator_allocated,
+            "allocator_reserved_bytes": allocator_reserved,
+            "allocator_active_bytes": None,
+            "allocator_inactive_bytes": None,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": device_used,
+            "device_free_bytes": max(0, total_bytes - device_used),
+            "device_total_bytes": total_bytes,
+            "context": context,
+            "job_id": "job-phase",
+            "rank": rank,
+            "local_rank": rank,
+            "world_size": world_size,
+            "metadata": metadata or {},
+        }
+    )
+
+
+def _make_phase_boundary_event(
+    *,
+    session_id: str,
+    timestamp_ns: int,
+    rank: int,
+    world_size: int,
+    event_type: str,
+    action: str,
+    sequence: int,
+    scope_id: str,
+) -> object:
+    return _make_phase_sample_event(
+        session_id=session_id,
+        timestamp_ns=timestamp_ns,
+        allocator_allocated=2_000_000_000,
+        allocator_reserved=2_500_000_000,
+        device_used=2_500_000_000,
+        rank=rank,
+        world_size=world_size,
+        event_type=event_type,
+        context=f"Phase {action}ed: train",
+        metadata={
+            "phase_scope": {
+                "action": action,
+                "name": "train",
+                "path": ["train"],
+                "depth": 1,
+                "scope_id": scope_id,
+                "parent_scope_id": None,
+                "thread_id": 1,
+                "thread_name": "MainThread",
+                "sequence": sequence,
+            }
+        },
     )
 
 
@@ -267,3 +360,60 @@ class TestEdgeCases:
             assert "confidence" in attribution
             assert "reason_codes" in attribution
             assert attribution["reason_codes"]
+
+    def test_gap_findings_include_phase_attribution_when_available(self) -> None:
+        if PhaseReplayIndex is None:
+            pytest.skip("stormlog.phases is not available in this slice")
+
+        session_id = "session-gap-phase"
+        base_ts = 1_700_000_000_000_000_000
+        events: list[Any] = [
+            _make_phase_boundary_event(
+                session_id=session_id,
+                timestamp_ns=base_ts,
+                rank=0,
+                world_size=1,
+                event_type="phase_enter",
+                action="enter",
+                sequence=1,
+                scope_id="phase-1",
+            )
+        ]
+        alloc = 2_000_000_000
+        reserved = 2_500_000_000
+        for index in range(12):
+            events.append(
+                _make_phase_sample_event(
+                    session_id=session_id,
+                    timestamp_ns=base_ts + (index + 1) * 100_000_000,
+                    allocator_allocated=alloc,
+                    allocator_reserved=reserved,
+                    device_used=reserved + 500_000_000 + index * 120_000_000,
+                )
+            )
+        events.append(
+            _make_phase_boundary_event(
+                session_id=session_id,
+                timestamp_ns=base_ts + 13 * 100_000_000,
+                rank=0,
+                world_size=1,
+                event_type="phase_exit",
+                action="exit",
+                sequence=2,
+                scope_id="phase-1",
+            )
+        )
+
+        analyzer = MemoryAnalyzer()
+        resolver = PhaseReplayIndex.from_events(events)
+        findings = analyzer.analyze_memory_gaps(
+            cast(list[TelemetryEventV2], events),
+            phase_resolver=resolver,
+        )
+
+        drift_findings = [f for f in findings if f.classification == "persistent_drift"]
+        assert len(drift_findings) == 1
+        finding = drift_findings[0]
+        assert finding.evidence_timestamp_ns is not None
+        assert finding.phase_attribution is not None
+        assert finding.phase_attribution.phase_path == "train"

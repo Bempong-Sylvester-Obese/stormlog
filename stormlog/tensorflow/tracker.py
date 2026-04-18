@@ -11,6 +11,7 @@ import socket
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
@@ -32,6 +33,7 @@ from stormlog.collector_health import (
     CollectorHealthState,
     collector_retry_delay_seconds,
 )
+from stormlog.phases import PhaseHandle, PhaseRecorder, PhaseToken
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -168,6 +170,7 @@ class MemoryTracker:
         self._min_memory_mb = float("inf")
         self._sum_memory_mb = 0.0
         self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
+        self._phase_state = PhaseRecorder()
 
         # Thread synchronization
         self._lock = threading.Lock()
@@ -555,6 +558,7 @@ class MemoryTracker:
         self._session_start_time = time.time()
         self._session_end_time = None
         self._session_summary = None
+        self._phase_state.reset()
         self._ensure_telemetry_sink()
         self._stop_event.clear()
 
@@ -612,6 +616,7 @@ class MemoryTracker:
                 self._session_summary,
                 ended_at_ns=now_ns(),
             )
+        self._phase_state.reset()
         # Create result
         result = self._create_tracking_result()
 
@@ -834,6 +839,52 @@ class MemoryTracker:
             sink.close(session_status=status)
         except TypeError:
             sink.close()
+
+    def enter_phase(
+        self, name: str, *, metadata: Optional[Dict[str, Any]] = None
+    ) -> PhaseHandle:
+        """Enter one structured TensorFlow tracking phase."""
+        if not self.tracking:
+            raise RuntimeError("Tracking must be active before entering a phase.")
+        session = self._ensure_session_summary()
+        token, boundary = self._phase_state.enter(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            name=name,
+            attrs=metadata,
+        )
+        self._append_event(
+            timestamp=time.time(),
+            memory_mb=self._status_memory_value(),
+            event_type=boundary.event_type,
+            context=boundary.context,
+            metadata=boundary.metadata,
+        )
+        return PhaseHandle(
+            scope_id=boundary.scope_id,
+            name=name,
+            path=boundary.path,
+            close_callback=lambda: self._emit_phase_exit(token),
+        )
+
+    @contextmanager
+    def phase(self, name: str, *, metadata: Optional[Dict[str, Any]] = None) -> Any:
+        """Context manager that emits structured TensorFlow phase telemetry."""
+        handle = self.enter_phase(name, metadata=metadata)
+        try:
+            yield handle
+        finally:
+            handle.close()
+
+    def _emit_phase_exit(self, token: PhaseToken) -> None:
+        boundary = self._phase_state.exit(token)
+        self._append_event(
+            timestamp=time.time(),
+            memory_mb=self._status_memory_value(),
+            event_type=boundary.event_type,
+            context=boundary.context,
+            metadata=boundary.metadata,
+        )
 
     def set_alert_threshold(self, threshold_mb: float) -> None:
         """Update alert threshold."""

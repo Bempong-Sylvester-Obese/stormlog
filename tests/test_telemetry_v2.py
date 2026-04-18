@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import csv
 import json
 from collections import UserDict
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import jsonschema  # type: ignore[import-untyped, unused-ignore]
 import pytest
 
+from stormlog.phases import parse_phase_boundary
 from stormlog.telemetry import (
     SCHEMA_VERSION_V2,
     SCHEMA_VERSION_V3,
@@ -23,6 +25,7 @@ from stormlog.telemetry import (
     validate_telemetry_record,
 )
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
+from stormlog.tui.distributed_diagnostics import load_distributed_artifacts
 
 
 def _schema(version: int) -> dict[str, object]:
@@ -206,6 +209,203 @@ def test_legacy_tf_record_converts_with_defaults() -> None:
     assert isinstance(record["session_id"], str)
     assert record["session_id"]
     jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))
+
+
+def test_phase_boundary_record_round_trips_through_v3_schema() -> None:
+    event = telemetry_event_from_record(
+        {
+            "schema_version": SCHEMA_VERSION_V3,
+            "session_id": "session-phase",
+            "timestamp_ns": 1_700_000_000_000_000_100,
+            "event_type": "phase_enter",
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1234,
+            "host": "host-a",
+            "job_id": "job-123",
+            "rank": 1,
+            "local_rank": 1,
+            "world_size": 8,
+            "device_id": 0,
+            "allocator_allocated_bytes": 1024,
+            "allocator_reserved_bytes": 2048,
+            "allocator_active_bytes": 512,
+            "allocator_inactive_bytes": 1536,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": 2048,
+            "device_free_bytes": 4096,
+            "device_total_bytes": 6144,
+            "context": "Phase entered: train / step",
+            "metadata": {
+                "phase_scope": {
+                    "action": "enter",
+                    "name": "step",
+                    "path": ["train", "step"],
+                    "depth": 2,
+                    "scope_id": "session-phase:2",
+                    "parent_scope_id": "session-phase:1",
+                    "thread_id": 88,
+                    "thread_name": "MainThread",
+                    "sequence": 2,
+                    "attributes": {"epoch": 3},
+                }
+            },
+        }
+    )
+
+    record = telemetry_event_to_dict(event)
+
+    validate_telemetry_record(record)
+    jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))
+    scope = parse_phase_boundary(record)
+    assert scope is not None
+    assert scope.path == ("train", "step")
+    assert scope.attributes == {"epoch": 3}
+
+
+def test_load_telemetry_sessions_preserves_phase_scope_metadata_across_formats(
+    tmp_path: Path,
+) -> None:
+    sample_record = telemetry_event_to_dict(
+        telemetry_event_from_record(
+            {
+                "schema_version": SCHEMA_VERSION_V3,
+                "session_id": "session-phase",
+                "timestamp_ns": 1_700_000_000_000_000_000,
+                "event_type": "sample",
+                "collector": "stormlog.cuda_tracker",
+                "sampling_interval_ms": 100,
+                "pid": 1234,
+                "host": "host-a",
+                "job_id": "job-123",
+                "rank": 1,
+                "local_rank": 1,
+                "world_size": 8,
+                "device_id": 0,
+                "allocator_allocated_bytes": 1024,
+                "allocator_reserved_bytes": 2048,
+                "allocator_active_bytes": 512,
+                "allocator_inactive_bytes": 1536,
+                "allocator_change_bytes": 0,
+                "device_used_bytes": 2048,
+                "device_free_bytes": 4096,
+                "device_total_bytes": 6144,
+                "context": "sample",
+                "metadata": {},
+            }
+        )
+    )
+    enter_record = dict(sample_record)
+    enter_record.update(
+        {
+            "timestamp_ns": sample_record["timestamp_ns"] + 10,
+            "event_type": "phase_enter",
+            "context": "Phase entered: train / step",
+            "metadata": {
+                "phase_scope": {
+                    "action": "enter",
+                    "name": "step",
+                    "path": ["train", "step"],
+                    "depth": 2,
+                    "scope_id": "session-phase:2",
+                    "parent_scope_id": "session-phase:1",
+                    "thread_id": 88,
+                    "thread_name": "MainThread",
+                    "sequence": 2,
+                    "attributes": {"epoch": 3},
+                }
+            },
+        }
+    )
+    exit_record = dict(enter_record)
+    exit_record.update(
+        {
+            "timestamp_ns": enter_record["timestamp_ns"] + 10,
+            "event_type": "phase_exit",
+            "context": "Phase exited: train / step",
+            "metadata": {
+                "phase_scope": {
+                    "action": "exit",
+                    "name": "step",
+                    "path": ["train", "step"],
+                    "depth": 2,
+                    "scope_id": "session-phase:2",
+                    "parent_scope_id": "session-phase:1",
+                    "thread_id": 88,
+                    "thread_name": "MainThread",
+                    "sequence": 3,
+                    "attributes": {"epoch": 3},
+                }
+            },
+        }
+    )
+    records = [sample_record, enter_record, exit_record]
+
+    json_path = tmp_path / "events.json"
+    json_path.write_text(json.dumps(records), encoding="utf-8")
+
+    csv_path = tmp_path / "events.csv"
+    with csv_path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(sample_record.keys()))
+        writer.writeheader()
+        for record in records:
+            writer.writerow(
+                {
+                    key: (
+                        json.dumps(value)
+                        if isinstance(value, dict)
+                        else ("" if value is None else str(value))
+                    )
+                    for key, value in record.items()
+                }
+            )
+
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path / "sink",
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    for record in records:
+        sink.append(record)
+    sink.close()
+
+    for source in (json_path, tmp_path / "sink"):
+        loaded = load_telemetry_sessions(source, permissive_legacy=True)
+        assert len(loaded) == 1
+        phase_events = [
+            event for event in loaded[0].events if event.event_type.startswith("phase_")
+        ]
+        assert [event.event_type for event in phase_events] == [
+            "phase_enter",
+            "phase_exit",
+        ]
+        enter_scope = parse_phase_boundary(phase_events[0])
+        exit_scope = parse_phase_boundary(phase_events[1])
+        assert enter_scope is not None
+        assert exit_scope is not None
+        assert enter_scope.path == ("train", "step")
+        assert enter_scope.attributes == {"epoch": 3}
+        assert exit_scope.scope_id == enter_scope.scope_id
+
+    artifact_result = load_distributed_artifacts([csv_path])
+    csv_phase_events = [
+        event
+        for event in artifact_result.events
+        if event.event_type.startswith("phase_")
+    ]
+    assert [event.event_type for event in csv_phase_events] == [
+        "phase_enter",
+        "phase_exit",
+    ]
+    csv_enter_scope = parse_phase_boundary(csv_phase_events[0])
+    csv_exit_scope = parse_phase_boundary(csv_phase_events[1])
+    assert csv_enter_scope is not None
+    assert csv_exit_scope is not None
+    assert csv_enter_scope.path == ("train", "step")
+    assert csv_enter_scope.attributes == {"epoch": 3}
+    assert csv_exit_scope.scope_id == csv_enter_scope.scope_id
 
 
 def test_resolve_distributed_identity_uses_torchrun_env() -> None:

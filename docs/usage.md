@@ -189,6 +189,32 @@ print(f"Peak memory: {stats.get('peak_memory', 0) / (1024**3):.2f} GB")
 print(f"Events: {stats.get('total_events', 0)}")
 ```
 
+### Structured workload phases
+
+All long-running trackers can emit explicit workload-phase boundaries while
+tracking is active:
+
+```python
+from stormlog import CPUMemoryTracker
+
+tracker = CPUMemoryTracker(sampling_interval=0.1)
+tracker.start_tracking()
+
+with tracker.phase("train", metadata={"epoch": 1}):
+    with tracker.phase("forward", metadata={"microbatch": 4}):
+        _ = [i * i for i in range(50_000)]
+
+tracker.stop_tracking()
+```
+
+This writes `phase_enter` and `phase_exit` telemetry records with structured
+`metadata["phase_scope"]` payloads. The same API shape is available on
+`MemoryTracker`, `CPUMemoryTracker`, and `stormlog.tensorflow.MemoryTracker`.
+
+When those phase boundaries are present, `gpumemprof analyze` and the TUI
+Diagnostics tab can attach hidden-memory gaps, collective spikes, and
+cross-rank first-cause suspects back to the active phase path.
+
 If the underlying collector becomes unstable, `MemoryTracker` keeps the tracking
 session alive, exposes collector health through `get_statistics()`, and emits
 `collector_degraded` / `collector_recovered` events instead of exporting

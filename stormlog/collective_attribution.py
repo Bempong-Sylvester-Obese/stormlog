@@ -7,6 +7,23 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
+try:
+    from .phases import (
+        PhaseAttribution,
+        PhaseReplayIndex,
+        merge_phase_attributions,
+    )
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def merge_phase_attributions(
+        first: PhaseAttribution | None,
+        second: PhaseAttribution | None,
+    ) -> PhaseAttribution | None:
+        return first or second
+
+
 from .telemetry import TelemetryEventV2
 
 _COLLECTIVE_TOKENS = (
@@ -64,12 +81,14 @@ class CollectiveAttributionResult:
     confidence: float
     reason_codes: list[str] = field(default_factory=list)
     evidence: CollectiveAttributionEvidence | None = None
+    phase_attribution: PhaseAttribution | None = None
 
 
 @dataclass(frozen=True)
 class _RankSpike:
     key: tuple[int, int, int]
     rank: int
+    session_id: str | None
     timestamp_ns: int
     peak_gap_bytes: int
     peak_gap_ratio: float | None
@@ -155,6 +174,7 @@ def attribute_collective_memory(
     config: CollectiveAttributionConfig | None = None,
     preset: str = "medium",
     overrides: Mapping[str, Any] | None = None,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> list[CollectiveAttributionResult]:
     """Attribute hidden-memory spikes to communication phases using hybrid signals."""
 
@@ -198,6 +218,7 @@ def attribute_collective_memory(
                 expected_world_size=expected_world_size,
                 trace_start_ns=trace_start_ns,
                 config=resolved,
+                phase_resolver=phase_resolver,
             )
             if scored is not None and scored.confidence >= resolved.min_confidence:
                 results.append(scored)
@@ -291,6 +312,7 @@ def _detect_rank_spikes(
             _RankSpike(
                 key=(rank, event.timestamp_ns, sample_index),
                 rank=rank,
+                session_id=getattr(event, "session_id", None),
                 timestamp_ns=event.timestamp_ns,
                 peak_gap_bytes=int(gap_bytes),
                 peak_gap_ratio=gap_ratio,
@@ -379,6 +401,7 @@ def _score_spike(
     expected_world_size: int,
     trace_start_ns: int,
     config: CollectiveAttributionConfig,
+    phase_resolver: PhaseReplayIndex | None,
 ) -> CollectiveAttributionResult | None:
     marker_overlap = bool(spike.marker_times)
     synchronized_count = max(len(synchronized_ranks), 1)
@@ -460,6 +483,18 @@ def _score_spike(
     else:
         classification = "collective_suspect"
 
+    phase_attribution = None
+    if (
+        phase_resolver is not None
+        and spike.session_id is not None
+        and hasattr(phase_resolver, "resolve")
+    ):
+        phase_attribution = phase_resolver.resolve(
+            timestamp_ns=spike.timestamp_ns,
+            session_id=spike.session_id,
+            rank=spike.rank,
+        )
+
     return CollectiveAttributionResult(
         rank=spike.rank,
         interval_start_ns=interval_start,
@@ -468,6 +503,7 @@ def _score_spike(
         confidence=round(float(confidence), 3),
         reason_codes=sorted(set(reason_codes)),
         evidence=evidence,
+        phase_attribution=phase_attribution,
     )
 
 
@@ -530,6 +566,10 @@ def _merge_rank_intervals(
             confidence=max(prev.confidence, result.confidence),
             reason_codes=sorted(set(prev.reason_codes + result.reason_codes)),
             evidence=merged_evidence,
+            phase_attribution=merge_phase_attributions(
+                prev.phase_attribution,
+                result.phase_attribution,
+            ),
         )
 
     return merged

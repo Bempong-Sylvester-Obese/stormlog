@@ -6,6 +6,7 @@ from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_RUNNING,
     SessionSummary,
+    _HasSummary,
     create_session_summary,
     select_default_session,
     update_session_summary,
@@ -13,7 +14,7 @@ from stormlog.session import (
 
 
 @dataclass(frozen=True)
-class _LoadedSession:
+class _LoadedSession(_HasSummary):
     summary: SessionSummary
 
 

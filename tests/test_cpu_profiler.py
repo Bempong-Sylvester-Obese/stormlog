@@ -20,6 +20,7 @@ from stormlog.cpu_profiler import (
     CPUMemoryTracker,
     CPUProfileResult,
 )
+from stormlog.phases import parse_phase_boundary
 from stormlog.telemetry_sink import TelemetrySinkConfig
 
 # ---------------------------------------------------------------------------
@@ -613,10 +614,58 @@ class TestCPUMemoryTracker:
             assert tracker._telemetry_sink is None
 
             tracker.start_tracking()
-            second_sink = tracker._telemetry_sink
+            second_sink = cast(Any, tracker._telemetry_sink)
 
         assert second_sink is not None
         assert second_sink is not first_sink
+
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_tracker_emits_structured_phase_boundaries(self, mock_cls: Any) -> None:
+        mock_cls.return_value = _make_mock_process(rss=2048)
+        tracker = CPUMemoryTracker(sampling_interval=0.05)
+
+        class _NoOpThread:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                _ = args, kwargs
+
+            def start(self) -> None:
+                return None
+
+            def is_alive(self) -> bool:
+                return False
+
+            def join(self, timeout: float | None = None) -> None:
+                _ = timeout
+
+        with patch("stormlog.cpu_profiler.threading.Thread", _NoOpThread):
+            tracker.start_tracking()
+            with tracker.phase("train_step", metadata={"epoch": 1}) as handle:
+                assert handle.phase_path == "train_step"
+            tracker.stop_tracking()
+
+        phase_events = [
+            event
+            for event in tracker.get_events()
+            if event.event_type.startswith("phase_")
+        ]
+        assert [event.event_type for event in phase_events] == [
+            "phase_enter",
+            "phase_exit",
+        ]
+
+        enter_scope = parse_phase_boundary(
+            tracker._telemetry_record_from_event(phase_events[0])
+        )
+        exit_scope = parse_phase_boundary(
+            tracker._telemetry_record_from_event(phase_events[1])
+        )
+        assert enter_scope is not None
+        assert exit_scope is not None
+        assert enter_scope.path == ("train_step",)
+        assert enter_scope.depth == 1
+        assert enter_scope.attributes == {"epoch": 1}
+        assert exit_scope.scope_id == enter_scope.scope_id
+        assert exit_scope.path == enter_scope.path
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_tracker_disables_sink_after_append_failure(self, mock_cls: Any) -> None:

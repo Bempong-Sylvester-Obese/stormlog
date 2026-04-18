@@ -53,7 +53,7 @@ class _HasSummary(Protocol):
     summary: SessionSummary
 
 
-_SessionLikeT = TypeVar("_SessionLikeT", SessionSummary, _HasSummary)
+_SessionLikeT = TypeVar("_SessionLikeT", bound=SessionSummary | _HasSummary)
 
 
 def now_ns() -> int:

@@ -87,6 +87,7 @@ python3 -m examples.scenarios.cpu_telemetry_scenario
 python3 -m examples.scenarios.mps_telemetry_scenario
 python3 -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
 python3 -m examples.scenarios.tf_end_to_end_scenario
+python3 -m examples.scenarios.wandb_training_smoke --device cuda --wandb-mode offline
 ```
 
 ### CLI-only validation (pip install)
