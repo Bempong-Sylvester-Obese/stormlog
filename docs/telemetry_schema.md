@@ -118,83 +118,75 @@ When the collector cannot produce core metrics, Stormlog pauses sample emission
 until the next retry window and records the degraded state instead of exporting
 synthetic zero-valued samples.
 
-## Phase scope records
+## Structured phase metadata
 
-Long-running trackers can optionally emit structured workload phases as
-companion telemetry records instead of duplicating phase labels on every sample.
+Phase-aware trackers store workload boundaries under `metadata["phase_scope"]`.
+This payload is attached to `phase_enter` and `phase_exit` events and is replayed
+later by the analyzer and TUI.
 
-Phase boundaries use normal canonical records with:
+The current shape is:
 
-- `event_type: "phase_enter"`
-- `event_type: "phase_exit"`
-- the normal top-level session, rank, host, pid, collector, and allocator/device fields
-- authoritative structured phase data under `metadata["phase_scope"]`
-
-The `phase_scope` payload contains:
-
-- `action` (`"enter"` or `"exit"`)
-- `name`
-- `path` (ordered list of nested phase names)
-- `depth`
-- `scope_id`
-- `parent_scope_id`
-- `thread_id`
-- `thread_name`
-- `sequence`
-- optional `attributes` (user-supplied phase metadata)
+- `action` (`enter` or `exit`)
+- `name` (leaf phase label)
+- `path` (`list[str]`)
+- `depth` (`int`)
+- `scope_id` (`string`)
+- `parent_scope_id` (`string | null`)
+- `thread_id` (`int`)
+- `thread_name` (`string`)
+- `sequence` (`int`)
+- `attributes` (`object`, optional)
 
 Example:
 
 ```json
 {
-  "schema_version": 3,
-  "session_id": "run-123",
-  "timestamp_ns": 1700000000000000000,
   "event_type": "phase_enter",
-  "collector": "stormlog.cuda_tracker",
-  "sampling_interval_ms": 100,
-  "pid": 1234,
-  "host": "trainer-a",
-  "device_id": 0,
-  "allocator_allocated_bytes": 2147483648,
-  "allocator_reserved_bytes": 2415919104,
-  "allocator_active_bytes": 2147483648,
-  "allocator_inactive_bytes": 268435456,
-  "allocator_change_bytes": 0,
-  "device_used_bytes": 2684354560,
-  "device_free_bytes": 14495514624,
-  "device_total_bytes": 17179869184,
-  "context": "Phase entered: train / forward",
-  "job_id": "train-42",
-  "rank": 0,
-  "local_rank": 0,
-  "world_size": 8,
   "metadata": {
     "phase_scope": {
       "action": "enter",
       "name": "forward",
       "path": ["train", "forward"],
       "depth": 2,
-      "scope_id": "run-123:9",
-      "parent_scope_id": "run-123:4",
-      "thread_id": 140735,
+      "scope_id": "session-1:2",
+      "parent_scope_id": "session-1:1",
+      "thread_id": 88,
       "thread_name": "MainThread",
-      "sequence": 9,
-      "attributes": {"microbatch": 12}
+      "sequence": 2,
+      "attributes": {"epoch": 3}
     }
   }
 }
 ```
 
-Semantics:
+## Analyzer phase attribution payloads
 
-- phase records are optional; existing workflows remain valid when they are absent
-- nesting is deterministic per `(session_id, rank, thread_id)`
-- `path` is authoritative; `context` is only a human-readable mirror
-- if multiple threads expose overlapping active paths at the same timestamp,
-  analysis reports the attribution as ambiguous instead of inventing one path
-- if a capture ends with an open phase, analysis treats it as active until the
-  session end for attribution only; the raw record stream is unchanged
+Analyze and Diagnostics outputs may also include a derived
+`phase_attribution` object. This is not part of the raw event schema above; it
+is report-layer data produced after replaying the `phase_scope` boundaries.
+
+Canonical fields:
+
+- `phase_resolution` (`unique`, `ambiguous`, or omitted when no attribution exists)
+- `phase_source` (`exact`, `thread_local`, `heuristic`, or omitted)
+- `phase_path` (`string`, only for unique attributions)
+- `phase_paths` (`list[str]`, one or more candidate labels)
+- `scope_id`, `thread_id`, `thread_name` (present only when uniquely tied to one scope)
+
+Optional presentation field:
+
+- `phase_summary`
+  - `phase_path`
+  - `source`
+
+`phase_summary` is emitted only when the product wants one useful display label
+even though the canonical attribution remains ambiguous. For example, the CLI
+may show `(likely) train / communication` while the underlying
+`phase_attribution.phase_resolution` still stays `ambiguous`.
+
+If ambiguity collapses to only one distinct label, Stormlog keeps the canonical
+ambiguity and omits `phase_summary` because there is no materially different
+winner to show.
 
 ## Legacy compatibility
 

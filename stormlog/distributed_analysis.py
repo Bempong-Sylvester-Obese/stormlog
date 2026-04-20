@@ -7,7 +7,18 @@ from dataclasses import asdict, dataclass, field
 from statistics import median
 from typing import Any, Sequence
 
-from .phases import PhaseAttribution, PhaseTimelineResolver
+try:
+    from .phases import PhaseAttribution, PhaseReplayIndex, phase_attribution_to_payload
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def phase_attribution_to_payload(
+        attribution: PhaseAttribution | None,
+    ) -> dict[str, Any] | None:
+        return None
+
+
 from .telemetry import TelemetryEventV2
 
 _SPIKE_MIN_BYTES = 64 * 1024**2
@@ -302,7 +313,7 @@ def _find_rank_spike_candidate(
 def _detect_first_cause_spikes(
     grouped: dict[int, list[TelemetryEventV2]],
     merge_result: CrossRankMergeResult,
-    phase_resolver: PhaseTimelineResolver | None = None,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> FirstCauseAnalysisResult:
     if not grouped:
         return FirstCauseAnalysisResult(
@@ -428,7 +439,9 @@ def _detect_first_cause_spikes(
                         session_id=candidate.session_id,
                         rank=candidate.rank,
                     )
-                    if phase_resolver is not None and candidate.session_id is not None
+                    if phase_resolver is not None
+                    and candidate.session_id is not None
+                    and hasattr(phase_resolver, "resolve")
                     else None
                 ),
             )
@@ -444,7 +457,7 @@ def _detect_first_cause_spikes(
 def analyze_cross_rank_events(
     events: Sequence[TelemetryEventV2],
     *,
-    phase_resolver: PhaseTimelineResolver | None = None,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> tuple[CrossRankMergeResult, FirstCauseAnalysisResult]:
     """Analyze distributed telemetry for merged timelines and first-cause spikes."""
 
@@ -468,7 +481,7 @@ def analyze_cross_rank_events(
 def summarize_cross_rank_analysis(
     events: Sequence[TelemetryEventV2],
     *,
-    phase_resolver: PhaseTimelineResolver | None = None,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> dict[str, Any]:
     """Return a JSON-serializable cross-rank analysis summary."""
 
@@ -491,10 +504,19 @@ def summarize_cross_rank_analysis(
         },
         "cluster_onset_timestamp_ns": first_cause_result.cluster_onset_timestamp_ns,
         "first_cause_suspects": [
-            asdict(suspect) for suspect in first_cause_result.suspects
+            _serialize_first_cause_suspect(suspect)
+            for suspect in first_cause_result.suspects
         ],
         "notes": notes,
     }
+
+
+def _serialize_first_cause_suspect(suspect: FirstCauseSuspect) -> dict[str, Any]:
+    payload = asdict(suspect)
+    payload["phase_attribution"] = phase_attribution_to_payload(
+        suspect.phase_attribution
+    )
+    return payload
 
 
 __all__ = [

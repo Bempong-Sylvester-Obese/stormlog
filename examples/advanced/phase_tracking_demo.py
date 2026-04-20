@@ -1,67 +1,57 @@
-"""Phase-aware tracking demo using nested tracker scopes."""
+"""Structured phase tracking demo using CPUMemoryTracker."""
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 
-from examples.common import print_header, print_kv, print_section
 from stormlog import CPUMemoryTracker
+from stormlog.phases import parse_phase_boundary
 
 
-def _load_batch() -> list[list[int]]:
-    batch = [list(range(20_000)) for _ in range(8)]
-    time.sleep(0.05)
-    return batch
-
-
-def _forward_pass(batch: list[list[int]]) -> list[int]:
-    outputs = [sum(chunk) for chunk in batch]
-    time.sleep(0.05)
-    return outputs
-
-
-def _backward_pass(outputs: list[int]) -> list[float]:
-    gradients = [value / 1_000.0 for value in outputs]
-    time.sleep(0.05)
-    return gradients
+def _do_work(units: int) -> int:
+    total = 0
+    for value in range(units):
+        total += value * value
+    return total
 
 
 def main() -> None:
-    print_header("Stormlog - Phase Tracking Demo")
-    print_section("Tracking")
-
-    tracker = CPUMemoryTracker(sampling_interval=0.1, max_events=2_000)
+    tracker = CPUMemoryTracker(sampling_interval=0.05)
     tracker.start_tracking()
 
-    try:
-        with tracker.phase("train", metadata={"epochs": 2}):
-            for epoch in range(2):
-                with tracker.phase("epoch", metadata={"epoch": epoch}):
-                    with tracker.phase("load_batch"):
-                        batch = _load_batch()
-                    with tracker.phase("forward"):
-                        outputs = _forward_pass(batch)
-                    with tracker.phase("backward"):
-                        _ = _backward_pass(outputs)
-        time.sleep(0.2)
-    finally:
-        tracker.stop_tracking()
+    with tracker.phase("train", metadata={"epoch": 1}):
+        with tracker.phase("forward", metadata={"microbatch": 4}):
+            _do_work(100_000)
+        with tracker.phase("backward", metadata={"microbatch": 4}):
+            _do_work(75_000)
+
+    with tracker.phase("evaluate", metadata={"split": "validation"}):
+        time.sleep(0.05)
+        _do_work(50_000)
+
+    tracker.stop_tracking()
 
     output_dir = Path("artifacts/phase_tracking_demo")
     output_dir.mkdir(parents=True, exist_ok=True)
-    json_path = output_dir / "phase_track.json"
-    tracker.export_events(str(json_path), format="json")
+    output_path = output_dir / "phase_events.json"
+    tracker.export_events(str(output_path), format="json")
+    records = json.loads(output_path.read_text(encoding="utf-8"))
 
-    stats = tracker.get_statistics()
-    print_section("Summary")
-    print_kv("Total events", stats.get("total_events", 0))
-    print_kv("Dropped events", stats.get("history_dropped_events", 0))
-    print_kv("JSON export", json_path)
-    print(
-        "Next step: run `gpumemprof analyze artifacts/phase_tracking_demo/phase_track.json` "
-        "to inspect phase-aware summaries."
-    )
+    phase_records = [
+        record
+        for record in records
+        if str(record.get("event_type", "")).startswith("phase_")
+    ]
+    print(f"Wrote {len(records)} telemetry records to {output_path}")
+    print(f"Structured phase boundaries: {len(phase_records)}")
+    for record in phase_records:
+        scope = parse_phase_boundary(record)
+        if scope is None:
+            continue
+        path = " / ".join(scope.path)
+        print(f"- {record['event_type']}: {path} attrs={scope.attributes}")
 
 
 if __name__ == "__main__":

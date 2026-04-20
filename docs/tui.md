@@ -82,7 +82,7 @@ The export buttons only work after timeline samples exist. If you have not start
 - rebuilds rank-level diagnostics
 - supports rank filters such as `all`, `0,2,4-7`
 - highlights anomaly indicators and focused rank timelines
-- surfaces the first anomaly phase path when the capture includes structured phase records
+- surfaces phase paths for first anomalies and earliest indicators when phase telemetry is present
 
 ![Diagnostics tab](tui-diagnostics-current.png)
 
@@ -91,11 +91,16 @@ first, then `Refresh` after changing the path set. When multiple sessions are
 found, the Diagnostics tab defaults to the newest `completed` session and lets
 you switch to another one by entering its session id.
 
-If the loaded capture includes `phase_enter` / `phase_exit` telemetry, the
-Diagnostics table shows the first anomaly phase path per rank and the indicator
-details include the resolved phase label. If multiple threads have overlapping
-active phases at the same timestamp, the UI preserves that ambiguity instead of
-guessing one synthetic path.
+If the loaded telemetry contains `phase_enter` / `phase_exit` records, rank rows
+and earliest-indicator details show the resolved phase path directly in the
+Diagnostics model.
+
+When the product is choosing a useful winner from an otherwise ambiguous phase
+set, the TUI surfaces that with a `(likely)` marker instead of flattening it
+into an exact attribution.
+
+That marker is presentation-only. The underlying diagnostics model still keeps
+the canonical phase attribution separate from any heuristic winner.
 
 ### CLI & Actions
 

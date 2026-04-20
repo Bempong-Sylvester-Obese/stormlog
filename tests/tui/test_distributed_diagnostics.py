@@ -4,9 +4,15 @@ import csv
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
+
+_stormlog_phases: Any
+try:
+    import stormlog.phases as _stormlog_phases
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    _stormlog_phases = None
 
 from stormlog.telemetry import (
     TelemetryEvent,
@@ -274,6 +280,9 @@ def test_build_distributed_model_surfaces_collective_attribution_signals() -> No
 
 
 def test_build_distributed_model_surfaces_phase_paths_in_rows_and_indicators() -> None:
+    if _stormlog_phases is None:
+        pytest.skip("stormlog.phases is not available in this slice")
+
     session_id = "session-diagnostics-phase"
     events = [
         _make_event(

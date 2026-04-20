@@ -40,7 +40,7 @@ from .oom_flight_recorder import (
     OOMFlightRecorderConfig,
     classify_oom_exception,
 )
-from .phases import PHASE_EXIT_EVENT, PhaseHandle, TrackerPhaseState
+from .phases import PhaseHandle, PhaseRecorder, PhaseToken
 from .session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -183,7 +183,7 @@ class MemoryTracker:
         self._collector_retry_backoff_initial_s = 1.0
         self._collector_retry_backoff_factor = 2.0
         self._collector_retry_backoff_cap_s = 30.0
-        self._phase_state = TrackerPhaseState()
+        self._phase_state = PhaseRecorder()
 
         # Memory thresholds for alerts
         self.thresholds: Dict[str, float] = {
@@ -511,7 +511,6 @@ class MemoryTracker:
         is_partial = self._transition_to_sampled_state(result, sample=sample)
 
         self.stats["last_memory_check"] = now
-        sample_event_emitted = False
 
         if current_allocated > self.stats["peak_memory"]:
             self.stats["peak_memory"] = current_allocated
@@ -521,7 +520,6 @@ class MemoryTracker:
                 f"New peak memory: {format_bytes(current_allocated)}",
                 sample=sample,
             )
-            sample_event_emitted = True
 
         if memory_change > 0:
             self.stats["total_allocations"] += 1
@@ -532,7 +530,6 @@ class MemoryTracker:
                 f"Memory allocated: {format_bytes(memory_change)}",
                 sample=sample,
             )
-            sample_event_emitted = True
         elif memory_change < 0:
             self.stats["total_deallocations"] += 1
             self.stats["total_deallocation_bytes"] += abs(memory_change)
@@ -542,25 +539,27 @@ class MemoryTracker:
                 f"Memory freed: {format_bytes(abs(memory_change))}",
                 sample=sample,
             )
-            sample_event_emitted = True
 
         if self.enable_alerts:
-            alert_event_emitted = self._check_alerts(
+            self._check_alerts(
                 current_allocated,
                 current_reserved,
                 memory_change,
                 sample=sample,
             )
-            sample_event_emitted = sample_event_emitted or alert_event_emitted
 
-        if is_partial and not sample_event_emitted:
-            partial_fields = ", ".join(result.partial_fields)
-            self._add_event(
-                "sample",
-                0,
-                f"Collected partial telemetry sample ({partial_fields}).",
-                sample=sample,
-            )
+        partial_fields = ", ".join(result.partial_fields)
+        sample_context = (
+            f"Collected partial telemetry sample ({partial_fields})."
+            if is_partial
+            else "Collected telemetry sample."
+        )
+        self._add_event(
+            "sample",
+            0,
+            sample_context,
+            sample=sample,
+        )
 
         return current_allocated
 
@@ -683,11 +682,11 @@ class MemoryTracker:
         if not self.is_tracking:
             raise RuntimeError("Tracking must be active before entering a phase.")
         session = self._open_session()
-        boundary = self._phase_state.enter_phase(
+        token, boundary = self._phase_state.enter(
             session_id=session.session_id,
             rank=self.distributed_identity["rank"],
             name=name,
-            metadata=metadata,
+            attrs=metadata,
         )
         self._add_event(
             boundary.event_type,
@@ -699,7 +698,7 @@ class MemoryTracker:
             scope_id=boundary.scope_id,
             name=name,
             path=boundary.path,
-            close_callback=lambda: self._emit_phase_exit(boundary.scope_id),
+            close_callback=lambda: self._emit_phase_exit(token),
         )
 
     @contextmanager
@@ -714,20 +713,10 @@ class MemoryTracker:
     def _close_phase_handle(self, handle: PhaseHandle) -> None:
         handle.close()
 
-    def _emit_phase_exit(self, scope_id: str) -> None:
-        session = self._session_summary
-        if session is None:
-            return
-        boundary = self._phase_state.exit_phase(
-            session_id=session.session_id,
-            rank=self.distributed_identity["rank"],
-            scope_id=scope_id,
-            thread_id=int(threading.current_thread().ident or 0),
-        )
-        if boundary is None:
-            return
+    def _emit_phase_exit(self, token: PhaseToken) -> None:
+        boundary = self._phase_state.exit(token)
         self._add_event(
-            PHASE_EXIT_EVENT,
+            boundary.event_type,
             0,
             boundary.context,
             metadata=boundary.metadata,

@@ -2,12 +2,16 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, List, Mapping, Sequence
+from typing import Any, Callable, List, Mapping, Sequence, cast
 
 import numpy as np
 from scipy import stats
 
-from .phases import PhaseAttribution, PhaseTimelineResolver
+try:
+    from .phases import PhaseAttribution, PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 from .telemetry import TelemetryEventV2
 
 _LOGGER = logging.getLogger(__name__)
@@ -32,7 +36,7 @@ def analyze_hidden_memory_gaps(
     thresholds: Mapping[str, float],
     format_memory: Callable[[int], str],
     remediation_by_classification: Mapping[str, List[str]],
-    phase_resolver: PhaseTimelineResolver | None = None,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> List[GapFinding]:
     """Classify allocator-vs-device hidden memory gaps over time."""
     gaps: List[float] = []
@@ -110,7 +114,7 @@ def _detect_gap_transient_spikes(
     gaps: List[float],
     z_threshold: float,
     remediation: List[str],
-    phase_resolver: PhaseTimelineResolver | None,
+    phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
     """Detect transient spikes in the gap series using z-score."""
     arr = np.asarray(gaps, dtype=float)
@@ -165,7 +169,7 @@ def _detect_gap_persistent_drift(
     drift_r_squared_threshold: float,
     format_memory: Callable[[int], str],
     remediation: List[str],
-    phase_resolver: PhaseTimelineResolver | None,
+    phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
     """Detect persistent upward drift in the gap via linear regression."""
     if len(gaps) < 5:
@@ -215,7 +219,7 @@ def _detect_gap_fragmentation_pattern(
     gaps: List[float],
     fragmentation_threshold: float,
     remediation: List[str],
-    phase_resolver: PhaseTimelineResolver | None,
+    phase_resolver: PhaseReplayIndex | None,
 ) -> List[GapFinding]:
     """Detect fragmentation-like behaviour: high reserved-allocated ratio."""
     frag_ratios: List[float] = []
@@ -262,9 +266,11 @@ def _detect_gap_fragmentation_pattern(
 
 
 def _resolve_phase_attribution(
-    phase_resolver: PhaseTimelineResolver | None,
+    phase_resolver: PhaseReplayIndex | None,
     event: TelemetryEventV2,
 ) -> PhaseAttribution | None:
     if phase_resolver is None:
         return None
-    return phase_resolver.resolve_for_event(event)
+    if not hasattr(phase_resolver, "resolve_for_event"):
+        return None
+    return cast("PhaseAttribution | None", phase_resolver.resolve_for_event(event))

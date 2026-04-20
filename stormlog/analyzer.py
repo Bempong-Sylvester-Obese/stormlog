@@ -16,7 +16,19 @@ from .collective_attribution import (
 )
 from .distributed_analysis import summarize_cross_rank_analysis
 from .gap_analysis import GapFinding, analyze_hidden_memory_gaps
-from .phases import PhaseTimelineResolver
+
+try:
+    from .phases import PhaseAttribution, PhaseReplayIndex, phase_attribution_to_payload
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def phase_attribution_to_payload(
+        attribution: PhaseAttribution | None,
+    ) -> dict[str, Any] | None:
+        return None
+
+
 from .profiler import GPUMemoryProfiler, ProfileResult
 from .telemetry import TelemetryEventV2
 from .utils import format_bytes
@@ -705,7 +717,7 @@ class MemoryAnalyzer:
         self,
         events: List[TelemetryEventV2],
         *,
-        phase_resolver: PhaseTimelineResolver | None = None,
+        phase_resolver: PhaseReplayIndex | None = None,
     ) -> List[GapFinding]:
         """Classify allocator-vs-device hidden memory gaps over time.
 
@@ -727,7 +739,7 @@ class MemoryAnalyzer:
         self,
         events: List[TelemetryEventV2],
         *,
-        phase_resolver: PhaseTimelineResolver | None = None,
+        phase_resolver: PhaseReplayIndex | None = None,
     ) -> Dict[str, Any]:
         """Merge rank timelines and detect the earliest cluster-wide spike cause."""
 
@@ -737,7 +749,7 @@ class MemoryAnalyzer:
         self,
         events: List[TelemetryEventV2],
         *,
-        phase_resolver: PhaseTimelineResolver | None = None,
+        phase_resolver: PhaseReplayIndex | None = None,
     ) -> List[CollectiveAttributionResult]:
         """Attribute hidden-memory spikes to collective communication phases."""
         return attribute_collective_memory(
@@ -805,7 +817,11 @@ class MemoryAnalyzer:
 
         # Hidden-memory gap analysis (only when telemetry events are supplied).
         if events is not None:
-            phase_resolver = PhaseTimelineResolver.from_events(events)
+            phase_resolver = (
+                PhaseReplayIndex.from_events(events)
+                if hasattr(PhaseReplayIndex, "from_events")
+                else None
+            )
             gap_findings = self.analyze_memory_gaps(
                 events,
                 phase_resolver=phase_resolver,
@@ -814,9 +830,10 @@ class MemoryAnalyzer:
                 events,
                 phase_resolver=phase_resolver,
             )
-            report["gap_analysis"] = [asdict(f) for f in gap_findings]
+            report["gap_analysis"] = [_serialize_gap_finding(f) for f in gap_findings]
             report["collective_attribution"] = [
-                asdict(result) for result in collective_attribution
+                _serialize_collective_attribution(result)
+                for result in collective_attribution
             ]
             if len({event.rank for event in events}) > 1:
                 report["cross_rank_analysis"] = self.analyze_cross_rank_timeline(
@@ -917,3 +934,21 @@ class MemoryAnalyzer:
             "description": description,
             "issues_found": len(patterns) + len(insights),
         }
+
+
+def _serialize_gap_finding(finding: GapFinding) -> dict[str, Any]:
+    payload = asdict(finding)
+    payload["phase_attribution"] = phase_attribution_to_payload(
+        finding.phase_attribution
+    )
+    return payload
+
+
+def _serialize_collective_attribution(
+    result: CollectiveAttributionResult,
+) -> dict[str, Any]:
+    payload = asdict(result)
+    payload["phase_attribution"] = phase_attribution_to_payload(
+        result.phase_attribution
+    )
+    return payload

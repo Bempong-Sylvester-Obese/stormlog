@@ -2,15 +2,19 @@
 
 from __future__ import annotations
 
-from stormlog.phases import (
-    PHASE_ENTER_EVENT,
-    PHASE_EXIT_EVENT,
-    PHASE_SCOPE_METADATA_KEY,
-    PhaseAttribution,
-    PhaseTimelineResolver,
-    merge_phase_attributions,
-    summarize_phase_attribution,
-)
+import pytest
+
+phases = pytest.importorskip("stormlog.phases")
+PHASE_ENTER_EVENT = phases.PHASE_ENTER_EVENT
+PHASE_EXIT_EVENT = phases.PHASE_EXIT_EVENT
+PHASE_SCOPE_METADATA_KEY = phases.PHASE_SCOPE_METADATA_KEY
+PhaseAttribution = phases.PhaseAttribution
+PhaseSummary = phases.PhaseSummary
+PhaseReplayIndex = phases.PhaseReplayIndex
+merge_phase_attributions = phases.merge_phase_attributions
+phase_attribution_to_payload = phases.phase_attribution_to_payload
+summarize_phase_attribution = phases.summarize_phase_attribution
+
 from stormlog.telemetry import SCHEMA_VERSION_V3, telemetry_event_from_record
 
 
@@ -105,12 +109,14 @@ def test_phase_timeline_resolver_prefers_deepest_nested_path() -> None:
         _make_event(timestamp_ns=140),
     ]
 
-    resolver = PhaseTimelineResolver.from_events(events)
+    resolver = PhaseReplayIndex.from_events(events)
     attribution = resolver.resolve_for_event(events[-1])
 
     assert attribution is not None
     assert attribution.phase_resolution == "unique"
+    assert attribution.phase_source == "heuristic"
     assert attribution.phase_path == "train / step"
+    assert attribution.phase_summary is None
 
 
 def test_phase_timeline_resolver_treats_same_timestamp_exit_as_active() -> None:
@@ -142,11 +148,12 @@ def test_phase_timeline_resolver_treats_same_timestamp_exit_as_active() -> None:
         _make_event(timestamp_ns=100),
     ]
 
-    resolver = PhaseTimelineResolver.from_events(events)
+    resolver = PhaseReplayIndex.from_events(events)
     attribution = resolver.resolve_for_event(events[-1])
 
     assert attribution is not None
     assert attribution.phase_resolution == "unique"
+    assert attribution.phase_source == "heuristic"
     assert attribution.phase_path == "train"
 
 
@@ -167,11 +174,12 @@ def test_phase_timeline_resolver_synthesizes_open_scope_until_session_end() -> N
         _make_event(timestamp_ns=200),
     ]
 
-    resolver = PhaseTimelineResolver.from_events(events)
+    resolver = PhaseReplayIndex.from_events(events)
     attribution = resolver.resolve_for_event(events[-1])
 
     assert attribution is not None
     assert attribution.phase_resolution == "unique"
+    assert attribution.phase_source == "heuristic"
     assert attribution.phase_path == "evaluate"
 
 
@@ -204,12 +212,82 @@ def test_phase_timeline_resolver_marks_multi_thread_overlap_ambiguous() -> None:
         _make_event(timestamp_ns=120),
     ]
 
-    resolver = PhaseTimelineResolver.from_events(events)
+    resolver = PhaseReplayIndex.from_events(events)
     attribution = resolver.resolve_for_event(events[-1])
 
     assert attribution is not None
     assert attribution.phase_resolution == "ambiguous"
     assert attribution.phase_paths == ["evaluate", "train"]
+    assert attribution.phase_summary is not None
+    assert attribution.phase_summary.phase_path == "evaluate"
+    assert attribution.phase_summary.source == "heuristic"
+
+
+def test_phase_timeline_resolver_prefers_origin_thread_id_when_available() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(
+            timestamp_ns=110,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="evaluate",
+                path=["evaluate"],
+                scope_id="session-1:2",
+                sequence=2,
+                thread_id=12,
+            ),
+        ),
+        _make_event(timestamp_ns=120, metadata={"origin_thread_id": 11}),
+    ]
+
+    resolver = PhaseReplayIndex.from_events(events)
+    attribution = resolver.resolve_for_event(events[-1])
+
+    assert attribution is not None
+    assert attribution.phase_resolution == "unique"
+    assert attribution.phase_source == "thread_local"
+    assert attribution.phase_path == "train"
+    assert attribution.phase_summary is None
+
+
+def test_phase_timeline_resolver_prefers_origin_scope_id_when_available() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(
+            timestamp_ns=120, metadata={"origin_phase_scope_id": "session-1:1"}
+        ),
+    ]
+
+    resolver = PhaseReplayIndex.from_events(events)
+    attribution = resolver.resolve_for_event(events[-1])
+
+    assert attribution is not None
+    assert attribution.phase_resolution == "unique"
+    assert attribution.phase_source == "exact"
+    assert attribution.phase_path == "train"
 
 
 def test_merge_phase_attributions_keeps_same_label_multi_thread_overlap_ambiguous() -> (
@@ -249,3 +327,36 @@ def test_summarize_phase_attribution_marks_ambiguous_single_label() -> None:
     )
 
     assert summary == "(ambiguous) train / step"
+
+
+def test_summarize_phase_attribution_prefers_heuristic_summary_when_present() -> None:
+    summary = summarize_phase_attribution(
+        PhaseAttribution(
+            phase_resolution="ambiguous",
+            phase_paths=["evaluate", "train"],
+            phase_summary=PhaseSummary(
+                phase_path="evaluate",
+                source="heuristic",
+            ),
+        )
+    )
+
+    assert summary == "(likely) evaluate"
+
+
+def test_phase_attribution_to_payload_omits_phase_summary_when_not_needed() -> None:
+    payload = phase_attribution_to_payload(
+        PhaseAttribution(
+            phase_resolution="unique",
+            phase_source="thread_local",
+            phase_path="train",
+            phase_paths=["train"],
+            scope_id="scope-1",
+            thread_id=11,
+            thread_name="thread-11",
+        )
+    )
+
+    assert payload is not None
+    assert payload["phase_source"] == "thread_local"
+    assert "phase_summary" not in payload

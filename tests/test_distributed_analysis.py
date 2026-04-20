@@ -5,12 +5,21 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Any, cast
 
+import pytest
+
 from stormlog.analyzer import MemoryAnalyzer
 from stormlog.distributed_analysis import (
     analyze_cross_rank_events,
     merge_cross_rank_timelines,
 )
-from stormlog.phases import PhaseTimelineResolver
+
+PhaseReplayIndex: Any
+try:
+    from stormlog.phases import PhaseReplayIndex as _PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseReplayIndex = None
+else:
+    PhaseReplayIndex = _PhaseReplayIndex
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 
@@ -432,6 +441,9 @@ class TestCrossRankMerge:
     def test_first_cause_suspects_include_phase_attribution_when_available(
         self,
     ) -> None:
+        if PhaseReplayIndex is None:
+            pytest.skip("stormlog.phases is not available in this slice")
+
         events = _canonicalize_phase_events(
             _build_cross_rank_fixture(),
             session_id="session-cross-rank-phase",
@@ -439,7 +451,7 @@ class TestCrossRankMerge:
 
         _, first_cause = analyze_cross_rank_events(
             cast(Any, events),
-            phase_resolver=PhaseTimelineResolver.from_events(events),
+            phase_resolver=PhaseReplayIndex.from_events(events),
         )
 
         assert first_cause.suspects

@@ -16,6 +16,12 @@ from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_d
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 
+_stormlog_phases: Any
+try:
+    import stormlog.phases as _stormlog_phases
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    _stormlog_phases = None
+
 matplotlib.use("Agg")
 
 _GB = 1024**3
@@ -235,6 +241,63 @@ def _build_single_rank_gap_events_with_ambiguous_phase() -> list:
     return [*phase_events, *sample_events]
 
 
+def _build_single_rank_gap_events_with_ambiguous_phase_labels() -> list:
+    session_id = "session-cli-gap-ambiguous-labels"
+    phase_events = []
+    for sequence, scope_id, name, path in (
+        (1, "phase-gap-forward", "forward", ["train", "forward"]),
+        (2, "phase-gap-communication", "communication", ["train", "communication"]),
+    ):
+        phase_events.append(
+            telemetry_event_from_record(
+                {
+                    "schema_version": 3,
+                    "session_id": session_id,
+                    "timestamp_ns": BASE_NS - 1_000_000 + sequence,
+                    "event_type": "phase_enter",
+                    "collector": "stormlog.cuda_tracker",
+                    "sampling_interval_ms": 100,
+                    "pid": 1,
+                    "host": "host-0",
+                    "job_id": "cli-gap-job",
+                    "rank": 0,
+                    "local_rank": 0,
+                    "world_size": 1,
+                    "device_id": 0,
+                    "allocator_allocated_bytes": 2_000_000_000,
+                    "allocator_reserved_bytes": 2_500_000_000,
+                    "allocator_active_bytes": None,
+                    "allocator_inactive_bytes": None,
+                    "allocator_change_bytes": 0,
+                    "device_used_bytes": 2_500_000_000,
+                    "device_free_bytes": 13 * _GB,
+                    "device_total_bytes": 16 * _GB,
+                    "context": f"Phase entered: {' / '.join(path)}",
+                    "metadata": {
+                        "phase_scope": {
+                            "action": "enter",
+                            "name": name,
+                            "path": path,
+                            "depth": len(path),
+                            "scope_id": scope_id,
+                            "parent_scope_id": "phase-train",
+                            "thread_id": sequence,
+                            "thread_name": f"thread-{sequence}",
+                            "sequence": sequence,
+                        }
+                    },
+                }
+            )
+        )
+    sample_events = []
+    for event in _build_single_rank_gap_events_with_phase()[1:]:
+        record = telemetry_event_to_dict(event)
+        record["schema_version"] = 3
+        record["session_id"] = session_id
+        sample_events.append(telemetry_event_from_record(record))
+    return [*phase_events, *sample_events]
+
+
 def test_cmd_analyze_reports_cross_rank_findings_and_writes_artifacts(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -272,6 +335,9 @@ def test_cmd_analyze_reports_cross_rank_findings_and_writes_artifacts(
 def test_cmd_analyze_surfaces_phase_summaries_when_present(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    if _stormlog_phases is None:
+        pytest.skip("stormlog.phases is not available in this slice")
+
     input_path = tmp_path / "telemetry.json"
     input_path.write_text(
         json.dumps(
@@ -290,6 +356,7 @@ def test_cmd_analyze_surfaces_phase_summaries_when_present(
             format="json",
             visualization=False,
             plot_dir=str(tmp_path / "plots"),
+            session_id=None,
         )
     )
 
@@ -298,38 +365,12 @@ def test_cmd_analyze_surfaces_phase_summaries_when_present(
     assert "Suspect phase: train / forward" in stdout
 
 
-def test_cmd_analyze_surfaces_gap_phase_summary_when_present(
+def test_cmd_analyze_surfaces_ambiguous_gap_phase_summary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    input_path = tmp_path / "telemetry-gap.json"
-    input_path.write_text(
-        json.dumps(
-            [
-                telemetry_event_to_dict(event)
-                for event in _build_single_rank_gap_events_with_phase()
-            ]
-        ),
-        encoding="utf-8",
-    )
+    if _stormlog_phases is None:
+        pytest.skip("stormlog.phases is not available in this slice")
 
-    exit_code = cmd_analyze(
-        argparse.Namespace(
-            input_file=str(input_path),
-            output=None,
-            format="json",
-            visualization=False,
-            plot_dir=str(tmp_path / "plots"),
-        )
-    )
-
-    assert exit_code == 0
-    stdout = capsys.readouterr().out
-    assert "Top gap phase: train / forward" in stdout
-
-
-def test_cmd_analyze_marks_ambiguous_gap_phase_summary(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
     input_path = tmp_path / "telemetry-gap-ambiguous.json"
     input_path.write_text(
         json.dumps(
@@ -348,12 +389,46 @@ def test_cmd_analyze_marks_ambiguous_gap_phase_summary(
             format="json",
             visualization=False,
             plot_dir=str(tmp_path / "plots"),
+            session_id=None,
         )
     )
 
     assert exit_code == 0
     stdout = capsys.readouterr().out
     assert "Top gap phase: (ambiguous) train / forward" in stdout
+
+
+def test_cmd_analyze_surfaces_likely_gap_phase_summary_for_multi_label_ambiguity(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    if _stormlog_phases is None:
+        pytest.skip("stormlog.phases is not available in this slice")
+
+    input_path = tmp_path / "telemetry-gap-likely.json"
+    input_path.write_text(
+        json.dumps(
+            [
+                telemetry_event_to_dict(event)
+                for event in _build_single_rank_gap_events_with_ambiguous_phase_labels()
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code = cmd_analyze(
+        argparse.Namespace(
+            input_file=str(input_path),
+            output=None,
+            format="json",
+            visualization=False,
+            plot_dir=str(tmp_path / "plots"),
+            session_id=None,
+        )
+    )
+
+    assert exit_code == 0
+    stdout = capsys.readouterr().out
+    assert "Top gap phase: (likely) train / communication" in stdout
 
 
 def test_cmd_analyze_non_telemetry_falls_back_gracefully(

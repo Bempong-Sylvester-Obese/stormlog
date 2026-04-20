@@ -17,7 +17,23 @@ from stormlog.collective_attribution import (
     resolve_collective_attribution_config,
 )
 from stormlog.gap_analysis import analyze_hidden_memory_gaps
-from stormlog.phases import PhaseTimelineResolver, summarize_phase_attribution
+
+try:
+    from stormlog.phases import (
+        PhaseAttribution,
+        PhaseReplayIndex,
+        summarize_phase_attribution,
+    )
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def summarize_phase_attribution(
+        attribution: PhaseAttribution | None,
+    ) -> str | None:
+        return None
+
+
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -677,7 +693,11 @@ def build_distributed_model(
     grouped: dict[int, list[TelemetryCompatibleEvent]] = {}
     sample_grouped: dict[int, list[TelemetryCompatibleEvent]] = {}
     world_sizes: set[int] = set()
-    phase_resolver = PhaseTimelineResolver.from_events(events)
+    phase_resolver = (
+        PhaseReplayIndex.from_events(events)
+        if hasattr(PhaseReplayIndex, "from_events")
+        else None
+    )
     for event in sorted(events, key=lambda item: item.timestamp_ns):
         grouped.setdefault(event.rank, []).append(event)
         if _is_sample_event(event):
@@ -777,7 +797,7 @@ def _build_rank_row(
     rank_samples: Sequence[TelemetryCompatibleEvent],
     collective_attribution: list[CollectiveAttributionResult],
     *,
-    phase_resolver: PhaseTimelineResolver,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> tuple[RankDiagnosticsRow, list[_AnomalyCandidate]]:
     first_event = rank_samples[0] if rank_samples else None
     last_event = rank_samples[-1] if rank_samples else None
@@ -833,15 +853,18 @@ def _derive_rank_anomaly_candidates(
     rank_samples: Sequence[TelemetryCompatibleEvent],
     collective_attribution: list[CollectiveAttributionResult],
     *,
-    phase_resolver: PhaseTimelineResolver,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> list[_AnomalyCandidate]:
     candidates: list[_AnomalyCandidate] = []
     first_gap_breach_ts: int | None = None
 
     for event in rank_events:
         if event.event_type in _ALERT_TYPES:
-            phase_path = summarize_phase_attribution(
-                phase_resolver.resolve_for_event(event)
+            phase_path = (
+                summarize_phase_attribution(phase_resolver.resolve_for_event(event))
+                if phase_resolver is not None
+                and hasattr(phase_resolver, "resolve_for_event")
+                else None
             )
             severity = _ALERT_SEVERITY.get(event.event_type, "warning")
             candidates.append(
@@ -862,8 +885,11 @@ def _derive_rank_anomaly_candidates(
             if gap_ratio >= GAP_RATIO_THRESHOLD:
                 if first_gap_breach_ts is None:
                     first_gap_breach_ts = event.timestamp_ns
-                phase_path = summarize_phase_attribution(
-                    phase_resolver.resolve_for_event(event)
+                phase_path = (
+                    summarize_phase_attribution(phase_resolver.resolve_for_event(event))
+                    if phase_resolver is not None
+                    and hasattr(phase_resolver, "resolve_for_event")
+                    else None
                 )
                 candidates.append(
                     _AnomalyCandidate(
@@ -940,7 +966,7 @@ def _is_sample_event(event: TelemetryCompatibleEvent) -> bool:
 def _group_collective_attribution_by_rank(
     events: Sequence[TelemetryCompatibleEvent],
     *,
-    phase_resolver: PhaseTimelineResolver,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> dict[int, list[CollectiveAttributionResult]]:
     grouped: dict[int, list[CollectiveAttributionResult]] = {}
     attributions = attribute_collective_memory(

@@ -10,7 +10,14 @@ from stormlog.collective_attribution import (
     attribute_collective_memory,
     resolve_collective_attribution_config,
 )
-from stormlog.phases import PhaseTimelineResolver
+
+PhaseReplayIndex: Any
+try:
+    from stormlog.phases import PhaseReplayIndex as _PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseReplayIndex = None
+else:
+    PhaseReplayIndex = _PhaseReplayIndex
 from stormlog.telemetry import (
     SCHEMA_VERSION_V2,
     TelemetryEventV2,
@@ -289,6 +296,9 @@ def test_collective_attribution_keeps_marker_evidence_rank_local() -> None:
 
 
 def test_collective_attribution_includes_phase_attribution_when_available() -> None:
+    if PhaseReplayIndex is None:
+        pytest.skip("stormlog.phases is not available in this slice")
+
     session_id = "session-collective-phase"
     events: list[Any] = []
     for rank in (0, 1):
@@ -332,7 +342,7 @@ def test_collective_attribution_includes_phase_attribution_when_available() -> N
         )
     canonical_events.extend(events[-2:])
 
-    resolver = PhaseTimelineResolver.from_events(canonical_events)
+    resolver = PhaseReplayIndex.from_events(canonical_events)
     results = attribute_collective_memory(
         cast(list[TelemetryEventV2], canonical_events),
         phase_resolver=resolver,

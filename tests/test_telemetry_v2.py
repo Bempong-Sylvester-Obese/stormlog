@@ -10,7 +10,7 @@ from pathlib import Path
 import jsonschema  # type: ignore[import-untyped, unused-ignore]
 import pytest
 
-from stormlog.phases import extract_phase_scope
+from stormlog.phases import parse_phase_boundary
 from stormlog.telemetry import (
     SCHEMA_VERSION_V2,
     SCHEMA_VERSION_V3,
@@ -257,7 +257,7 @@ def test_phase_boundary_record_round_trips_through_v3_schema() -> None:
 
     validate_telemetry_record(record)
     jsonschema.validate(instance=record, schema=_schema(SCHEMA_VERSION_V3))
-    scope = extract_phase_scope(record)
+    scope = parse_phase_boundary(record)
     assert scope is not None
     assert scope.path == ("train", "step")
     assert scope.attributes == {"epoch": 3}
@@ -381,8 +381,8 @@ def test_load_telemetry_sessions_preserves_phase_scope_metadata_across_formats(
             "phase_enter",
             "phase_exit",
         ]
-        enter_scope = extract_phase_scope(phase_events[0])
-        exit_scope = extract_phase_scope(phase_events[1])
+        enter_scope = parse_phase_boundary(phase_events[0])
+        exit_scope = parse_phase_boundary(phase_events[1])
         assert enter_scope is not None
         assert exit_scope is not None
         assert enter_scope.path == ("train", "step")
@@ -399,8 +399,8 @@ def test_load_telemetry_sessions_preserves_phase_scope_metadata_across_formats(
         "phase_enter",
         "phase_exit",
     ]
-    csv_enter_scope = extract_phase_scope(csv_phase_events[0])
-    csv_exit_scope = extract_phase_scope(csv_phase_events[1])
+    csv_enter_scope = parse_phase_boundary(csv_phase_events[0])
+    csv_exit_scope = parse_phase_boundary(csv_phase_events[1])
     assert csv_enter_scope is not None
     assert csv_exit_scope is not None
     assert csv_enter_scope.path == ("train", "step")

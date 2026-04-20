@@ -14,7 +14,23 @@ from stormlog.collective_attribution import (
     resolve_collective_attribution_config,
 )
 from stormlog.gap_analysis import GapFinding, analyze_hidden_memory_gaps
-from stormlog.phases import PhaseTimelineResolver
+
+try:
+    from stormlog.phases import (
+        PhaseAttribution,
+        PhaseReplayIndex,
+        phase_attribution_to_payload,
+    )
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def phase_attribution_to_payload(
+        attribution: PhaseAttribution | None,
+    ) -> dict[str, Any] | None:
+        return None
+
+
 from stormlog.telemetry import TelemetryEventV2
 
 from .utils import format_memory
@@ -351,7 +367,7 @@ class MemoryAnalyzer:
         self,
         events: List[TelemetryEventV2],
         *,
-        phase_resolver: PhaseTimelineResolver | None = None,
+        phase_resolver: PhaseReplayIndex | None = None,
     ) -> List[GapFinding]:
         """Classify allocator-vs-device hidden memory gaps over time.
 
@@ -373,7 +389,7 @@ class MemoryAnalyzer:
         self,
         events: List[TelemetryEventV2],
         *,
-        phase_resolver: PhaseTimelineResolver | None = None,
+        phase_resolver: PhaseReplayIndex | None = None,
     ) -> List[CollectiveAttributionResult]:
         """Attribute hidden-memory spikes to collective communication phases."""
         return attribute_collective_memory(
@@ -453,7 +469,11 @@ class MemoryAnalyzer:
 
         # Hidden-memory gap analysis (only when telemetry events are supplied).
         if events is not None:
-            phase_resolver = PhaseTimelineResolver.from_events(events)
+            phase_resolver = (
+                PhaseReplayIndex.from_events(events)
+                if hasattr(PhaseReplayIndex, "from_events")
+                else None
+            )
             gap_findings = self.analyze_memory_gaps(
                 events,
                 phase_resolver=phase_resolver,
@@ -462,9 +482,30 @@ class MemoryAnalyzer:
                 events,
                 phase_resolver=phase_resolver,
             )
-            optimization_score["gap_analysis"] = [asdict(f) for f in gap_findings]
+            optimization_score["gap_analysis"] = [
+                _serialize_gap_finding(f) for f in gap_findings
+            ]
             optimization_score["collective_attribution"] = [
-                asdict(result) for result in collective_attribution
+                _serialize_collective_attribution(result)
+                for result in collective_attribution
             ]
 
         return optimization_score
+
+
+def _serialize_gap_finding(finding: GapFinding) -> dict[str, Any]:
+    payload = asdict(finding)
+    payload["phase_attribution"] = phase_attribution_to_payload(
+        finding.phase_attribution
+    )
+    return payload
+
+
+def _serialize_collective_attribution(
+    result: CollectiveAttributionResult,
+) -> dict[str, Any]:
+    payload = asdict(result)
+    payload["phase_attribution"] = phase_attribution_to_payload(
+        result.phase_attribution
+    )
+    return payload

@@ -153,6 +153,23 @@ telemetry export, a sink JSONL segment, or a sink directory containing the
 current and rolled append-only outputs. If you add `--visualization`, plots are
 written to the directory passed via `--plot-dir` or to `plots/` by default.
 
+When the telemetry stream includes structured phase boundaries, the text summary
+also includes phase-aware hints such as:
+
+- `Top gap phase: train / forward`
+- `Suspect phase: train / communication`
+
+When Stormlog cannot prove a unique phase but can still surface a useful winner,
+the summary uses a heuristic marker instead of pretending certainty:
+
+- `Top gap phase: (likely) train / communication`
+
+In JSON report payloads, that distinction is preserved as:
+
+- canonical `phase_attribution.phase_resolution`
+- canonical `phase_attribution.phase_source`
+- optional `phase_attribution.phase_summary` only when the displayed winner is heuristic
+
 When multiple sessions are present, `gpumemprof analyze` selects:
 
 1. the newest `completed` session

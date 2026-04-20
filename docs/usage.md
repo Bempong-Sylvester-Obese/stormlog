@@ -189,38 +189,31 @@ print(f"Peak memory: {stats.get('peak_memory', 0) / (1024**3):.2f} GB")
 print(f"Events: {stats.get('total_events', 0)}")
 ```
 
-### Mark workload phases explicitly
+### Structured workload phases
 
-Use structured phases when you want later analysis to answer not only when
-memory changed, but what part of the workload was active at that time.
+All long-running trackers can emit explicit workload-phase boundaries while
+tracking is active:
 
 ```python
-from stormlog import MemoryTracker
+from stormlog import CPUMemoryTracker
 
-tracker = MemoryTracker(sampling_interval=0.5)
+tracker = CPUMemoryTracker(sampling_interval=0.1)
 tracker.start_tracking()
 
-with tracker.phase("train", metadata={"epoch": 3}):
-    with tracker.phase("load_batch"):
-        load_next_batch()
-    with tracker.phase("forward"):
-        loss = model(batch).sum()
-    with tracker.phase("backward"):
-        loss.backward()
+with tracker.phase("train", metadata={"epoch": 1}):
+    with tracker.phase("forward", metadata={"microbatch": 4}):
+        _ = [i * i for i in range(50_000)]
 
 tracker.stop_tracking()
-tracker.export_events("track.json", format="json")
 ```
 
-Notes:
+This writes `phase_enter` and `phase_exit` telemetry records with structured
+`metadata["phase_scope"]` payloads. The same API shape is available on
+`MemoryTracker`, `CPUMemoryTracker`, and `stormlog.tensorflow.MemoryTracker`.
 
-- `phase(name, metadata=None)` is a nested context manager
-- `enter_phase(name, metadata=None)` returns a `PhaseHandle` for manual enter/exit control
-- phases are optional; if you never instrument them, exported telemetry and analysis still work as before
-- nested paths are deterministic per thread, for example `train / forward`
-
-When phase records are present, `gpumemprof analyze` and the TUI Diagnostics tab
-surface phase-aware anomaly summaries instead of only raw timestamps.
+When those phase boundaries are present, `gpumemprof analyze` and the TUI
+Diagnostics tab can attach hidden-memory gaps, collective spikes, and
+cross-rank first-cause suspects back to the active phase path.
 
 If the underlying collector becomes unstable, `MemoryTracker` keeps the tracking
 session alive, exposes collector health through `get_statistics()`, and emits
@@ -278,10 +271,6 @@ print(stats["total_events"])
 print(stats["final_retained_files"])
 print(stats["history_dropped_events"])
 ```
-
-`CPUMemoryTracker` supports the same `phase()` and `enter_phase()` APIs, which
-makes it a convenient place to validate phase-aware instrumentation on machines
-without a GPU runtime.
 
 ## Reusing a sink directory across runs
 

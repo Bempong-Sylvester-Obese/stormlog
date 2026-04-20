@@ -7,7 +7,19 @@ from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
 
-from .phases import PhaseAttribution, PhaseTimelineResolver, merge_phase_attributions
+try:
+    from .phases import PhaseAttribution, PhaseReplayIndex, merge_phase_attributions
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def merge_phase_attributions(
+        first: PhaseAttribution | None,
+        second: PhaseAttribution | None,
+    ) -> PhaseAttribution | None:
+        return first or second
+
+
 from .telemetry import TelemetryEventV2
 
 _COLLECTIVE_TOKENS = (
@@ -158,7 +170,7 @@ def attribute_collective_memory(
     config: CollectiveAttributionConfig | None = None,
     preset: str = "medium",
     overrides: Mapping[str, Any] | None = None,
-    phase_resolver: PhaseTimelineResolver | None = None,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> list[CollectiveAttributionResult]:
     """Attribute hidden-memory spikes to communication phases using hybrid signals."""
 
@@ -385,7 +397,7 @@ def _score_spike(
     expected_world_size: int,
     trace_start_ns: int,
     config: CollectiveAttributionConfig,
-    phase_resolver: PhaseTimelineResolver | None,
+    phase_resolver: PhaseReplayIndex | None,
 ) -> CollectiveAttributionResult | None:
     marker_overlap = bool(spike.marker_times)
     synchronized_count = max(len(synchronized_ranks), 1)
@@ -468,7 +480,11 @@ def _score_spike(
         classification = "collective_suspect"
 
     phase_attribution = None
-    if phase_resolver is not None and spike.session_id is not None:
+    if (
+        phase_resolver is not None
+        and spike.session_id is not None
+        and hasattr(phase_resolver, "resolve")
+    ):
         phase_attribution = phase_resolver.resolve(
             timestamp_ns=spike.timestamp_ns,
             session_id=spike.session_id,

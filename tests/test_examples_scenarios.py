@@ -140,3 +140,40 @@ def test_tf_end_to_end_scenario_writes_outputs(tmp_path: Path) -> None:
     assert (output_dir / "tf_track.json").exists()
     assert (output_dir / "tf_diagnose" / "manifest.json").exists()
     assert (output_dir / "tf_e2e_summary.json").exists()
+
+
+def test_torchrun_ddp_reference_parses_rank_context() -> None:
+    from examples.scenarios.torchrun_ddp_reference import _rank_context_from_env
+
+    context = _rank_context_from_env(
+        {
+            "RANK": "1",
+            "LOCAL_RANK": "1",
+            "WORLD_SIZE": "2",
+        }
+    )
+
+    assert context.rank == 1
+    assert context.local_rank == 1
+    assert context.world_size == 2
+
+
+def test_torchrun_ddp_reference_builds_rank_local_artifact_paths(
+    tmp_path: Path,
+) -> None:
+    from examples.scenarios.torchrun_ddp_reference import (
+        ArtifactPaths,
+        RankContext,
+        _artifact_paths,
+    )
+
+    paths = _artifact_paths(
+        tmp_path / "ddp",
+        RankContext(rank=1, local_rank=1, world_size=2),
+    )
+
+    assert isinstance(paths, ArtifactPaths)
+    assert paths.rank_dir == tmp_path / "ddp" / "rank1"
+    assert paths.telemetry_sink_dir == tmp_path / "ddp" / "rank1" / "telemetry_sink"
+    assert paths.rank_summary_path == tmp_path / "ddp" / "rank1" / "rank_summary.json"
+    assert paths.root_summary_path == tmp_path / "ddp" / "ddp_reference_summary.json"
