@@ -6,6 +6,7 @@ import json
 import re
 import tempfile
 from dataclasses import dataclass
+from importlib import import_module
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -123,12 +124,11 @@ def ensure_wandb_available(config: WandbExportConfig) -> None:
 
 def import_wandb() -> Any:
     try:
-        import wandb
+        return import_module("wandb")
     except ModuleNotFoundError as exc:
         if exc.name == "wandb":
             raise ImportError(WANDB_INSTALL_GUIDANCE) from exc
         raise
-    return wandb
 
 
 def resolve_run(
