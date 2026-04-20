@@ -33,6 +33,8 @@ from .wandb_integration import (
     wandb_config_from_namespace,
 )
 
+summarize_phase_resolution = cast(Any, summarize_phase_resolution)
+
 try:
     import torch as _torch
 except (
@@ -934,7 +936,7 @@ def _phase_summary_from_payload(payload: Any) -> str | None:
                 return f"(likely) {summary_path}"
             return summary_path
     if summarize_phase_resolution is None:
-        return None
+        return None  # type: ignore[unreachable]
     phase_path = payload.get("phase_path")
     phase_paths = payload.get("phase_paths")
     normalized_phase_path = phase_path if isinstance(phase_path, str) else None

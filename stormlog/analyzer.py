@@ -18,12 +18,17 @@ from .distributed_analysis import summarize_cross_rank_analysis
 from .gap_analysis import GapFinding, analyze_hidden_memory_gaps
 
 try:
-    from .phases import PhaseReplayIndex, phase_attribution_to_payload
+    from .phases import PhaseAttribution, PhaseReplayIndex, phase_attribution_to_payload
 except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
     PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 
-    def phase_attribution_to_payload(_: Any) -> Any:
+    def phase_attribution_to_payload(
+        attribution: PhaseAttribution | None,
+    ) -> dict[str, Any] | None:
         return None
+
+
 from .profiler import GPUMemoryProfiler, ProfileResult
 from .telemetry import TelemetryEventV2
 from .utils import format_bytes
@@ -837,6 +842,7 @@ class MemoryAnalyzer:
                 )
 
         return report
+
     def _generate_priority_recommendations(
         self, patterns: List[MemoryPattern], insights: List[PerformanceInsight]
     ) -> List[Dict[str, Any]]:

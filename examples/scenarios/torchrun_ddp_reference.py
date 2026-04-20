@@ -141,9 +141,7 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _rank_context_from_env(env: dict[str, str]) -> RankContext:
-    missing = [
-        key for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE") if key not in env
-    ]
+    missing = [key for key in ("RANK", "LOCAL_RANK", "WORLD_SIZE") if key not in env]
     if missing:
         raise RuntimeError(
             "This example must be launched with torchrun. Missing env vars: "
@@ -182,7 +180,9 @@ def _setup_ddp(rank_context: RankContext) -> torch.device:
     return torch.device(f"cuda:{rank_context.local_rank}")
 
 
-def _build_dataloader(args: argparse.Namespace) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
+def _build_dataloader(
+    args: argparse.Namespace,
+) -> DataLoader[tuple[torch.Tensor, torch.Tensor]]:
     dataset = SyntheticClassificationDataset(
         size=args.dataset_size,
         input_dim=_INPUT_DIM,
@@ -323,7 +323,9 @@ def _train(
             )
 
             if rank_context.rank == 0 and (epoch_index + 1) % args.save_every == 0:
-                _save_checkpoint(artifact_paths.checkpoint_path, epoch_index + 1, ddp_model)
+                _save_checkpoint(
+                    artifact_paths.checkpoint_path, epoch_index + 1, ddp_model
+                )
 
     return {
         "rank": rank_context.rank,

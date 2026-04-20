@@ -289,7 +289,7 @@ def test_tf_cli_track_exports_results_to_wandb(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(tf_cli, "TF_AVAILABLE", True)
-    exported: dict[str, object] = {}
+    exported: dict[str, Any] = {}
     wandb_config = Namespace(enabled=True)
     session_summary = create_session_summary(
         source="stormlog.tensorflow.memory_tracker",

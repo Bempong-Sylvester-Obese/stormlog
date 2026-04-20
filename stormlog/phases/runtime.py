@@ -207,7 +207,9 @@ class PhaseRecorder:
             key = (session_id, rank, thread_id)
             stack = self._active_by_thread.get(key)
             if not stack:
-                if self._scope_exists(session_id=session_id, rank=rank, scope_id=scope_id):
+                if self._scope_exists(
+                    session_id=session_id, rank=rank, scope_id=scope_id
+                ):
                     raise PhaseProtocolError(
                         "Phase handle was closed from a different thread than it was opened."
                     )
@@ -221,7 +223,9 @@ class PhaseRecorder:
                     raise PhaseProtocolError(
                         "Phase handles must be closed in strict LIFO order per thread."
                     )
-                if self._scope_exists(session_id=session_id, rank=rank, scope_id=scope_id):
+                if self._scope_exists(
+                    session_id=session_id, rank=rank, scope_id=scope_id
+                ):
                     raise PhaseProtocolError(
                         "Phase handle was closed from a different thread than it was opened."
                     )
@@ -257,12 +261,17 @@ class PhaseRecorder:
         )
 
     def _scope_exists(self, *, session_id: str, rank: int, scope_id: str) -> bool:
-        for (active_session_id, active_rank, _), stack in self._active_by_thread.items():
+        for (
+            active_session_id,
+            active_rank,
+            _,
+        ), stack in self._active_by_thread.items():
             if active_session_id != session_id or active_rank != rank:
                 continue
             if any(item.scope_id == scope_id for item in stack):
                 return True
         return False
+
 
 def _normalize_phase_name(name: str) -> str:
     normalized = str(name).strip()

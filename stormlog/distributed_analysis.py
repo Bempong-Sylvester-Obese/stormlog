@@ -13,8 +13,12 @@ except ImportError:  # pragma: no cover - phase package may land in another slic
     PhaseAttribution = Any  # type: ignore[assignment,misc]
     PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 
-    def phase_attribution_to_payload(_: Any) -> Any:
+    def phase_attribution_to_payload(
+        attribution: PhaseAttribution | None,
+    ) -> dict[str, Any] | None:
         return None
+
+
 from .telemetry import TelemetryEventV2
 
 _SPIKE_MIN_BYTES = 64 * 1024**2

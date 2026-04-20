@@ -276,7 +276,9 @@ def test_phase_timeline_resolver_prefers_origin_scope_id_when_available() -> Non
                 thread_id=11,
             ),
         ),
-        _make_event(timestamp_ns=120, metadata={"origin_phase_scope_id": "session-1:1"}),
+        _make_event(
+            timestamp_ns=120, metadata={"origin_phase_scope_id": "session-1:1"}
+        ),
     ]
 
     resolver = PhaseReplayIndex.from_events(events)

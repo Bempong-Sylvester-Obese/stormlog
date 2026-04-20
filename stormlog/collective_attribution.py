@@ -8,11 +8,7 @@ from typing import Any, Iterable, Mapping, Sequence
 import numpy as np
 
 try:
-    from .phases import (
-        PhaseAttribution,
-        PhaseReplayIndex,
-        merge_phase_attributions,
-    )
+    from .phases import PhaseAttribution, PhaseReplayIndex, merge_phase_attributions
 except ImportError:  # pragma: no cover - phase package may land in another slice
     PhaseAttribution = Any  # type: ignore[assignment,misc]
     PhaseReplayIndex = Any  # type: ignore[assignment,misc]

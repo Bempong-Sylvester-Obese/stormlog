@@ -29,6 +29,21 @@ python3 -m pip install -e ".[docs]"
 
 ## Core local checks
 
+### Pre-commit hooks
+
+Install the hooks once per checkout so local edits run the same formatting and
+static checks that coding agents should use before pushing:
+
+```bash
+python3 -m pre_commit install
+```
+
+Run the full hook set manually before handing off a branch:
+
+```bash
+python3 -m pre_commit run --all-files
+```
+
 ### Full pytest run
 
 ```bash

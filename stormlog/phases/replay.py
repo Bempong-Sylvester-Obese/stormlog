@@ -148,7 +148,10 @@ class PhaseReplayIndex:
     ) -> list[PhaseSpan]:
         """Return all reconstructed spans for one session/rank selection."""
         spans: list[PhaseSpan] = []
-        for (group_session_id, group_rank), intervals in self._intervals_by_group.items():
+        for (
+            group_session_id,
+            group_rank,
+        ), intervals in self._intervals_by_group.items():
             if group_session_id != session_id:
                 continue
             if rank is not None and group_rank != rank:
@@ -165,7 +168,10 @@ class PhaseReplayIndex:
     ) -> list[PhaseSpan]:
         """Return active spans at a timestamp before attribution policy is applied."""
         matches: list[PhaseSpan] = []
-        for (group_session_id, group_rank), intervals in self._intervals_by_group.items():
+        for (
+            group_session_id,
+            group_rank,
+        ), intervals in self._intervals_by_group.items():
             if group_session_id != session_id:
                 continue
             if rank is not None and group_rank != rank:
@@ -266,6 +272,7 @@ def parse_phase_boundary(event: Any) -> PhaseBoundaryRecord | None:
         timestamp_ns=timestamp_ns,
         attributes=attributes,
     )
+
 
 def is_phase_boundary_event(event: Any) -> bool:
     """Return ``True`` when the event is a structured phase boundary."""

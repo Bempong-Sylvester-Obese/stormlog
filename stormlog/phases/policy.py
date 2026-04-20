@@ -6,7 +6,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Sequence
 
 if TYPE_CHECKING:
-    from .replay import PhaseReplayIndex, PhaseSpan
+    from .replay import PhaseReplayIndex as ReplayPhaseReplayIndex
+    from .replay import PhaseSpan
 
 
 @dataclass(frozen=True)
@@ -78,7 +79,9 @@ def attribute_active_spans(
         if len(labels) != 1:
             ambiguous_labels.update(labels)
             continue
-        thread_matches.append(max(deepest, key=lambda item: (item.sequence, item.scope_id)))
+        thread_matches.append(
+            max(deepest, key=lambda item: (item.sequence, item.scope_id))
+        )
 
     if not thread_matches and not ambiguous_labels:
         return None
@@ -100,8 +103,10 @@ def attribute_active_spans(
     return _build_unique_attribution(thread_matches[0], source="heuristic")
 
 
-def resolve_phase_for_event(index: "PhaseReplayIndex", event: Any) -> PhaseAttribution | None:
-    """Resolve a phase attribution for one event-like object using a replay index."""
+def resolve_phase_for_event(
+    index: "ReplayPhaseReplayIndex", event: Any
+) -> PhaseAttribution | None:
+    """Resolve a phase attribution for one event-like object using replay data."""
     timestamp_ns = _event_field(event, "timestamp_ns")
     session_id = _event_field(event, "session_id")
     if not isinstance(timestamp_ns, int) or not isinstance(session_id, str):

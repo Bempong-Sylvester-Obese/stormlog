@@ -8,10 +8,13 @@ import pytest
 
 from stormlog.analyzer import MemoryAnalyzer
 
+PhaseReplayIndex: Any
 try:
-    from stormlog.phases import PhaseReplayIndex
+    from stormlog.phases import PhaseReplayIndex as _PhaseReplayIndex
 except ImportError:  # pragma: no cover - phase package may land in another slice
-    PhaseReplayIndex = None  # type: ignore[assignment]
+    PhaseReplayIndex = None
+else:
+    PhaseReplayIndex = _PhaseReplayIndex
 from stormlog.telemetry import (
     SCHEMA_VERSION_V2,
     TelemetryEventV2,

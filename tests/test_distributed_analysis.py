@@ -13,10 +13,13 @@ from stormlog.distributed_analysis import (
     merge_cross_rank_timelines,
 )
 
+PhaseReplayIndex: Any
 try:
-    from stormlog.phases import PhaseReplayIndex
+    from stormlog.phases import PhaseReplayIndex as _PhaseReplayIndex
 except ImportError:  # pragma: no cover - phase package may land in another slice
-    PhaseReplayIndex = None  # type: ignore[assignment]
+    PhaseReplayIndex = None
+else:
+    PhaseReplayIndex = _PhaseReplayIndex
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 

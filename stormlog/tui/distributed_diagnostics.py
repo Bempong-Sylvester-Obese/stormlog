@@ -19,11 +19,18 @@ from stormlog.collective_attribution import (
 from stormlog.gap_analysis import analyze_hidden_memory_gaps
 
 try:
-    from stormlog.phases import PhaseReplayIndex, summarize_phase_attribution
+    from stormlog.phases import (
+        PhaseAttribution,
+        PhaseReplayIndex,
+        summarize_phase_attribution,
+    )
 except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
     PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 
-    def summarize_phase_attribution(_: Any) -> str | None:
+    def summarize_phase_attribution(
+        attribution: PhaseAttribution | None,
+    ) -> str | None:
         return None
 
 

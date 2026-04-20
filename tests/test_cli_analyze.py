@@ -16,6 +16,7 @@ from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_d
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 from tests.gap_test_helpers import BASE_NS, INTERVAL_NS, build_gap_event
 
+_stormlog_phases: Any
 try:
     import stormlog.phases as _stormlog_phases
 except ImportError:  # pragma: no cover - phase package may land in another slice

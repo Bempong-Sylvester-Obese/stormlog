@@ -2,7 +2,7 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, List, Mapping, Sequence
+from typing import Any, Callable, List, Mapping, Sequence, cast
 
 import numpy as np
 from scipy import stats
@@ -273,4 +273,4 @@ def _resolve_phase_attribution(
         return None
     if not hasattr(phase_resolver, "resolve_for_event"):
         return None
-    return phase_resolver.resolve_for_event(event)
+    return cast("PhaseAttribution | None", phase_resolver.resolve_for_event(event))

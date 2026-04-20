@@ -5,7 +5,7 @@ from contextlib import contextmanager
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterator
+from typing import Any, Iterator, cast
 
 import pytest
 
@@ -217,7 +217,7 @@ def test_diagnose_exit_code_zero_when_no_risk(
 def test_diagnose_exports_bundle_to_wandb(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    exported: dict[str, object] = {}
+    exported: dict[str, Any] = {}
     artifact_dir = tmp_path / "stormlog-diagnose-bundle"
     artifact_dir.mkdir()
     wandb_config = SimpleNamespace(enabled=True)
@@ -244,14 +244,17 @@ def test_diagnose_exports_bundle_to_wandb(
     )
 
     exit_code = gpumemprof_cli.cmd_diagnose(
-        SimpleNamespace(
-            output=str(tmp_path),
-            device=None,
-            duration=0,
-            interval=0.5,
-            native_history=False,
-            native_history_max_entries=100000,
-            wandb=True,
+        cast(
+            Any,
+            SimpleNamespace(
+                output=str(tmp_path),
+                device=None,
+                duration=0,
+                interval=0.5,
+                native_history=False,
+                native_history_max_entries=100000,
+                wandb=True,
+            ),
         )
     )
 

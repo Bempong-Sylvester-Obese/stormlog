@@ -4,6 +4,7 @@ import json
 from datetime import datetime as real_datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -207,7 +208,7 @@ def test_tfmemprof_diagnose_exit_code_zero_when_no_risk(
 def test_tfmemprof_diagnose_exports_bundle_to_wandb(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    exported: dict[str, object] = {}
+    exported: dict[str, Any] = {}
     artifact_dir = tmp_path / "stormlog-tf-diagnose-bundle"
     artifact_dir.mkdir()
     wandb_config = SimpleNamespace(enabled=True)
@@ -234,12 +235,15 @@ def test_tfmemprof_diagnose_exports_bundle_to_wandb(
     )
 
     exit_code = tfmemprof_cli.cmd_diagnose(
-        SimpleNamespace(
-            output=str(tmp_path),
-            device="/GPU:0",
-            duration=0,
-            interval=0.5,
-            wandb=True,
+        cast(
+            Any,
+            SimpleNamespace(
+                output=str(tmp_path),
+                device="/GPU:0",
+                duration=0,
+                interval=0.5,
+                wandb=True,
+            ),
         )
     )
 

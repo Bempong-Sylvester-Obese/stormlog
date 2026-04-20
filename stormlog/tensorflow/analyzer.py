@@ -16,12 +16,21 @@ from stormlog.collective_attribution import (
 from stormlog.gap_analysis import GapFinding, analyze_hidden_memory_gaps
 
 try:
-    from stormlog.phases import PhaseReplayIndex, phase_attribution_to_payload
+    from stormlog.phases import (
+        PhaseAttribution,
+        PhaseReplayIndex,
+        phase_attribution_to_payload,
+    )
 except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
     PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 
-    def phase_attribution_to_payload(_: Any) -> Any:
+    def phase_attribution_to_payload(
+        attribution: PhaseAttribution | None,
+    ) -> dict[str, Any] | None:
         return None
+
+
 from stormlog.telemetry import TelemetryEventV2
 
 from .utils import format_memory

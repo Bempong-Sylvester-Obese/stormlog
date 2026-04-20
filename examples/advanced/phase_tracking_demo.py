@@ -40,7 +40,9 @@ def main() -> None:
     records = json.loads(output_path.read_text(encoding="utf-8"))
 
     phase_records = [
-        record for record in records if str(record.get("event_type", "")).startswith("phase_")
+        record
+        for record in records
+        if str(record.get("event_type", "")).startswith("phase_")
     ]
     print(f"Wrote {len(records)} telemetry records to {output_path}")
     print(f"Structured phase boundaries: {len(phase_records)}")
