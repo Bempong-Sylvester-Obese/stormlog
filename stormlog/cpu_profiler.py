@@ -382,6 +382,7 @@ class CPUMemoryTracker:
                     "peak",
                     change,
                     f"New CPU peak RSS: {self._format_bytes(current_rss)}",
+                    rss=current_rss,
                 )
 
             if change > 0:
@@ -389,18 +390,21 @@ class CPUMemoryTracker:
                     "allocation",
                     change,
                     f"RSS increased by {self._format_bytes(change)}",
+                    rss=current_rss,
                 )
             elif change < 0:
                 self._add_event(
                     "deallocation",
                     change,
                     f"RSS decreased by {self._format_bytes(abs(change))}",
+                    rss=current_rss,
                 )
 
             self._add_event(
                 "sample",
                 0,
                 "Collected CPU telemetry sample.",
+                rss=current_rss,
             )
 
             last_rss = current_rss
@@ -412,8 +416,11 @@ class CPUMemoryTracker:
         memory_change: int,
         context: str,
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        rss: int | None = None,
     ) -> None:
-        rss = self._current_rss()
+        if rss is None:
+            rss = self._current_rss()
         event = TrackingEvent(
             timestamp=time.time(),
             event_type=event_type,
