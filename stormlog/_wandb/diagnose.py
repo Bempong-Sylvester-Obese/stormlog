@@ -71,6 +71,7 @@ def export_diagnose_bundle_to_wandb(
                     run,
                     root=bundle_dir,
                     session_slug=session_slug(session_summary),
+                    allow_artifact_logging=config.log_artifacts,
                 ),
             )
     finally:

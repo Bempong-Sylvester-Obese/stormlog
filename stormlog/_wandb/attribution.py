@@ -24,6 +24,7 @@ def log_attribution_outputs(
     *,
     root: Path,
     session_slug: str,
+    allow_artifact_logging: bool = False,
 ) -> dict[str, Any]:
     summary_fields: dict[str, Any] = {}
     files_to_attach = [
@@ -37,7 +38,7 @@ def log_attribution_outputs(
         path for path in files_to_attach if path.exists() and path.is_file()
     ]
 
-    if existing_files:
+    if allow_artifact_logging and existing_files:
         artifact = wandb.Artifact(
             name=f"stormlog-attribution-{session_slug}",
             type="stormlog-attribution",
@@ -84,12 +85,23 @@ def build_attribution_preview_html(root: Path) -> str:
     snapshot_path = root / SNAPSHOT_PICKLE_FILENAME
     tensor_index = read_json_if_exists(root / TENSOR_ATTRIBUTION_FILENAME)
     if snapshot_path.exists() and isinstance(tensor_index, Mapping):
-        with snapshot_path.open("rb") as handle:
-            snapshot = pickle.load(handle)
-        return render_attributed_wandb_preview_html(
-            snapshot,
-            dict(tensor_index),
-        )
+        try:
+            with snapshot_path.open("rb") as handle:
+                snapshot = pickle.load(handle)
+        except (
+            OSError,
+            EOFError,
+            pickle.UnpicklingError,
+            ValueError,
+            TypeError,
+            AttributeError,
+        ):
+            pass
+        else:
+            return render_attributed_wandb_preview_html(
+                snapshot,
+                dict(tensor_index),
+            )
     return render_compact_attribution_summary_html(
         tensor_attribution_rows(root / TENSOR_ATTRIBUTION_FILENAME),
         read_json_if_exists(root / DEBUG_METADATA_FILENAME),

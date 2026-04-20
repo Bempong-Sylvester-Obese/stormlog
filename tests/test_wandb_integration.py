@@ -13,7 +13,9 @@ from typing import Any
 import pytest
 
 import stormlog.cuda_native_debug as native_debug
+from stormlog._wandb.attribution import build_attribution_preview_html
 from stormlog._wandb.core import read_json_if_exists
+from stormlog._wandb.tracking import _TIMELINE_MAX_POINTS, sample_timeline_rows
 from stormlog.session import create_session_summary
 from stormlog.wandb_integration import (
     ensure_wandb_available,
@@ -480,6 +482,124 @@ def test_tracking_visual_artifacts_respect_log_artifacts_flag(
     assert run.artifacts == []
     assert "stormlog_tracking_dashboard_file" not in run.summary
     assert any("stormlog_tracking_dashboard" in payload for payload in run.logged)
+
+
+def test_attribution_inline_logging_respects_log_artifacts_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    fake_wandb = _FakeWandbModule()
+    monkeypatch.setitem(sys.modules, "wandb", fake_wandb)
+
+    attribution_dir = tmp_path / "attribution"
+    attribution_dir.mkdir()
+    (attribution_dir / native_debug.TRACE_HTML_ANNOTATED_FILENAME).write_text(
+        "<html><body>stormlog attribution</body></html>",
+        encoding="utf-8",
+    )
+    (attribution_dir / native_debug.TENSOR_ATTRIBUTION_FILENAME).write_text(
+        json.dumps(
+            {
+                "storage_pointer_count": 1,
+                "attributed_storage_pointers": [
+                    {
+                        "storage_ptr": "0x1",
+                        "storage_ptr_int": 8192,
+                        "names": ["model.layer.weight"],
+                        "tensor_count": 1,
+                        "tensors": [
+                            {
+                                "shape": [4, 4],
+                                "dtype": "torch.float32",
+                                "size_bytes": 64,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    export_tracking_run_to_wandb(
+        wandb_config_from_namespace(
+            Namespace(
+                wandb=True,
+                wandb_log_artifacts=False,
+                wandb_log_attribution=True,
+            )
+        ),
+        command_name="stormlog-track",
+        session_summary=create_session_summary(source="stormlog.tracker"),
+        stats={"peak_memory": 128},
+        events=[],
+        attribution_bundle_dir=attribution_dir,
+    )
+
+    run = fake_wandb.created_runs[0]
+    assert run.artifacts == []
+    assert any("stormlog_attribution_html" in payload for payload in run.logged)
+    assert any("stormlog_tensor_attribution" in payload for payload in run.logged)
+
+
+def test_attribution_preview_falls_back_when_snapshot_pickle_is_corrupt(
+    tmp_path: Path,
+) -> None:
+    attribution_dir = tmp_path / "attribution"
+    attribution_dir.mkdir()
+    (attribution_dir / native_debug.SNAPSHOT_PICKLE_FILENAME).write_bytes(
+        b"not a pickle"
+    )
+    (attribution_dir / native_debug.TENSOR_ATTRIBUTION_FILENAME).write_text(
+        json.dumps(
+            {
+                "storage_pointer_count": 1,
+                "attributed_storage_pointers": [
+                    {
+                        "storage_ptr": "0x1",
+                        "names": ["model.layer.weight"],
+                        "tensor_count": 1,
+                        "tensors": [
+                            {
+                                "shape": [4, 4],
+                                "dtype": "torch.float32",
+                                "size_bytes": 64,
+                            }
+                        ],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    html = build_attribution_preview_html(attribution_dir)
+
+    assert "Snapshot data was unavailable" in html
+    assert "model.layer.weight" in html
+
+
+def test_tracking_timeline_sampling_pins_alert_rows_and_last_row() -> None:
+    rows = [
+        {
+            "sample_index": index,
+            "event_type": "sample",
+            "allocated_bytes": index,
+        }
+        for index in range(_TIMELINE_MAX_POINTS * 3)
+    ]
+    rows[251]["event_type"] = "warning"
+    rows[399]["event_type"] = "peak"
+    rows[501]["event_type"] = "error"
+
+    sampled = sample_timeline_rows(rows)
+
+    sampled_indices = [row["sample_index"] for row in sampled]
+    assert len(sampled) <= _TIMELINE_MAX_POINTS
+    assert sampled_indices == sorted(sampled_indices)
+    assert 251 in sampled_indices
+    assert 399 in sampled_indices
+    assert 501 in sampled_indices
+    assert rows[-1]["sample_index"] in sampled_indices
 
 
 def test_tracking_plots_preserve_missing_metric_values(

@@ -128,6 +128,7 @@ def export_tracking_run_to_wandb(
                     run,
                     root=attribution_dir,
                     session_slug=safe_session,
+                    allow_artifact_logging=config.log_artifacts,
                 ),
             )
     finally:
@@ -400,12 +401,38 @@ def sample_timeline_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]
     if len(rows) <= _TIMELINE_MAX_POINTS:
         return list(rows)
 
-    stride = int(math.ceil(len(rows) / _TIMELINE_MAX_POINTS))
-    sampled = list(rows[::stride])
+    pinned_by_index: dict[int, dict[str, Any]] = {}
+    for row in rows:
+        sample_index = row.get("sample_index")
+        if (
+            isinstance(sample_index, int)
+            and row.get("event_type") in _ALERT_EVENT_TYPES
+        ):
+            pinned_by_index[sample_index] = row
+
     last_row = rows[-1]
-    if not sampled or sampled[-1]["sample_index"] != last_row["sample_index"]:
-        sampled.append(last_row)
-    return sampled
+    last_index = last_row.get("sample_index")
+    if isinstance(last_index, int):
+        pinned_by_index[last_index] = last_row
+
+    pinned_rows = sorted(
+        pinned_by_index.values(),
+        key=lambda row: int(row["sample_index"]),
+    )
+    remaining_budget = _TIMELINE_MAX_POINTS - len(pinned_rows)
+    if remaining_budget <= 0:
+        return pinned_rows[:_TIMELINE_MAX_POINTS]
+
+    pinned_indices = set(pinned_by_index)
+    unpinned_rows = [
+        row for row in rows if row.get("sample_index") not in pinned_indices
+    ]
+    stride = max(1, math.ceil(len(unpinned_rows) / remaining_budget))
+    sampled_rows = unpinned_rows[::stride][:remaining_budget]
+    return sorted(
+        [*pinned_rows, *sampled_rows],
+        key=lambda row: int(row["sample_index"]),
+    )[:_TIMELINE_MAX_POINTS]
 
 
 def _memory_plot_series(

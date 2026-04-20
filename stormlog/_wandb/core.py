@@ -123,7 +123,7 @@ def ensure_wandb_available(config: WandbExportConfig) -> None:
 
 def import_wandb() -> Any:
     try:
-        import wandb  # type: ignore[import-not-found]
+        import wandb
     except ModuleNotFoundError as exc:
         if exc.name == "wandb":
             raise ImportError(WANDB_INSTALL_GUIDANCE) from exc

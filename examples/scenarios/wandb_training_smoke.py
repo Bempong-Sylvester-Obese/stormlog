@@ -431,7 +431,7 @@ def _train_one_epoch(
     }
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc]
 def _evaluate(
     model: nn.Module,
     loader: DataLoader[Any],
@@ -468,7 +468,7 @@ def _evaluate(
     }
 
 
-@torch.no_grad()
+@torch.no_grad()  # type: ignore[misc]
 def _log_prediction_table(
     model: nn.Module,
     loader: DataLoader[Any],
@@ -588,136 +588,139 @@ def main() -> None:
         },
     )
 
-    tracker = _build_tracker(
-        args,
-        telemetry_sink_dir=telemetry_sink_dir,
-        device=device,
-    )
-    tracker.start_tracking()
-    history_enabled = bool(
-        args.wandb_log_attribution
-        and device.type == "cuda"
-        and cuda_memory_history_supported()
-    )
+    tracker: Any | None = None
     history: list[dict[str, float]] = []
     attribution_bundle_dir: Path | None = None
+    summary_path = output_dir / "training_summary.json"
 
     try:
-        with _cuda_history_context(enabled=history_enabled, device=device):
-            with tracker.phase(
-                "run",
-                metadata={
+        try:
+            tracker = _build_tracker(
+                args,
+                telemetry_sink_dir=telemetry_sink_dir,
+                device=device,
+            )
+            tracker.start_tracking()
+            history_enabled = bool(
+                args.wandb_log_attribution
+                and device.type == "cuda"
+                and cuda_memory_history_supported()
+            )
+
+            with _cuda_history_context(enabled=history_enabled, device=device):
+                with tracker.phase(
+                    "run",
+                    metadata={
+                        "dataset": args.dataset,
+                        "device_type": device.type,
+                        "epochs": args.epochs,
+                    },
+                ):
+                    model = CharacterCNN(num_classes=len(class_names)).to(device)
+                    optimizer = torch.optim.AdamW(
+                        model.parameters(), lr=3e-4, weight_decay=1e-4
+                    )
+                    criterion = nn.CrossEntropyLoss()
+
+                    for epoch_index in range(args.epochs):
+                        with tracker.phase(
+                            "epoch",
+                            metadata={"epoch": epoch_index + 1},
+                        ):
+                            train_metrics = _train_one_epoch(
+                                model,
+                                train_loader,
+                                tracker=tracker,
+                                optimizer=optimizer,
+                                criterion=criterion,
+                                device=device,
+                                epoch_index=epoch_index,
+                            )
+                            val_metrics = _evaluate(
+                                model,
+                                val_loader,
+                                tracker=tracker,
+                                criterion=criterion,
+                                device=device,
+                            )
+                            epoch_summary = {
+                                "epoch": epoch_index + 1,
+                                "train_loss": train_metrics["loss"],
+                                "train_accuracy": train_metrics["accuracy"],
+                                "val_loss": val_metrics["loss"],
+                                "val_accuracy": val_metrics["accuracy"],
+                            }
+                            history.append(epoch_summary)
+                            wandb.log(
+                                {
+                                    "train/epoch_loss": train_metrics["loss"],
+                                    "train/epoch_accuracy": train_metrics["accuracy"],
+                                    "validation/loss": val_metrics["loss"],
+                                    "validation/accuracy": val_metrics["accuracy"],
+                                    "epoch": epoch_index + 1,
+                                },
+                                step=(epoch_index + 1) * len(train_loader),
+                            )
+                            print(
+                                f"Epoch {epoch_index + 1}/{args.epochs}:"
+                                f" train_loss={train_metrics['loss']:.4f}"
+                                f" train_acc={train_metrics['accuracy']:.4f}"
+                                f" val_loss={val_metrics['loss']:.4f}"
+                                f" val_acc={val_metrics['accuracy']:.4f}"
+                            )
+
+                    _log_prediction_table(
+                        model,
+                        val_loader,
+                        tracker=tracker,
+                        device=device,
+                        class_names=class_names,
+                        row_limit=args.sample_predictions,
+                    )
+
+                if args.wandb_log_attribution:
+                    try:
+                        attribution_bundle_dir = _capture_attribution_bundle(
+                            output_dir,
+                            device=device,
+                            history_recorded=history_enabled,
+                        )
+                    except Exception as exc:
+                        print(f"Attribution snapshot export skipped: {exc}")
+        finally:
+            if tracker is not None:
+                tracker.stop_tracking()
+                stats = tracker.get_statistics()
+                summary_payload = {
                     "dataset": args.dataset,
                     "device_type": device.type,
                     "epochs": args.epochs,
-                },
-            ):
-                model = CharacterCNN(num_classes=len(class_names)).to(device)
-                optimizer = torch.optim.AdamW(
-                    model.parameters(), lr=3e-4, weight_decay=1e-4
+                    "train_samples": args.train_samples,
+                    "val_samples": args.val_samples,
+                    "history": history,
+                    "stormlog_stats": stats,
+                }
+                summary_path.write_text(
+                    json.dumps(summary_payload, indent=2, default=str) + "\n",
+                    encoding="utf-8",
                 )
-                criterion = nn.CrossEntropyLoss()
-
-                for epoch_index in range(args.epochs):
-                    with tracker.phase(
-                        "epoch",
-                        metadata={"epoch": epoch_index + 1},
-                    ):
-                        train_metrics = _train_one_epoch(
-                            model,
-                            train_loader,
-                            tracker=tracker,
-                            optimizer=optimizer,
-                            criterion=criterion,
-                            device=device,
-                            epoch_index=epoch_index,
-                        )
-                        val_metrics = _evaluate(
-                            model,
-                            val_loader,
-                            tracker=tracker,
-                            criterion=criterion,
-                            device=device,
-                        )
-                        epoch_summary = {
-                            "epoch": epoch_index + 1,
-                            "train_loss": train_metrics["loss"],
-                            "train_accuracy": train_metrics["accuracy"],
-                            "val_loss": val_metrics["loss"],
-                            "val_accuracy": val_metrics["accuracy"],
-                        }
-                        history.append(epoch_summary)
-                        wandb.log(
-                            {
-                                "train/epoch_loss": train_metrics["loss"],
-                                "train/epoch_accuracy": train_metrics["accuracy"],
-                                "validation/loss": val_metrics["loss"],
-                                "validation/accuracy": val_metrics["accuracy"],
-                                "epoch": epoch_index + 1,
-                            },
-                            step=(epoch_index + 1) * len(train_loader),
-                        )
-                        print(
-                            f"Epoch {epoch_index + 1}/{args.epochs}:"
-                            f" train_loss={train_metrics['loss']:.4f}"
-                            f" train_acc={train_metrics['accuracy']:.4f}"
-                            f" val_loss={val_metrics['loss']:.4f}"
-                            f" val_acc={val_metrics['accuracy']:.4f}"
-                        )
-
-                _log_prediction_table(
-                    model,
-                    val_loader,
-                    tracker=tracker,
-                    device=device,
-                    class_names=class_names,
-                    row_limit=args.sample_predictions,
+                export_tracking_run_to_wandb(
+                    WandbExportConfig(
+                        enabled=True,
+                        log_artifacts=args.wandb_log_artifacts,
+                        log_attribution=args.wandb_log_attribution,
+                    ),
+                    command_name="wandb-character-cnn",
+                    session_summary=tracker.get_session_summary(),
+                    stats=stats,
+                    events=tracker.get_events(),
+                    output_path=summary_path,
+                    telemetry_sink_dir=telemetry_sink_dir,
+                    oom_dump_path=getattr(tracker, "last_oom_dump_path", None),
+                    attribution_bundle_dir=attribution_bundle_dir,
                 )
-
-            if args.wandb_log_attribution:
-                try:
-                    attribution_bundle_dir = _capture_attribution_bundle(
-                        output_dir,
-                        device=device,
-                        history_recorded=history_enabled,
-                    )
-                except Exception as exc:
-                    print(f"Attribution snapshot export skipped: {exc}")
     finally:
-        tracker.stop_tracking()
-
-    stats = tracker.get_statistics()
-    summary_payload = {
-        "dataset": args.dataset,
-        "device_type": device.type,
-        "epochs": args.epochs,
-        "train_samples": args.train_samples,
-        "val_samples": args.val_samples,
-        "history": history,
-        "stormlog_stats": stats,
-    }
-    summary_path = output_dir / "training_summary.json"
-    summary_path.write_text(
-        json.dumps(summary_payload, indent=2, default=str) + "\n",
-        encoding="utf-8",
-    )
-    export_tracking_run_to_wandb(
-        WandbExportConfig(
-            enabled=True,
-            log_artifacts=args.wandb_log_artifacts,
-            log_attribution=args.wandb_log_attribution,
-        ),
-        command_name="wandb-character-cnn",
-        session_summary=tracker.get_session_summary(),
-        stats=stats,
-        events=tracker.get_events(),
-        output_path=summary_path,
-        telemetry_sink_dir=telemetry_sink_dir,
-        oom_dump_path=getattr(tracker, "last_oom_dump_path", None),
-        attribution_bundle_dir=attribution_bundle_dir,
-    )
-
-    wandb.finish()
+        wandb.finish()
     final_epoch = history[-1] if history else None
     if final_epoch is not None:
         print(

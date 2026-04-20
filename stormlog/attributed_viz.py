@@ -994,10 +994,12 @@ renderActiveTable();
 
 
 def _sample_indices(length: int, limit: int) -> List[int]:
-    if length <= 0:
+    if length <= 0 or limit <= 0:
         return []
-    if limit <= 0 or length <= limit:
+    if length <= limit:
         return list(range(length))
+    if limit == 1:
+        return [length - 1]
 
     indices: List[int] = []
     seen: set[int] = set()
@@ -1165,11 +1167,19 @@ def render_attributed_wandb_preview_html(
     offenders = payload["offenders"][:max_offenders]
     active_rows = payload["active_table"][:max_active_rows]
     preview_chart = _render_preview_chart(timeline, alloc_markers)
-    note = (
-        "Sampled W&B preview: "
-        f"{len(timeline)} plotted points from {payload['num_events']:,} recorded events. "
-        "Download the attribution artifact for the full interactive explorer."
-    )
+    if payload["history_recorded"]:
+        note = (
+            "Sampled W&B preview: "
+            f"{len(timeline)} plotted points from {payload['num_events']:,} recorded events. "
+            "Download the attribution artifact for the full interactive explorer."
+        )
+        event_stat_label = "Events"
+    else:
+        note = (
+            "Static W&B preview from the live allocator snapshot. "
+            "Download the attribution artifact for the full interactive explorer."
+        )
+        event_stat_label = "Trace Events"
     history_note = (
         ""
         if payload["history_recorded"]
@@ -1385,7 +1395,7 @@ body {{
       </div>
       <div class="preview-stats">
         <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["peak_h"]))}</div><div class="preview-stat-label">{escape(str(payload["peak_label"]))}</div></div>
-        <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["events_display"]))}</div><div class="preview-stat-label">Events</div></div>
+        <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["events_display"]))}</div><div class="preview-stat-label">{escape(event_stat_label)}</div></div>
         <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["attribution_count"]))}</div><div class="preview-stat-label">Tensors</div></div>
         <div class="preview-stat"><div class="preview-stat-value">{escape(str(payload["num_segments"]))}</div><div class="preview-stat-label">Segments</div></div>
       </div>

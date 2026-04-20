@@ -404,3 +404,76 @@ def test_render_attributed_wandb_preview_html_is_static_and_sampled() -> None:
         'class="preview-axis-band"'
     )
     assert len(preview_html) < len(full_html)
+
+
+def test_sample_indices_handles_disabled_and_single_point_limits() -> None:
+    assert attributed_viz._sample_indices(5, 0) == []  # noqa: SLF001
+    assert attributed_viz._sample_indices(5, 1) == [4]  # noqa: SLF001
+
+
+def test_render_attributed_wandb_preview_handles_one_point_sample_limit() -> None:
+    snapshot = {
+        "segments": [],
+        "device_traces": [
+            [
+                {"action": "alloc", "addr": 8192, "size": 64, "time_us": 100},
+                {"action": "alloc", "addr": 8256, "size": 64, "time_us": 200},
+            ]
+        ],
+    }
+    tensor_index = {"storage_pointer_count": 0, "attributed_storage_pointers": []}
+
+    html = attributed_viz.render_attributed_wandb_preview_html(
+        snapshot,
+        tensor_index,
+        max_timeline_points=1,
+        max_marker_points=1,
+    )
+
+    assert "Stormlog GPU Attribution Preview" in html
+    assert "1 plotted points" in html
+
+
+def test_render_attributed_wandb_preview_labels_snapshot_only_view() -> None:
+    snapshot = {
+        "segments": [
+            {
+                "address": 4096,
+                "segment_type": "large",
+                "total_size": 128,
+                "allocated_size": 64,
+                "active_size": 64,
+                "blocks": [
+                    {
+                        "address": 8192,
+                        "size": 64,
+                        "state": "active_allocated",
+                        "frames": [],
+                    }
+                ],
+            }
+        ],
+        "device_traces": [[]],
+    }
+    tensor_index = {
+        "storage_pointer_count": 1,
+        "attributed_storage_pointers": [
+            {
+                "storage_ptr_int": 8192,
+                "names": ["model.linear.weight"],
+                "tensors": [
+                    {
+                        "shape": [8, 8],
+                        "dtype": "torch.float32",
+                        "size_bytes": 64,
+                    }
+                ],
+            }
+        ],
+    }
+
+    html = attributed_viz.render_attributed_wandb_preview_html(snapshot, tensor_index)
+
+    assert "Static W&amp;B preview from the live allocator snapshot" in html
+    assert "recorded events" not in html
+    assert "Trace Events" in html
