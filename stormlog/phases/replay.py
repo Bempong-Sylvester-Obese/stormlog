@@ -68,11 +68,18 @@ class PhaseReplayIndex:
             timestamp_ns = _event_field(event, "timestamp_ns")
             if not isinstance(session_id, str) or not isinstance(timestamp_ns, int):
                 continue
-            rank = int(_event_field(event, "rank", 0))
-            group_key = (session_id, rank)
-            previous_end = session_end_by_group.get(group_key)
-            if previous_end is None or timestamp_ns > previous_end:
-                session_end_by_group[group_key] = timestamp_ns
+            rank = _coerce_rank(_event_field(event, "rank", 0))
+            if rank is not None:
+                group_key = (session_id, rank)
+                previous_end = session_end_by_group.get(group_key)
+                if previous_end is None or timestamp_ns > previous_end:
+                    session_end_by_group[group_key] = timestamp_ns
+
+            event_type = _event_field(event, "event_type", "")
+            if event_type not in {PHASE_ENTER_EVENT, PHASE_EXIT_EVENT}:
+                continue
+            if rank is None:
+                continue
 
             scope = parse_phase_boundary(event)
             if scope is None:
@@ -214,6 +221,9 @@ class PhaseReplayIndex:
 
 def parse_phase_boundary(event: Any) -> PhaseBoundaryRecord | None:
     """Extract one normalized phase payload from an event-like object."""
+    event_type = _event_field(event, "event_type", "")
+    if event_type not in {PHASE_ENTER_EVENT, PHASE_EXIT_EVENT}:
+        return None
     metadata = _event_field(event, "metadata", {})
     if not isinstance(metadata, Mapping):
         return None
@@ -231,13 +241,15 @@ def parse_phase_boundary(event: Any) -> PhaseBoundaryRecord | None:
     thread_name = raw_scope.get("thread_name")
     if (
         not isinstance(action, str)
-        or action not in {"enter", "exit"}
         or not isinstance(name, str)
         or not name.strip()
         or not isinstance(scope_id, str)
         or not isinstance(thread_name, str)
         or not isinstance(path, list)
     ):
+        return None
+    expected_action = "enter" if event_type == PHASE_ENTER_EVENT else "exit"
+    if action != expected_action:
         return None
     normalized_path = tuple(
         str(part) for part in path if isinstance(part, str) and part
@@ -288,10 +300,26 @@ def _event_field(event: Any, field_name: str, default: Any = None) -> Any:
     return getattr(event, field_name, default)
 
 
+def _coerce_rank(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
+
+
 __all__ = [
     "PhaseBoundaryRecord",
-    "PhaseSpan",
     "PhaseReplayIndex",
+    "PhaseSpan",
     "is_phase_boundary_event",
     "parse_phase_boundary",
 ]

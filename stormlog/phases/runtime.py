@@ -191,7 +191,7 @@ class PhaseRecorder:
             session_id=token.session_id,
             rank=token.rank,
             scope_id=token.scope_id,
-            thread_id=token.thread_id,
+            thread_id=int(threading.current_thread().ident or 0),
         )
 
     def exit_phase(
@@ -304,8 +304,8 @@ def _phase_scope_payload(active: _ActivePhase, *, action: str) -> dict[str, Any]
 __all__ = [
     "PHASE_ENTER_EVENT",
     "PHASE_EXIT_EVENT",
-    "PHASE_SCOPE_METADATA_KEY",
     "PHASE_SCOPE_ATTRIBUTES_KEY",
+    "PHASE_SCOPE_METADATA_KEY",
     "PhaseBoundary",
     "PhaseHandle",
     "PhaseProtocolError",

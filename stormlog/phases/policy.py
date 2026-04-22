@@ -111,12 +111,15 @@ def resolve_phase_for_event(
     session_id = _event_field(event, "session_id")
     if not isinstance(timestamp_ns, int) or not isinstance(session_id, str):
         return None
+    rank = _coerce_rank(_event_field(event, "rank", 0))
+    if rank is None:
+        return None
     origin_thread_id = _origin_thread_id_for_event(event)
     origin_phase_scope_id = _origin_phase_scope_id_for_event(event)
     spans = index.active_spans(
         timestamp_ns=timestamp_ns,
         session_id=session_id,
-        rank=int(_event_field(event, "rank", 0)),
+        rank=rank,
     )
     return attribute_active_spans(
         spans,
@@ -295,6 +298,22 @@ def _event_field(event: Any, field_name: str, default: Any = None) -> Any:
     if isinstance(event, dict):
         return event.get(field_name, default)
     return getattr(event, field_name, default)
+
+
+def _coerce_rank(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return None
+        try:
+            return int(stripped)
+        except ValueError:
+            return None
+    return None
 
 
 __all__ = [

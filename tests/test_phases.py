@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 phases = pytest.importorskip("stormlog.phases")
@@ -9,8 +11,11 @@ PHASE_ENTER_EVENT = phases.PHASE_ENTER_EVENT
 PHASE_EXIT_EVENT = phases.PHASE_EXIT_EVENT
 PHASE_SCOPE_METADATA_KEY = phases.PHASE_SCOPE_METADATA_KEY
 PhaseAttribution = phases.PhaseAttribution
+PhaseProtocolError = phases.PhaseProtocolError
+PhaseRecorder = phases.PhaseRecorder
 PhaseSummary = phases.PhaseSummary
 PhaseReplayIndex = phases.PhaseReplayIndex
+is_phase_boundary_event = phases.is_phase_boundary_event
 merge_phase_attributions = phases.merge_phase_attributions
 phase_attribution_to_payload = phases.phase_attribution_to_payload
 summarize_phase_attribution = phases.summarize_phase_attribution
@@ -288,6 +293,102 @@ def test_phase_timeline_resolver_prefers_origin_scope_id_when_available() -> Non
     assert attribution.phase_resolution == "unique"
     assert attribution.phase_source == "exact"
     assert attribution.phase_path == "train"
+
+
+def test_phase_timeline_resolver_ignores_boundary_with_malformed_rank() -> None:
+    events = [
+        {
+            "session_id": "session-1",
+            "timestamp_ns": 100,
+            "event_type": PHASE_ENTER_EVENT,
+            "rank": "rank-zero",
+            "metadata": _phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        },
+        _make_event(timestamp_ns=140),
+    ]
+
+    resolver = PhaseReplayIndex.from_events(events)
+
+    assert resolver.spans_for(session_id="session-1") == []
+
+
+def test_phase_timeline_resolver_ignores_action_event_type_mismatches() -> None:
+    event = {
+        "session_id": "session-1",
+        "timestamp_ns": 100,
+        "event_type": PHASE_ENTER_EVENT,
+        "rank": 0,
+        "metadata": _phase_scope(
+            action="exit",
+            name="train",
+            path=["train"],
+            scope_id="session-1:1",
+            sequence=1,
+            thread_id=11,
+        ),
+    }
+
+    resolver = PhaseReplayIndex.from_events([event])
+
+    assert is_phase_boundary_event(event) is False
+    assert resolver.spans_for(session_id="session-1", rank=0) == []
+
+
+def test_phase_timeline_resolver_returns_none_for_malformed_event_rank() -> None:
+    events = [
+        _make_event(
+            timestamp_ns=100,
+            event_type=PHASE_ENTER_EVENT,
+            metadata=_phase_scope(
+                action="enter",
+                name="train",
+                path=["train"],
+                scope_id="session-1:1",
+                sequence=1,
+                thread_id=11,
+            ),
+        ),
+        _make_event(timestamp_ns=120),
+    ]
+
+    resolver = PhaseReplayIndex.from_events(events)
+    attribution = resolver.resolve_for_event(
+        {
+            "session_id": "session-1",
+            "timestamp_ns": 120,
+            "rank": "zero",
+        }
+    )
+
+    assert attribution is None
+
+
+def test_phase_recorder_exit_uses_current_thread_for_strict_thread_validation() -> None:
+    recorder = PhaseRecorder()
+    token, _boundary = recorder.enter(session_id="session-1", rank=0, name="train")
+    error: Exception | None = None
+
+    def _close_on_other_thread() -> None:
+        nonlocal error
+        try:
+            recorder.exit(token)
+        except Exception as exc:  # pragma: no branch - asserted below
+            error = exc
+
+    worker = threading.Thread(target=_close_on_other_thread)
+    worker.start()
+    worker.join()
+
+    assert isinstance(error, PhaseProtocolError)
+    assert "different thread" in str(error)
+    assert recorder.exit(token).event_type == PHASE_EXIT_EVENT
 
 
 def test_merge_phase_attributions_keeps_same_label_multi_thread_overlap_ambiguous() -> (
