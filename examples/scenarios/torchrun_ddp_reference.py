@@ -15,7 +15,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 try:
     import torch
@@ -95,7 +95,7 @@ class TutorialNet(nn.Module):
         return self.net(inputs)
 
 
-def _parse_args() -> argparse.Namespace:
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Reference single-node DDP training with torchrun and Stormlog.",
     )
@@ -137,7 +137,10 @@ def _parse_args() -> argparse.Namespace:
         help="Checkpoint cadence in epochs for rank 0.",
     )
     parser.add_argument("--seed", type=int, default=7, help="Global random seed.")
-    return parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.save_every <= 0:
+        parser.error("--save-every must be a positive integer")
+    return args
 
 
 def _rank_context_from_env(env: dict[str, str]) -> RankContext:

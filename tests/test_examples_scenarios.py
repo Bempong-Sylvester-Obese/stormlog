@@ -177,3 +177,12 @@ def test_torchrun_ddp_reference_builds_rank_local_artifact_paths(
     assert paths.telemetry_sink_dir == tmp_path / "ddp" / "rank1" / "telemetry_sink"
     assert paths.rank_summary_path == tmp_path / "ddp" / "rank1" / "rank_summary.json"
     assert paths.root_summary_path == tmp_path / "ddp" / "ddp_reference_summary.json"
+
+
+def test_torchrun_ddp_reference_rejects_non_positive_save_every() -> None:
+    from examples.scenarios.torchrun_ddp_reference import _parse_args
+
+    with pytest.raises(SystemExit) as excinfo:
+        _parse_args(["--save-every", "0"])
+
+    assert excinfo.value.code == 2

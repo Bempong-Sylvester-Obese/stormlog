@@ -381,6 +381,7 @@ def _run_tracked_scenario(
     gc.collect()
     session = spec.factory(scenario_dir, spec.default_interval, sink_overrides)
     session_started = False
+    finish_attempted = False
     session_report: dict[str, Any] | None = None
     try:
         session.start()
@@ -410,9 +411,10 @@ def _run_tracked_scenario(
             session.emit_sample(emitted)
             emitted += 1
 
+        finish_attempted = True
         session_report = session.finish()
     except Exception:
-        if session_started:
+        if session_started and not finish_attempted:
             with suppress(Exception):
                 session.finish()
         raise
@@ -578,6 +580,7 @@ def _run_soak_scenario(
     gc.collect()
     session = spec.factory(scenario_dir, spec.default_interval, None)
     session_started = False
+    finish_attempted = False
     session_report: dict[str, Any] | None = None
     try:
         session.start()
@@ -604,9 +607,10 @@ def _run_soak_scenario(
         wall_seconds = time.perf_counter() - wall_start
         cpu_seconds = time.process_time() - cpu_start
 
+        finish_attempted = True
         session_report = session.finish()
     except Exception:
-        if session_started:
+        if session_started and not finish_attempted:
             with suppress(Exception):
                 session.finish()
         raise
@@ -663,6 +667,7 @@ def _run_retention_validation(
     gc.collect()
     session = spec.factory(scenario_dir, spec.default_interval, overrides)
     session_started = False
+    finish_attempted = False
     session_report: dict[str, Any] | None = None
     try:
         session.start()
@@ -682,9 +687,10 @@ def _run_retention_validation(
                     ):
                         break
 
+        finish_attempted = True
         session_report = session.finish()
     except Exception:
-        if session_started:
+        if session_started and not finish_attempted:
             with suppress(Exception):
                 session.finish()
         raise
