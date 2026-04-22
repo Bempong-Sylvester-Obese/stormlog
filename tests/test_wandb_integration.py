@@ -15,6 +15,7 @@ import pytest
 import stormlog.cuda_native_debug as native_debug
 from stormlog._wandb.attribution import build_attribution_preview_html
 from stormlog._wandb.core import read_json_if_exists
+from stormlog._wandb.dashboard import tracking_dashboard_html
 from stormlog._wandb.tracking import _TIMELINE_MAX_POINTS, sample_timeline_rows
 from stormlog.session import create_session_summary
 from stormlog.wandb_integration import (
@@ -600,6 +601,44 @@ def test_tracking_timeline_sampling_pins_alert_rows_and_last_row() -> None:
     assert 399 in sampled_indices
     assert 501 in sampled_indices
     assert rows[-1]["sample_index"] in sampled_indices
+
+
+def test_tracking_timeline_sampling_keeps_latest_pinned_rows_when_over_budget() -> None:
+    rows = [
+        {
+            "sample_index": index,
+            "event_type": "warning",
+            "allocated_bytes": index,
+        }
+        for index in range(_TIMELINE_MAX_POINTS + 20)
+    ]
+
+    sampled = sample_timeline_rows(rows)
+
+    assert [row["sample_index"] for row in sampled] == list(
+        range(20, _TIMELINE_MAX_POINTS + 20)
+    )
+
+
+def test_tracking_dashboard_escapes_alert_cells_and_handles_invalid_elapsed() -> None:
+    html = tracking_dashboard_html(
+        [
+            {
+                "sample_index": "<script>alert(1)</script>",
+                "event_type": "warning",
+                "elapsed_seconds": "oops",
+                "context": "<b>unsafe</b>",
+                "allocated_bytes": 128,
+                "reserved_bytes": 256,
+            }
+        ],
+        alert_event_types=frozenset({"warning"}),
+    )
+
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
+    assert "<script>alert(1)</script>" not in html
+    assert "&lt;b&gt;unsafe&lt;/b&gt;" in html
+    assert ">n/a<" in html
 
 
 def test_tracking_plots_preserve_missing_metric_values(

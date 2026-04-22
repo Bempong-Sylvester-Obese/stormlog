@@ -421,7 +421,7 @@ def sample_timeline_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]
     )
     remaining_budget = _TIMELINE_MAX_POINTS - len(pinned_rows)
     if remaining_budget <= 0:
-        return pinned_rows[:_TIMELINE_MAX_POINTS]
+        return pinned_rows[-_TIMELINE_MAX_POINTS:]
 
     pinned_indices = set(pinned_by_index)
     unpinned_rows = [

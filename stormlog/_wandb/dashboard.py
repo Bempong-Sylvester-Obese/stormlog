@@ -65,9 +65,9 @@ def tracking_dashboard_html(
     )
     alerts_html = "".join(
         "<tr>"
-        f"<td>{row.get('sample_index')}</td>"
+        f"<td>{html.escape(_format_alert_sample_index(row.get('sample_index')))}</td>"
         f"<td>{html.escape(str(row.get('event_type', '')))}</td>"
-        f"<td>{row.get('elapsed_seconds', 0.0):.2f}</td>"
+        f"<td>{html.escape(_format_alert_elapsed_seconds(row.get('elapsed_seconds')))}</td>"
         f"<td>{html.escape(str(row.get('context') or ''))}</td>"
         "</tr>"
         for row in alert_rows
@@ -151,3 +151,19 @@ def _format_bytes(value: int) -> str:
         if scaled < 1024.0:
             return f"{scaled:.2f} {unit}"
     return f"{scaled:.2f} {unit}"
+
+
+def _format_alert_sample_index(value: Any) -> str:
+    if isinstance(value, bool) or value is None:
+        return "n/a"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value)
+
+
+def _format_alert_elapsed_seconds(value: Any) -> str:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{float(value):.2f}"
+    return "n/a"
