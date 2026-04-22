@@ -62,7 +62,7 @@ from stormlog import MemoryTracker
 
 tracker = MemoryTracker(
     sampling_interval=0.5,
-    telemetry_sink_config=...,
+    # telemetry_sink_config=...,  # Optional: configure the append-only sink.
 )
 
 tracker.start_tracking()

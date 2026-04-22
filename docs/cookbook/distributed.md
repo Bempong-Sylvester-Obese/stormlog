@@ -89,6 +89,7 @@ Run the reference training job with `torchrun`:
 ```bash
 cd /home/gpu-memory-profiler
 . .venv/bin/activate
+mkdir -p artifacts/jarvis_torchrun_reference
 PYTHONPATH=/home/gpu-memory-profiler \
 OMP_NUM_THREADS=1 \
 python -m torch.distributed.run \

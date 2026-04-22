@@ -79,9 +79,11 @@ persisted, and it is marked `completed` only after clean shutdown finalization
 finishes.
 
 If your Python workload instruments phases with `tracker.phase(...)` or
-`tracker.enter_phase(...)`, the same `track` output also includes structured
-`phase_enter` / `phase_exit` companion records. Phase records are optional and
-do not change the `track` CLI surface in v1.
+`tracker.enter_phase(...)`, `track` persists the emitted `phase_enter` /
+`phase_exit` records alongside the regular telemetry samples. The CLI does not
+invent phase records on its own; it only preserves the structured phase events
+your workload emitted. Phase records remain optional and do not change the
+`track` CLI surface in v1.
 
 For long-running tracking sessions, Stormlog now degrades gracefully when a
 collector becomes unhealthy:
