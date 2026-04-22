@@ -496,7 +496,7 @@ class MemoryAnalyzer:
 def _serialize_gap_finding(finding: GapFinding) -> dict[str, Any]:
     payload = asdict(finding)
     payload["phase_attribution"] = phase_attribution_to_payload(
-        finding.phase_attribution
+        getattr(finding, "phase_attribution", None)
     )
     return payload
 
@@ -506,6 +506,6 @@ def _serialize_collective_attribution(
 ) -> dict[str, Any]:
     payload = asdict(result)
     payload["phase_attribution"] = phase_attribution_to_payload(
-        result.phase_attribution
+        getattr(result, "phase_attribution", None)
     )
     return payload
