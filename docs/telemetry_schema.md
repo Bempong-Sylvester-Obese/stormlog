@@ -111,10 +111,82 @@ Tracker exports may also emit these lifecycle events:
 - `collector_recovered`
 - `start`
 - `stop`
+- `phase_enter`
+- `phase_exit`
 
 When the collector cannot produce core metrics, Stormlog pauses sample emission
 until the next retry window and records the degraded state instead of exporting
 synthetic zero-valued samples.
+
+## Structured phase metadata
+
+Phase-aware trackers store workload boundaries under `metadata["phase_scope"]`.
+This payload is attached to `phase_enter` and `phase_exit` events and is replayed
+later by the analyzer and TUI.
+
+The current shape is:
+
+- `action` (`enter` or `exit`)
+- `name` (leaf phase label)
+- `path` (`list[str]`)
+- `depth` (`int`)
+- `scope_id` (`string`)
+- `parent_scope_id` (`string | null`)
+- `thread_id` (`int`)
+- `thread_name` (`string`)
+- `sequence` (`int`)
+- `attributes` (`object`, optional)
+
+Example:
+
+```json
+{
+  "event_type": "phase_enter",
+  "metadata": {
+    "phase_scope": {
+      "action": "enter",
+      "name": "forward",
+      "path": ["train", "forward"],
+      "depth": 2,
+      "scope_id": "session-1:2",
+      "parent_scope_id": "session-1:1",
+      "thread_id": 88,
+      "thread_name": "MainThread",
+      "sequence": 2,
+      "attributes": {"epoch": 3}
+    }
+  }
+}
+```
+
+## Analyzer phase attribution payloads
+
+Analyze and Diagnostics outputs may also include a derived
+`phase_attribution` object. This is not part of the raw event schema above; it
+is report-layer data produced after replaying the `phase_scope` boundaries.
+
+Canonical fields:
+
+- `phase_resolution` (`unique`, `ambiguous`, or omitted when no attribution exists)
+- `phase_source` (`exact`, `thread_local`, `heuristic`, or omitted)
+- `phase_path` (`string`, only for unique attributions)
+- `phase_paths` (`list[str]`, one or more candidate labels)
+- `scope_id`, `thread_id`, `thread_name` (present only when uniquely tied to one scope)
+
+Optional presentation field:
+
+- `phase_summary`
+  - `phase_path`
+  - `source`
+
+`phase_summary` is emitted only when the product wants one useful display label
+even though the canonical attribution remains ambiguous. For example, the CLI
+may show `(likely) train / communication` while the underlying
+`phase_attribution.phase_resolution` still stays `ambiguous`.
+
+If ambiguity collapses to only one distinct label, Stormlog keeps the canonical
+ambiguity and omits `phase_summary` because there is no materially different
+winner to show.
 
 ## Legacy compatibility
 

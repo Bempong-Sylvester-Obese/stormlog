@@ -10,6 +10,7 @@ from typing import Any
 import pytest
 
 import stormlog.cli as gpumemprof_cli
+from stormlog.session import create_session_summary
 
 
 def test_main_parses_oom_track_flags(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,6 +53,23 @@ def test_main_parses_oom_track_flags(monkeypatch: pytest.MonkeyPatch) -> None:
             "4",
             "--telemetry-retention-total-mb",
             "128",
+            "--wandb",
+            "--wandb-project",
+            "stormlog-tests",
+            "--wandb-entity",
+            "team",
+            "--wandb-mode",
+            "offline",
+            "--wandb-run-id",
+            "run-123",
+            "--wandb-name",
+            "track smoke",
+            "--wandb-group",
+            "job-42",
+            "--wandb-job-type",
+            "stormlog-track",
+            "--wandb-log-artifacts",
+            "--wandb-log-attribution",
         ],
     )
 
@@ -72,6 +90,16 @@ def test_main_parses_oom_track_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     assert args.telemetry_rollover_mb == 32
     assert args.telemetry_retention_files == 4
     assert args.telemetry_retention_total_mb == 128
+    assert args.wandb is True
+    assert args.wandb_project == "stormlog-tests"
+    assert args.wandb_entity == "team"
+    assert args.wandb_mode == "offline"
+    assert args.wandb_run_id == "run-123"
+    assert args.wandb_name == "track smoke"
+    assert args.wandb_group == "job-42"
+    assert args.wandb_job_type == "stormlog-track"
+    assert args.wandb_log_artifacts is True
+    assert args.wandb_log_attribution is True
 
 
 def test_cmd_track_passes_oom_config_to_memorytracker(
@@ -174,6 +202,120 @@ def test_cmd_track_passes_oom_config_to_memorytracker(
     assert created["capture_context"] == "stormlog.track"
     assert created["capture_metadata"]["command"] == "track"
     assert created["capture_metadata"]["runtime_backend"] == "cuda"
+
+
+def test_cmd_track_exports_results_to_wandb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exported: dict[str, Any] = {}
+    wandb_config = Namespace(enabled=True)
+    session_summary = create_session_summary(
+        source="stormlog.tracker",
+        session_id="session-12345678",
+        job_id="train-42",
+    )
+
+    class _FakeTracker:
+        def __init__(self, **kwargs: object) -> None:
+            self.last_oom_dump_path = "oom_bundle"
+            _ = kwargs
+
+        def set_threshold(self, name: str, value: float) -> None:
+            _ = (name, value)
+
+        def add_alert_callback(self, callback: object) -> None:
+            _ = callback
+
+        def start_tracking(self) -> None:
+            return None
+
+        def stop_tracking(self) -> None:
+            return None
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_allocated": 0,
+                "peak_memory": 1024,
+                "memory_utilization_percent": 0,
+                "total_events": 4,
+            }
+
+        def get_events(self) -> list[dict[str, object]]:
+            return [{"event_type": "warning", "context": "memory high"}]
+
+        def get_session_summary(self) -> object:
+            return session_summary
+
+        def export_events(self, output: str, fmt: str) -> None:
+            _ = (output, fmt)
+
+        def capture_oom(
+            self, context: str = "runtime", metadata: object = None
+        ) -> object:
+            _ = (context, metadata)
+            return nullcontext()
+
+    monkeypatch.setattr(gpumemprof_cli, "MemoryTracker", _FakeTracker)
+    monkeypatch.setattr(gpumemprof_cli, "MemoryWatchdog", lambda tracker: None)
+    monkeypatch.setattr(
+        gpumemprof_cli, "get_system_info", lambda: {"detected_backend": "cuda"}
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli, "wandb_config_from_namespace", lambda args: wandb_config
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "ensure_wandb_available",
+        lambda config: exported.setdefault("ensured", config),
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli,
+        "export_tracking_run_to_wandb",
+        lambda config, **kwargs: exported.update(config=config, kwargs=kwargs),
+    )
+    monkeypatch.setattr(
+        gpumemprof_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+
+    gpumemprof_cli.cmd_track(
+        Namespace(
+            device=0,
+            duration=None,
+            interval=0.25,
+            output="track.json",
+            format="json",
+            watchdog=False,
+            warning_threshold=70.0,
+            critical_threshold=90.0,
+            oom_flight_recorder=False,
+            oom_dump_dir="oom_test_dir",
+            oom_buffer_size=None,
+            oom_max_dumps=9,
+            oom_max_total_mb=512,
+            job_id="train-42",
+            rank=2,
+            local_rank=0,
+            world_size=8,
+            telemetry_sink_dir="telemetry_sink",
+            telemetry_flush_seconds=3.5,
+            telemetry_rollover_mb=32,
+            telemetry_retention_files=4,
+            telemetry_retention_total_mb=128,
+            wandb=True,
+        )
+    )
+
+    assert exported["ensured"] is wandb_config
+    assert exported["config"] is wandb_config
+    assert exported["kwargs"]["command_name"] == "gpumemprof-track"
+    assert exported["kwargs"]["session_summary"] == session_summary
+    assert exported["kwargs"]["stats"]["total_events"] == 4
+    assert exported["kwargs"]["events"] == [
+        {"event_type": "warning", "context": "memory high"}
+    ]
+    assert exported["kwargs"]["output_path"] == "track.json"
+    assert exported["kwargs"]["telemetry_sink_dir"] == "telemetry_sink"
+    assert exported["kwargs"]["oom_dump_path"] == "oom_bundle"
 
 
 def test_cmd_track_passes_telemetry_sink_config_to_cpu_tracker(

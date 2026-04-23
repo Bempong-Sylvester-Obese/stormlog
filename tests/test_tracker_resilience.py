@@ -13,6 +13,7 @@ from stormlog.collector_health import (
     COLLECTOR_HEALTH_UNHEALTHY,
 )
 from stormlog.device_collectors import DeviceMemorySample, DeviceMemorySampleResult
+from stormlog.phases import parse_phase_boundary
 from stormlog.telemetry_sink import TelemetrySinkConfig
 
 
@@ -346,6 +347,22 @@ def test_memory_tracker_export_preserves_health_metadata(
     assert "device_total_bytes" in payload
 
 
+def test_memory_tracker_emits_sample_event_on_healthy_iteration(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+
+    last_allocated = tracker._run_tracking_iteration(0)
+
+    assert last_allocated == 128
+    event_types = [event.event_type for event in tracker.get_events()]
+    assert event_types == ["peak", "allocation", "sample"]
+    assert tracker.get_events()[-1].context == "Collected telemetry sample."
+
+
 def test_memory_tracker_streams_events_to_append_only_sink(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -370,10 +387,10 @@ def test_memory_tracker_streams_events_to_append_only_sink(
 
     segment = tmp_path / "sink" / "segment-000001.jsonl"
     lines = [line for line in segment.read_text(encoding="utf-8").splitlines() if line]
-    assert len(lines) == 2
+    assert len(lines) == 3
     payload = tracker_mod.json.loads(lines[-1])
     assert payload["collector"] == "stormlog.cuda_tracker"
-    assert payload["event_type"] == "allocation"
+    assert payload["event_type"] == "sample"
     assert payload["allocator_allocated_bytes"] == 128
     stats = tracker.get_statistics()
     assert stats["final_retained_files"] == 1
@@ -537,7 +554,43 @@ def test_memory_tracker_recreates_sink_on_restart(
     assert tracker._telemetry_sink is None
 
     tracker.start_tracking()
-    second_sink = tracker._telemetry_sink
+    second_sink = cast(Any, tracker._telemetry_sink)
 
     assert second_sink is not None
     assert second_sink is not first_sink
+
+
+def test_memory_tracker_emits_structured_phase_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    monkeypatch.setattr(tracker_mod.threading, "Thread", _NoOpThread)
+
+    tracker.start_tracking()
+    with tracker.phase("forward", metadata={"microbatch": 4}) as handle:
+        assert handle.phase_path == "forward"
+    tracker.stop_tracking()
+
+    phase_events = [
+        event for event in tracker.get_events() if event.event_type.startswith("phase_")
+    ]
+    assert [event.event_type for event in phase_events] == [
+        "phase_enter",
+        "phase_exit",
+    ]
+
+    enter_scope = parse_phase_boundary(
+        tracker._telemetry_record_from_event(phase_events[0])
+    )
+    exit_scope = parse_phase_boundary(
+        tracker._telemetry_record_from_event(phase_events[1])
+    )
+    assert enter_scope is not None
+    assert exit_scope is not None
+    assert enter_scope.path == ("forward",)
+    assert enter_scope.attributes == {"microbatch": 4}
+    assert exit_scope.scope_id == enter_scope.scope_id
+    assert exit_scope.path == enter_scope.path
