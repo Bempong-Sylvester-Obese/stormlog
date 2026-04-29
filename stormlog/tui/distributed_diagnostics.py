@@ -54,6 +54,7 @@ from stormlog.telemetry import (
     telemetry_event_from_record,
 )
 from stormlog.telemetry_sink import resolve_telemetry_sink_segment_paths
+from stormlog.timeline_markers import TimelineMarker, derive_timeline_markers
 from stormlog.utils import format_bytes
 
 logger = logging.getLogger(__name__)
@@ -118,6 +119,7 @@ class ArtifactLoadResult:
     selected_session_id: str | None
     warnings: list[str]
     sources_loaded: list[str]
+    markers: list[TimelineMarker] = field(default_factory=list)
 
 
 @dataclass
@@ -163,6 +165,7 @@ class DistributedDiagnosticsModel:
     missing_ranks: list[int]
     per_rank_timelines: dict[int, dict[str, list[int]]]
     warnings: list[str] = field(default_factory=list)
+    markers_by_rank: dict[int, list[TimelineMarker]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -660,6 +663,9 @@ def load_distributed_artifacts(
             selected = select_default_loaded_session(sessions)
 
     selected_events = list(selected.events) if selected is not None else []
+    selected_markers = (
+        derive_timeline_markers(selected_events) if selected_events else []
+    )
     combined_warnings = _unique_strings(
         list(warnings) + [warning for loaded in sessions for warning in loaded.warnings]
     )
@@ -671,6 +677,7 @@ def load_distributed_artifacts(
         ),
         warnings=combined_warnings,
         sources_loaded=sorted(sources_loaded),
+        markers=selected_markers,
     )
 
 
@@ -735,6 +742,10 @@ def build_distributed_model(
     )
     filtered_missing = sorted(set(filtered_expected) - set(filtered_present))
 
+    markers_by_rank = _group_timeline_markers_by_rank(
+        derive_timeline_markers(events),
+        filtered_present,
+    )
     rows: list[RankDiagnosticsRow] = []
     timelines: dict[int, dict[str, list[int]]] = {}
     candidates: list[_AnomalyCandidate] = []
@@ -788,7 +799,24 @@ def build_distributed_model(
         missing_ranks=filtered_missing,
         per_rank_timelines=timelines,
         warnings=warnings,
+        markers_by_rank=markers_by_rank,
     )
+
+
+def _group_timeline_markers_by_rank(
+    markers: Sequence[TimelineMarker],
+    ranks: Sequence[int],
+) -> dict[int, list[TimelineMarker]]:
+    grouped: dict[int, list[TimelineMarker]] = {rank: [] for rank in ranks}
+    rank_set = set(ranks)
+    for marker in markers:
+        if marker.rank is None:
+            for rank in ranks:
+                grouped[rank].append(marker)
+            continue
+        if marker.rank in rank_set:
+            grouped.setdefault(marker.rank, []).append(marker)
+    return {rank: values for rank, values in grouped.items() if values}
 
 
 def _build_rank_row(

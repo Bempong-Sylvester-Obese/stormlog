@@ -702,6 +702,7 @@ class GPUMemoryProfilerTUI(App):
         self.diagnostics_timeline_canvas.render_rank_timelines(
             model.per_rank_timelines,
             active_rank=self._diagnostics_active_rank,
+            markers_by_rank=model.markers_by_rank,
         )
         self.log_diagnostics_message("Diagnostics", f"Focused timeline on rank {rank}.")
 

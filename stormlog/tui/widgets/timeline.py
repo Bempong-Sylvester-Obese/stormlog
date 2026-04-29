@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from textual.widgets import Static
+
+from stormlog.timeline_markers import TimelineMarker
 
 
 class TimelineCanvas(Static):
@@ -92,6 +94,7 @@ class DistributedTimelineCanvas(Static):
         self,
         timelines: dict[int, dict[str, list[int]]],
         active_rank: int | None = None,
+        markers_by_rank: Mapping[int, Sequence[TimelineMarker]] | None = None,
     ) -> None:
         if not timelines:
             self.render_placeholder(
@@ -130,6 +133,13 @@ class DistributedTimelineCanvas(Static):
                 f"gap_latest={gap_latest:.1f}MB"
             )
             lines.append(f"    [{self._generate_sparkline(alloc_mb)}]")
+            rank_markers = (
+                list(markers_by_rank.get(rank, [])) if markers_by_rank else []
+            )
+            if rank_markers:
+                lines.append(
+                    f"    markers: {self._format_marker_summary(rank_markers)}"
+                )
 
         if len(ordered) > self.max_ranks:
             lines.append(
@@ -166,3 +176,26 @@ class DistributedTimelineCanvas(Static):
             ratio = min(max(value / max_value, 0.0), 1.0)
             rendered.append(palette[int(ratio * max_index)])
         return "".join(rendered)
+
+    def _format_marker_summary(self, markers: Sequence[TimelineMarker]) -> str:
+        rendered = []
+        for marker in markers[:3]:
+            rendered.append(f"{self._marker_token(marker)} {self._short_label(marker)}")
+        if len(markers) > 3:
+            rendered.append(f"+{len(markers) - 3} more")
+        return " | ".join(rendered)
+
+    def _marker_token(self, marker: TimelineMarker) -> str:
+        if marker.severity == "critical":
+            return "!"
+        if marker.severity == "warning":
+            return "~"
+        if marker.is_interval:
+            return "="
+        return "i"
+
+    def _short_label(self, marker: TimelineMarker) -> str:
+        label = marker.label.strip() or marker.kind
+        if len(label) <= 36:
+            return label
+        return f"{label[:33]}..."
