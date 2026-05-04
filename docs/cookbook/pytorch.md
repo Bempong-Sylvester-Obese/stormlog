@@ -63,6 +63,183 @@ If `torch.cuda.is_available()` is `False` on a GPU host, fix the PyTorch build
 before continuing. The [Installation Guide](../installation.md) and
 [GPU Setup Guide](../gpu_setup.md) are the right references there.
 
+## Recipe: validate a real L4 training run and pull back the artifacts
+
+This recipe was validated from a source checkout against a JarvisLabs L4
+container using `examples.scenarios.wandb_training_smoke` in `wandb offline`
+mode.
+
+Use it when you need one short real training run that proves:
+
+- CUDA training is actually happening
+- Stormlog writes a bounded sink and summary bundle during training
+- the downloaded artifacts can be inspected with both `gpumemprof analyze` and
+  the TUI Diagnostics tab
+- structured `phase_enter` / `phase_exit` telemetry is present in a real
+  workload-backed capture
+
+### 1. Resume the paused L4 instance and record the new machine id
+
+```bash
+jl resume <paused-machine-id> --yes --json
+```
+
+Resume can return a new `machine_id`. Use the new id for the rest of the flow.
+
+### 2. Verify CUDA on the resumed host
+
+Use the Jarvis SSH key that is registered with your account:
+
+```bash
+ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no root@<public-ip> \
+  'python3 - <<'"'"'PY'"'"'
+import torch
+print("torch", torch.__version__)
+print("cuda_available", torch.cuda.is_available())
+print("device_name", torch.cuda.get_device_name(0) if torch.cuda.is_available() else None)
+PY'
+```
+
+Success signal:
+
+- `cuda_available True`
+- the expected GPU name prints, for example `NVIDIA L4`
+
+### 3. Sync the current checkout to the instance
+
+```bash
+rsync -az --delete \
+  --exclude '.git' \
+  --exclude '.venv*' \
+  --exclude '.mypy_cache' \
+  --exclude '.pytest_cache' \
+  --exclude '.ruff_cache' \
+  --exclude '.coverage' \
+  --exclude '__pycache__' \
+  --exclude 'artifacts' \
+  --exclude 'wandb' \
+  --exclude 'docs/_build' \
+  -e 'ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no' \
+  ./ root@<public-ip>:/home/gpu-memory-profiler/
+```
+
+This keeps the remote run pinned to the exact local branch state, including any
+uncommitted scenario or docs changes you are qualifying.
+
+### 4. Create a small project venv on the instance
+
+```bash
+ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no root@<public-ip> \
+  'cd /home/gpu-memory-profiler && \
+   python3 -m venv --system-site-packages .venv && \
+   .venv/bin/pip install -U pip && \
+   .venv/bin/pip install -e ".[wandb,tui]"'
+```
+
+The `--system-site-packages` flag reuses the template's CUDA-backed PyTorch
+install instead of replacing it.
+
+### 5. Launch the bounded CUDA training run
+
+```bash
+ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no root@<public-ip> \
+  'cd /home/gpu-memory-profiler && \
+   mkdir -p artifacts/jarvis_wandb_training_smoke && \
+   .venv/bin/python -m examples.scenarios.wandb_training_smoke \
+     --device cuda \
+     --epochs 2 \
+     --batch-size 128 \
+     --train-samples 4096 \
+     --val-samples 1024 \
+     --num-workers 2 \
+     --interval 0.1 \
+     --output-dir artifacts/jarvis_wandb_training_smoke \
+     --wandb-project stormlog-smoke \
+     --wandb-name jarvis-wandb-training-smoke \
+     --wandb-mode offline \
+     --wandb-log-artifacts \
+     2>&1 | tee artifacts/jarvis_wandb_training_smoke/run.log'
+```
+
+Success signal:
+
+- the logs print `Device: cuda`
+- epoch metrics advance, for example:
+  `Epoch 1/2 ...`
+  `Epoch 2/2 ...`
+- the final lines print both:
+  `Summary: .../training_summary.json`
+  `Telemetry sink: .../telemetry_sink`
+
+### 6. Confirm the remote artifact set
+
+```bash
+ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no root@<public-ip> \
+  'cd /home/gpu-memory-profiler && \
+   find artifacts/jarvis_wandb_training_smoke -maxdepth 2 -type f | sort'
+```
+
+Expected files:
+
+- `artifacts/jarvis_wandb_training_smoke/run.log`
+- `artifacts/jarvis_wandb_training_smoke/training_summary.json`
+- `artifacts/jarvis_wandb_training_smoke/stormlog_tracking_dashboard.html`
+- `artifacts/jarvis_wandb_training_smoke/telemetry_sink/manifest.json`
+- `artifacts/jarvis_wandb_training_smoke/telemetry_sink/segment-000001.jsonl`
+
+If you want to confirm that structured phase telemetry was recorded in this real
+training run:
+
+```bash
+ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no root@<public-ip> \
+  'cd /home/gpu-memory-profiler && python3 - <<'"'"'PY'"'"'
+from pathlib import Path
+import json
+root = Path("artifacts/jarvis_wandb_training_smoke/telemetry_sink")
+count = 0
+for path in sorted(root.rglob("*.jsonl")):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        payload = json.loads(line)
+        event_type = payload.get("event_type") or payload.get("type")
+        if str(event_type).startswith("phase_"):
+            count += 1
+print("phase_records", count)
+PY'
+```
+
+The validated L4 run produced hundreds of phase boundary records.
+
+### 7. Pull the run back to your workstation and analyze it locally
+
+```bash
+rsync -az \
+  -e 'ssh -i ~/.ssh/<jarvis-key> -o StrictHostKeyChecking=no' \
+  root@<public-ip>:/home/gpu-memory-profiler/artifacts/jarvis_wandb_training_smoke/ \
+  ~/Desktop/jarvis_wandb_training_smoke/
+
+gpumemprof analyze \
+  ~/Desktop/jarvis_wandb_training_smoke/telemetry_sink \
+  --format txt \
+  --output ~/Desktop/jarvis_wandb_training_smoke/analysis.txt
+```
+
+Success signal:
+
+- `analyze` selects a completed session from the sink
+- `analysis.txt` is written beside the downloaded artifacts
+
+### 8. Load the same sink in the TUI Diagnostics tab
+
+1. Start the TUI from the same source checkout.
+2. Open `Diagnostics`.
+3. Enter `~/Desktop/jarvis_wandb_training_smoke/telemetry_sink`.
+4. Click `Load Artifacts`.
+5. Click `Refresh`.
+6. If more than one session appears, keep the newest `completed` session.
+
+This is the same artifact set the CLI analyzed. Do not point the TUI at a
+different directory if you want a faithful reproduction of the run.
+
 ## Recipe: capture a bounded CLI artifact window
 
 ```bash

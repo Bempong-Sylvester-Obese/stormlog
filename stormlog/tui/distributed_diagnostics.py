@@ -17,6 +17,23 @@ from stormlog.collective_attribution import (
     resolve_collective_attribution_config,
 )
 from stormlog.gap_analysis import analyze_hidden_memory_gaps
+
+try:
+    from stormlog.phases import (
+        PhaseAttribution,
+        PhaseReplayIndex,
+        summarize_phase_attribution,
+    )
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseAttribution = Any  # type: ignore[assignment,misc]
+    PhaseReplayIndex = Any  # type: ignore[assignment,misc]
+
+    def summarize_phase_attribution(
+        attribution: PhaseAttribution | None,
+    ) -> str | None:
+        return None
+
+
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -117,6 +134,7 @@ class RankDiagnosticsRow:
     has_anomaly: bool
     first_anomaly_timestamp_ns: int | None = None
     first_anomaly_signal: str | None = None
+    first_anomaly_phase_path: str | None = None
 
 
 @dataclass
@@ -131,6 +149,7 @@ class AnomalyIndicator:
     details: str
     confidence: float | None = None
     reason_codes: list[str] = field(default_factory=list)
+    phase_path: str | None = None
 
 
 @dataclass
@@ -155,6 +174,7 @@ class _AnomalyCandidate:
     details: str
     confidence: float | None = None
     reason_codes: list[str] = field(default_factory=list)
+    phase_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -671,9 +691,17 @@ def build_distributed_model(
         )
 
     grouped: dict[int, list[TelemetryCompatibleEvent]] = {}
+    sample_grouped: dict[int, list[TelemetryCompatibleEvent]] = {}
     world_sizes: set[int] = set()
+    phase_resolver = (
+        PhaseReplayIndex.from_events(events)
+        if hasattr(PhaseReplayIndex, "from_events")
+        else None
+    )
     for event in sorted(events, key=lambda item: item.timestamp_ns):
         grouped.setdefault(event.rank, []).append(event)
+        if _is_sample_event(event):
+            sample_grouped.setdefault(event.rank, []).append(event)
         if event.world_size > 0:
             world_sizes.add(event.world_size)
 
@@ -710,10 +738,14 @@ def build_distributed_model(
     rows: list[RankDiagnosticsRow] = []
     timelines: dict[int, dict[str, list[int]]] = {}
     candidates: list[_AnomalyCandidate] = []
-    collective_by_rank = _group_collective_attribution_by_rank(events)
+    collective_by_rank = _group_collective_attribution_by_rank(
+        events,
+        phase_resolver=phase_resolver,
+    )
 
     for rank in filtered_expected:
         rank_events = grouped.get(rank, [])
+        rank_samples = sample_grouped.get(rank, [])
         if not rank_events:
             rows.append(
                 RankDiagnosticsRow(
@@ -732,17 +764,19 @@ def build_distributed_model(
         row, rank_candidates = _build_rank_row(
             rank,
             rank_events,
+            rank_samples,
             collective_by_rank.get(rank, []),
+            phase_resolver=phase_resolver,
         )
         rows.append(row)
         candidates.extend(rank_candidates)
         timelines[rank] = {
-            "timestamps_ns": [event.timestamp_ns for event in rank_events],
-            "allocated": [event.allocator_allocated_bytes for event in rank_events],
-            "reserved": [event.allocator_reserved_bytes for event in rank_events],
+            "timestamps_ns": [event.timestamp_ns for event in rank_samples],
+            "allocated": [event.allocator_allocated_bytes for event in rank_samples],
+            "reserved": [event.allocator_reserved_bytes for event in rank_samples],
             "gap": [
                 event.device_used_bytes - event.allocator_reserved_bytes
-                for event in rank_events
+                for event in rank_samples
             ],
         }
 
@@ -760,20 +794,27 @@ def build_distributed_model(
 def _build_rank_row(
     rank: int,
     rank_events: Sequence[TelemetryCompatibleEvent],
+    rank_samples: Sequence[TelemetryCompatibleEvent],
     collective_attribution: list[CollectiveAttributionResult],
+    *,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> tuple[RankDiagnosticsRow, list[_AnomalyCandidate]]:
-    first_event = rank_events[0]
-    last_event = rank_events[-1]
+    first_event = rank_samples[0] if rank_samples else None
+    last_event = rank_samples[-1] if rank_samples else None
 
     allocated_delta = (
         last_event.allocator_allocated_bytes - first_event.allocator_allocated_bytes
+        if first_event is not None and last_event is not None
+        else 0
     )
     reserved_delta = (
         last_event.allocator_reserved_bytes - first_event.allocator_reserved_bytes
+        if first_event is not None and last_event is not None
+        else 0
     )
     gaps = [
         event.device_used_bytes - event.allocator_reserved_bytes
-        for event in rank_events
+        for event in rank_samples
     ]
     gap_latest = gaps[-1] if gaps else 0
     gap_peak_abs = max((abs(value) for value in gaps), default=0)
@@ -781,7 +822,9 @@ def _build_rank_row(
     candidates = _derive_rank_anomaly_candidates(
         rank,
         rank_events,
+        rank_samples,
         collective_attribution,
+        phase_resolver=phase_resolver,
     )
     earliest = (
         min(candidates, key=lambda candidate: candidate.timestamp_ns)
@@ -791,7 +834,7 @@ def _build_rank_row(
     row = RankDiagnosticsRow(
         rank=rank,
         availability="present",
-        samples=len(rank_events),
+        samples=len(rank_samples),
         allocated_delta_bytes=allocated_delta,
         reserved_delta_bytes=reserved_delta,
         hidden_gap_latest_bytes=gap_latest,
@@ -799,6 +842,7 @@ def _build_rank_row(
         has_anomaly=bool(candidates),
         first_anomaly_timestamp_ns=earliest.timestamp_ns if earliest else None,
         first_anomaly_signal=earliest.signal if earliest else None,
+        first_anomaly_phase_path=earliest.phase_path if earliest else None,
     )
     return row, candidates
 
@@ -806,13 +850,22 @@ def _build_rank_row(
 def _derive_rank_anomaly_candidates(
     rank: int,
     rank_events: Sequence[TelemetryCompatibleEvent],
+    rank_samples: Sequence[TelemetryCompatibleEvent],
     collective_attribution: list[CollectiveAttributionResult],
+    *,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> list[_AnomalyCandidate]:
     candidates: list[_AnomalyCandidate] = []
     first_gap_breach_ts: int | None = None
 
     for event in rank_events:
         if event.event_type in _ALERT_TYPES:
+            phase_path = (
+                summarize_phase_attribution(phase_resolver.resolve_for_event(event))
+                if phase_resolver is not None
+                and hasattr(phase_resolver, "resolve_for_event")
+                else None
+            )
             severity = _ALERT_SEVERITY.get(event.event_type, "warning")
             candidates.append(
                 _AnomalyCandidate(
@@ -821,15 +874,23 @@ def _derive_rank_anomaly_candidates(
                     timestamp_ns=event.timestamp_ns,
                     signal=f"alert:{event.event_type}",
                     details=event.context or "Alert event",
+                    phase_path=phase_path,
                 )
             )
 
+    for event in rank_samples:
         if event.device_total_bytes and event.device_total_bytes > 0:
             gap_value = event.device_used_bytes - event.allocator_reserved_bytes
             gap_ratio = abs(gap_value) / event.device_total_bytes
             if gap_ratio >= GAP_RATIO_THRESHOLD:
                 if first_gap_breach_ts is None:
                     first_gap_breach_ts = event.timestamp_ns
+                phase_path = (
+                    summarize_phase_attribution(phase_resolver.resolve_for_event(event))
+                    if phase_resolver is not None
+                    and hasattr(phase_resolver, "resolve_for_event")
+                    else None
+                )
                 candidates.append(
                     _AnomalyCandidate(
                         rank=rank,
@@ -837,6 +898,7 @@ def _derive_rank_anomaly_candidates(
                         timestamp_ns=event.timestamp_ns,
                         signal="gap_ratio_breach",
                         details=f"gap ratio {gap_ratio:.1%} exceeded threshold",
+                        phase_path=phase_path,
                     )
                 )
 
@@ -845,16 +907,23 @@ def _derive_rank_anomaly_candidates(
         thresholds=_GAP_THRESHOLDS,
         format_memory=format_bytes,
         remediation_by_classification=_EMPTY_REMEDIATION,
+        phase_resolver=phase_resolver,
     )
     for finding in gap_findings:
-        fallback_ts = first_gap_breach_ts or rank_events[0].timestamp_ns
+        fallback_ts = first_gap_breach_ts or (
+            rank_samples[0].timestamp_ns
+            if rank_samples
+            else rank_events[0].timestamp_ns
+        )
+        phase_path = summarize_phase_attribution(finding.phase_attribution)
         candidates.append(
             _AnomalyCandidate(
                 rank=rank,
                 severity=finding.severity,
-                timestamp_ns=fallback_ts,
+                timestamp_ns=finding.evidence_timestamp_ns or fallback_ts,
                 signal=f"gap:{finding.classification}",
                 details=finding.description,
+                phase_path=phase_path,
             )
         )
 
@@ -862,7 +931,15 @@ def _derive_rank_anomaly_candidates(
         confidence = round(float(attribution.confidence), 3)
         reason_codes = sorted(set(attribution.reason_codes))
         reason_summary = ", ".join(reason_codes) if reason_codes else "no reason codes"
-        attribution_ts = max(attribution.interval_start_ns, rank_events[0].timestamp_ns)
+        attribution_ts = max(
+            attribution.interval_start_ns,
+            (
+                rank_samples[0].timestamp_ns
+                if rank_samples
+                else rank_events[0].timestamp_ns
+            ),
+        )
+        phase_path = summarize_phase_attribution(attribution.phase_attribution)
         candidates.append(
             _AnomalyCandidate(
                 rank=rank,
@@ -875,19 +952,27 @@ def _derive_rank_anomaly_candidates(
                 ),
                 confidence=confidence,
                 reason_codes=reason_codes,
+                phase_path=phase_path,
             )
         )
 
     return candidates
 
 
+def _is_sample_event(event: TelemetryCompatibleEvent) -> bool:
+    return str(event.event_type).strip().lower() == "sample"
+
+
 def _group_collective_attribution_by_rank(
     events: Sequence[TelemetryCompatibleEvent],
+    *,
+    phase_resolver: PhaseReplayIndex | None = None,
 ) -> dict[int, list[CollectiveAttributionResult]]:
     grouped: dict[int, list[CollectiveAttributionResult]] = {}
     attributions = attribute_collective_memory(
         events=cast(Sequence[TelemetryEventV2], events),
         config=_COLLECTIVE_ATTRIBUTION_CONFIG,
+        phase_resolver=phase_resolver,
     )
     for attribution in attributions:
         grouped.setdefault(attribution.rank, []).append(attribution)
@@ -924,9 +1009,10 @@ def _build_first_cause_indicators(
             severity=earliest.severity,
             timestamp_ns=earliest.timestamp_ns,
             signal=earliest.signal,
-            details=earliest.details,
+            details=_format_indicator_details(earliest),
             confidence=earliest.confidence,
             reason_codes=list(earliest.reason_codes),
+            phase_path=earliest.phase_path,
         ),
         AnomalyIndicator(
             kind="most_severe",
@@ -934,11 +1020,18 @@ def _build_first_cause_indicators(
             severity=most_severe.severity,
             timestamp_ns=most_severe.timestamp_ns,
             signal=most_severe.signal,
-            details=most_severe.details,
+            details=_format_indicator_details(most_severe),
             confidence=most_severe.confidence,
             reason_codes=list(most_severe.reason_codes),
+            phase_path=most_severe.phase_path,
         ),
     ]
+
+
+def _format_indicator_details(candidate: _AnomalyCandidate) -> str:
+    if not candidate.phase_path:
+        return candidate.details
+    return f"{candidate.details} Phase: {candidate.phase_path}."
 
 
 def _load_artifact_file(

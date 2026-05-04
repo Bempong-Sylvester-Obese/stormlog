@@ -2,13 +2,27 @@
 
 from __future__ import annotations
 
+from typing import Any, cast
+
 import pytest
 
 from stormlog.collective_attribution import (
     attribute_collective_memory,
     resolve_collective_attribution_config,
 )
-from stormlog.telemetry import SCHEMA_VERSION_V2, TelemetryEventV2
+
+PhaseReplayIndex: Any
+try:
+    from stormlog.phases import PhaseReplayIndex as _PhaseReplayIndex
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    PhaseReplayIndex = None
+else:
+    PhaseReplayIndex = _PhaseReplayIndex
+from stormlog.telemetry import (
+    SCHEMA_VERSION_V2,
+    TelemetryEventV2,
+    telemetry_event_from_record,
+)
 
 BASE_NS = 1_700_000_000_000_000_000
 STEP_NS = 100_000_000
@@ -101,6 +115,57 @@ def _build_sync_spike_events(
                 )
 
     return events
+
+
+def _make_phase_boundary_event(
+    *,
+    session_id: str,
+    timestamp_ns: int,
+    rank: int,
+    world_size: int,
+    action: str,
+    sequence: int,
+    scope_id: str,
+) -> object:
+    return telemetry_event_from_record(
+        {
+            "schema_version": 3,
+            "session_id": session_id,
+            "timestamp_ns": timestamp_ns,
+            "event_type": f"phase_{action}",
+            "collector": "stormlog.cuda_tracker",
+            "sampling_interval_ms": 100,
+            "pid": 1,
+            "host": "test",
+            "device_id": 0,
+            "allocator_allocated_bytes": 2_000_000_000,
+            "allocator_reserved_bytes": 2_000_000_000,
+            "allocator_active_bytes": None,
+            "allocator_inactive_bytes": None,
+            "allocator_change_bytes": 0,
+            "device_used_bytes": 2_000_000_000,
+            "device_free_bytes": DEVICE_TOTAL_BYTES - 2_000_000_000,
+            "device_total_bytes": DEVICE_TOTAL_BYTES,
+            "context": f"Phase {action}ed: communication",
+            "job_id": "phase-job",
+            "rank": rank,
+            "local_rank": rank,
+            "world_size": world_size,
+            "metadata": {
+                "phase_scope": {
+                    "action": action,
+                    "name": "communication",
+                    "path": ["train", "communication"],
+                    "depth": 2,
+                    "scope_id": scope_id,
+                    "parent_scope_id": "parent-train",
+                    "thread_id": 1,
+                    "thread_name": "MainThread",
+                    "sequence": sequence,
+                }
+            },
+        }
+    )
 
 
 def test_resolve_collective_config_supports_preset_and_overrides() -> None:
@@ -228,6 +293,68 @@ def test_collective_attribution_keeps_marker_evidence_rank_local() -> None:
     assert "marker_collective_token" in rank0.reason_codes
     assert "marker_collective_token" not in rank1.reason_codes
     assert "weak_marker_signal" in rank1.reason_codes
+
+
+def test_collective_attribution_includes_phase_attribution_when_available() -> None:
+    if PhaseReplayIndex is None:
+        pytest.skip("stormlog.phases is not available in this slice")
+
+    session_id = "session-collective-phase"
+    events: list[Any] = []
+    for rank in (0, 1):
+        events.append(
+            _make_phase_boundary_event(
+                session_id=session_id,
+                timestamp_ns=BASE_NS - 1_000_000 + rank * 100_000,
+                rank=rank,
+                world_size=2,
+                action="enter",
+                sequence=rank + 1,
+                scope_id=f"phase-{rank}",
+            )
+        )
+    events.extend(_build_sync_spike_events(world_size=2, with_markers=True))
+    canonical_events: list[Any] = []
+    for event in events:
+        if isinstance(event, TelemetryEventV2):
+            canonical_events.append(
+                telemetry_event_from_record(
+                    {
+                        **event.__dict__,
+                        "schema_version": 3,
+                        "session_id": session_id,
+                    }
+                )
+            )
+        else:
+            canonical_events.append(event)
+    for rank in (0, 1):
+        events.append(
+            _make_phase_boundary_event(
+                session_id=session_id,
+                timestamp_ns=BASE_NS + 12 * STEP_NS + rank * 100_000,
+                rank=rank,
+                world_size=2,
+                action="exit",
+                sequence=rank + 3,
+                scope_id=f"phase-{rank}",
+            )
+        )
+    canonical_events.extend(events[-2:])
+
+    resolver = PhaseReplayIndex.from_events(canonical_events)
+    results = attribute_collective_memory(
+        cast(list[TelemetryEventV2], canonical_events),
+        phase_resolver=resolver,
+    )
+
+    assert results
+    assert all(result.phase_attribution is not None for result in results)
+    assert all(
+        result.phase_attribution
+        and result.phase_attribution.phase_path == "train / communication"
+        for result in results
+    )
 
 
 def test_collective_attribution_accepts_uppercase_sample_event_type() -> None:

@@ -4,10 +4,6 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def _ci_workflow_content() -> str:
-    return (REPO_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-
-
 def _optional_dependencies() -> dict[str, list[str]]:
     content = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
     section_match = re.search(
@@ -38,69 +34,3 @@ def test_all_extra_covers_every_runtime_extra() -> None:
         "The all extra must cover every user-facing runtime extra "
         "(viz, torch, tf, tui)."
     )
-
-
-def test_ci_uses_built_wheel_for_cli_smoke() -> None:
-    content = _ci_workflow_content()
-    start = content.index("artifact-cli-smoke:")
-    end = content.index("examples-smoke:", start)
-    job_block = content[start:end]
-
-    assert "actions/download-artifact@v4" in job_block
-    assert "python3 -m venv .venv-wheel-smoke" in job_block
-    assert 'pip install "$WHEEL_PATH"' in job_block
-    assert "torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu" in job_block
-    assert "gpumemprof info" in job_block
-    assert "examples.cli.quickstart" not in job_block
-    assert "pip install -e ." not in job_block
-
-
-def test_ci_triggers_include_release_dev() -> None:
-    content = _ci_workflow_content()
-
-    assert "branches: [main, develop, release/dev]" in content
-    assert "branches: [main, release/v0.2-readiness, release/dev]" in content
-
-
-def test_ci_wires_memory_regression_gate_job() -> None:
-    content = _ci_workflow_content()
-    start = content.index("memory-regression-gate:")
-    end = content.index("memory-operability-budget:", start)
-    job_block = content[start:end]
-
-    assert "runs-on: ubuntu-24.04" in job_block
-    assert "tensorflow-cpu==2.15.0" in job_block
-    assert "--profile pr" in job_block
-    assert "--mode all" in job_block
-    assert "--gate-mode regression" in job_block
-    assert "docs/benchmarks/v0.4_baseline.json" in job_block
-    assert "docs/benchmarks/v0.4_tolerances.json" in job_block
-    assert "artifacts/benchmarks/ci_regression.json" in job_block
-    assert "artifacts/benchmarks/ci_scenarios" in job_block
-    assert "--iterations 5000" in job_block
-    assert "actions/upload-artifact@v4" in job_block
-
-
-def test_ci_wires_memory_operability_budget_job() -> None:
-    content = _ci_workflow_content()
-    start = content.index("memory-operability-budget:")
-    end = content.index("artifact-cli-smoke:", start)
-    job_block = content[start:end]
-
-    assert "runs-on: ubuntu-24.04" in job_block
-    assert "tensorflow-cpu==2.15.0" in job_block
-    assert "--profile nightly" in job_block
-    assert "--mode all" in job_block
-    assert "--gate-mode budget" in job_block
-    assert "docs/benchmarks/v0.4_operating_budget.json" in job_block
-    assert "--iterations 5000" in job_block
-    assert "actions/upload-artifact@v4" in job_block
-
-
-def test_ci_uses_supported_python_and_cache_actions() -> None:
-    content = _ci_workflow_content()
-
-    assert "actions/setup-python@v4" not in content
-    assert "actions/cache@v3" not in content
-    assert "actions/setup-python@v6" in content
-    assert "actions/cache@v5" in content

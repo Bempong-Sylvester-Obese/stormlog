@@ -13,6 +13,10 @@ from typing import Any, Optional, Union, cast
 
 import psutil
 
+try:
+    from .phases import summarize_phase_resolution
+except ImportError:  # pragma: no cover - phase package may land in another slice
+    summarize_phase_resolution = None  # type: ignore[assignment]
 from .telemetry_sink import TelemetrySinkConfig
 from .utils import (
     _detect_gpu_hardware,
@@ -21,6 +25,15 @@ from .utils import (
     get_system_info,
     memory_summary,
 )
+from .wandb_integration import (
+    add_wandb_arguments,
+    ensure_wandb_available,
+    export_diagnose_bundle_to_wandb,
+    export_tracking_run_to_wandb,
+    wandb_config_from_namespace,
+)
+
+summarize_phase_resolution = cast(Any, summarize_phase_resolution)
 
 try:
     import torch as _torch
@@ -136,6 +149,22 @@ def _build_telemetry_sink_config(
         * 1024
         * 1024,
     )
+
+
+def _resolve_wandb_config_or_exit(args: argparse.Namespace) -> Any:
+    config = wandb_config_from_namespace(args)
+    if not config.enabled:
+        return config
+    try:
+        ensure_wandb_available(config)
+    except ImportError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        raise SystemExit(1) from exc
+    return config
+
+
+def _warn_wandb_export_failure(command_name: str, exc: Exception) -> None:
+    print(f"Warning: {command_name} W&B export skipped: {exc}", file=sys.stderr)
 
 
 def main() -> None:
@@ -329,6 +358,7 @@ Cookbook:
         default=512,
         help="Maximum retained telemetry sink size in MB (default: 512)",
     )
+    add_wandb_arguments(track_parser)
 
     # Analyze command
     analyze_parser = subparsers.add_parser("analyze", help="Analyze profiling results")
@@ -398,6 +428,7 @@ Cookbook:
         default=100000,
         help="Maximum CUDA allocator history entries to retain (default: 100000)",
     )
+    add_wandb_arguments(diagnose_parser)
 
     # Parse arguments
     args = parser.parse_args()
@@ -678,6 +709,7 @@ def cmd_track(args: argparse.Namespace) -> None:
     device = args.device
     duration = args.duration
     interval = args.interval
+    wandb_config = _resolve_wandb_config_or_exit(args)
     job_id = getattr(args, "job_id", None)
     rank = getattr(args, "rank", None)
     local_rank = getattr(args, "local_rank", None)
@@ -857,6 +889,22 @@ def cmd_track(args: argparse.Namespace) -> None:
         tracker.export_events(args.output, args.format)
         print(f"Events saved to: {args.output}")
 
+    if wandb_config.enabled:
+        try:
+            export_tracking_run_to_wandb(
+                wandb_config,
+                command_name="gpumemprof-track",
+                session_summary=tracker.get_session_summary(),
+                stats=stats,
+                events=tracker.get_events(),
+                output_path=args.output,
+                telemetry_sink_dir=getattr(args, "telemetry_sink_dir", None),
+                oom_dump_path=getattr(tracker, "last_oom_dump_path", None),
+            )
+            print("W&B export completed.")
+        except Exception as exc:
+            _warn_wandb_export_failure("gpumemprof track", exc)
+
 
 def _json_default(value: Any) -> Any:
     """Convert common non-JSON-native values to plain Python scalars."""
@@ -876,6 +924,34 @@ def _input_artifact_size_bytes(path: Path) -> int:
     return 0
 
 
+def _phase_summary_from_payload(payload: Any) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    phase_summary = payload.get("phase_summary")
+    if isinstance(phase_summary, dict):
+        summary_path = phase_summary.get("phase_path")
+        summary_source = phase_summary.get("source")
+        if isinstance(summary_path, str) and summary_path:
+            if summary_source == "heuristic":
+                return f"(likely) {summary_path}"
+            return summary_path
+    if summarize_phase_resolution is None:
+        return None  # type: ignore[unreachable]
+    phase_path = payload.get("phase_path")
+    phase_paths = payload.get("phase_paths")
+    normalized_phase_path = phase_path if isinstance(phase_path, str) else None
+    normalized_phase_paths = (
+        [str(path) for path in phase_paths if str(path)]
+        if isinstance(phase_paths, list)
+        else None
+    )
+    return summarize_phase_resolution(
+        phase_resolution=payload.get("phase_resolution"),
+        phase_path=normalized_phase_path,
+        phase_paths=normalized_phase_paths,
+    )
+
+
 def _build_analyze_summary(
     input_file: str, file_size_bytes: int, report: dict[str, Any]
 ) -> str:
@@ -891,6 +967,18 @@ def _build_analyze_summary(
 
     if "gap_analysis" in report:
         lines.append(f"Gap findings: {len(report['gap_analysis'])}")
+        if report["gap_analysis"]:
+            top_gap_phase = next(
+                (
+                    _phase_summary_from_payload(item.get("phase_attribution"))
+                    for item in report["gap_analysis"]
+                    if isinstance(item, dict)
+                    and _phase_summary_from_payload(item.get("phase_attribution"))
+                ),
+                None,
+            )
+            if top_gap_phase:
+                lines.append(f"Top gap phase: {top_gap_phase}")
 
     cross_rank_analysis = report.get("cross_rank_analysis")
     if isinstance(cross_rank_analysis, dict):
@@ -925,6 +1013,11 @@ def _build_analyze_summary(
                     f"delta={format_bytes(int(top_suspect['peak_delta_bytes']))}",
                 ]
             )
+            top_suspect_phase = _phase_summary_from_payload(
+                top_suspect.get("phase_attribution")
+            )
+            if top_suspect_phase:
+                lines.append(f"Suspect phase: {top_suspect_phase}")
         else:
             lines.append("No qualifying first-cause suspect identified.")
 
@@ -1139,6 +1232,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         print("Error: --native-history-max-entries must be > 0", file=sys.stderr)
         return 1
 
+    wandb_config = _resolve_wandb_config_or_exit(args)
     command_line = " ".join(sys.argv)
     (run_diagnose,) = _import_runtime_symbols(
         ".diagnose", ("run_diagnose",), "The diagnose command"
@@ -1190,6 +1284,17 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             print("Findings: no memory risk detected")
     except (OSError, json.JSONDecodeError):
         pass
+
+    if wandb_config.enabled:
+        try:
+            export_diagnose_bundle_to_wandb(
+                wandb_config,
+                command_name="gpumemprof-diagnose",
+                artifact_dir=artifact_dir,
+            )
+            print("W&B export completed.")
+        except Exception as exc:
+            _warn_wandb_export_failure("gpumemprof diagnose", exc)
 
     return int(exit_code)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from argparse import Namespace
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable, Iterator, cast
@@ -16,6 +17,7 @@ import stormlog.tensorflow.cli as tf_cli
 import stormlog.tensorflow.context_profiler as tf_context
 import stormlog.tensorflow.profiler as tf_profiler
 import stormlog.tensorflow.tracker as tf_tracker
+from stormlog.collective_attribution import CollectiveAttributionEvidence
 
 
 def test_tf_cmd_analyze_rejects_mismatched_timestamps(
@@ -148,6 +150,58 @@ def test_tf_memory_tracker_uses_detected_default_device(
     assert tracker.device == "/CPU:0"
     assert explicit_tracker.device == "/GPU:1"
     assert calls["count"] == 1
+
+
+def test_tf_analyzer_serializers_tolerate_missing_phase_attribution() -> None:
+    @dataclass
+    class _CompatGapFinding:
+        classification: str
+        severity: str
+        confidence: float
+        evidence: dict[str, Any]
+        description: str
+        remediation: list[str]
+        evidence_timestamp_ns: int | None = None
+
+    @dataclass
+    class _CompatCollectiveAttribution:
+        rank: int
+        interval_start_ns: int
+        interval_end_ns: int
+        classification: str
+        confidence: float
+        reason_codes: list[str]
+        evidence: CollectiveAttributionEvidence | None = None
+
+    gap_payload = tf_analyzer._serialize_gap_finding(
+        cast(
+            Any,
+            _CompatGapFinding(
+                classification="persistent_drift",
+                severity="warning",
+                confidence=0.8,
+                evidence={"gap": 1},
+                description="desc",
+                remediation=["fix"],
+            ),
+        )
+    )
+    collective_payload = tf_analyzer._serialize_collective_attribution(
+        cast(
+            Any,
+            _CompatCollectiveAttribution(
+                rank=0,
+                interval_start_ns=1,
+                interval_end_ns=2,
+                classification="collective",
+                confidence=0.7,
+                reason_codes=["marker"],
+            ),
+        )
+    )
+
+    assert gap_payload["phase_attribution"] is None
+    assert collective_payload["phase_attribution"] is None
 
 
 def test_tf_profile_function_decorator_uses_custom_profile_name() -> None:

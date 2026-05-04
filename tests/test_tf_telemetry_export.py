@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import json
+import sys
 import time
 from argparse import Namespace
 from pathlib import Path
-from typing import Iterator, cast
+from typing import Any, Iterator, cast
 
 import pytest
 
 import stormlog.tensorflow.cli as tf_cli
 import stormlog.tensorflow.tracker as tf_tracker
 from stormlog.collector_health import COLLECTOR_HEALTH_UNHEALTHY
+from stormlog.phases import parse_phase_boundary
+from stormlog.session import create_session_summary
 from stormlog.telemetry import validate_telemetry_record
 from stormlog.telemetry_sink import TelemetrySinkConfig
 
@@ -67,6 +70,57 @@ class _FailingSink:
         self.close_calls += 1
         if "close" in self.fail_on:
             raise OSError("disk full")
+
+
+def test_tf_main_parses_wandb_track_flags(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    def _fake_cmd_track(args: object) -> int:
+        captured["args"] = args
+        return 0
+
+    monkeypatch.setattr(tf_cli, "cmd_track", _fake_cmd_track)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "tfmemprof",
+            "track",
+            "--output",
+            "tf_track.json",
+            "--wandb",
+            "--wandb-project",
+            "stormlog-tests",
+            "--wandb-entity",
+            "team",
+            "--wandb-mode",
+            "offline",
+            "--wandb-run-id",
+            "run-123",
+            "--wandb-name",
+            "tf smoke",
+            "--wandb-group",
+            "job-42",
+            "--wandb-job-type",
+            "tf-track",
+            "--wandb-log-artifacts",
+            "--wandb-log-attribution",
+        ],
+    )
+
+    assert tf_cli.main() == 0
+
+    args = captured["args"]
+    assert args.wandb is True
+    assert args.wandb_project == "stormlog-tests"
+    assert args.wandb_entity == "team"
+    assert args.wandb_mode == "offline"
+    assert args.wandb_run_id == "run-123"
+    assert args.wandb_name == "tf smoke"
+    assert args.wandb_group == "job-42"
+    assert args.wandb_job_type == "tf-track"
+    assert args.wandb_log_artifacts is True
+    assert args.wandb_log_attribution is True
 
 
 def test_tf_tracker_emits_v3_event_records(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,6 +283,104 @@ def test_tf_cli_track_passes_distributed_identity_to_tracker(
     assert created["rank"] == 3
     assert created["local_rank"] == 1
     assert created["world_size"] == 8
+
+
+def test_tf_cli_track_exports_results_to_wandb(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_cli, "TF_AVAILABLE", True)
+    exported: dict[str, Any] = {}
+    wandb_config = Namespace(enabled=True)
+    session_summary = create_session_summary(
+        source="stormlog.tensorflow.memory_tracker",
+        session_id="tf-session-12345678",
+        job_id="job-42",
+    )
+
+    class _FakeResult:
+        peak_memory = 2.0
+        average_memory = 2.0
+        duration = 1.0
+        memory_usage = [2.0]
+        timestamps = [1700000000.0]
+        alerts_triggered: list[object] = []
+        events = [{"event_type": "warning", "context": "memory high"}]
+
+    class _FakeTracker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            _ = args, kwargs
+
+        def add_alert_callback(self, callback: object) -> None:
+            _ = callback
+
+        def start_tracking(self) -> None:
+            return None
+
+        def get_current_memory(self) -> float:
+            return 2.0
+
+        def get_statistics(self) -> dict[str, object]:
+            return {
+                "current_memory_mb": 2.0,
+                "collector_health_status": "healthy",
+                "total_events": 1,
+            }
+
+        def get_session_summary(self) -> object:
+            return session_summary
+
+        def stop_tracking(self) -> "_FakeResult":
+            return _FakeResult()
+
+    monkeypatch.setattr(tf_cli, "MemoryTracker", _FakeTracker)
+    monkeypatch.setattr(
+        tf_cli.time, "sleep", lambda _: (_ for _ in ()).throw(KeyboardInterrupt)
+    )
+    monkeypatch.setattr(
+        tf_cli, "wandb_config_from_namespace", lambda args: wandb_config
+    )
+    monkeypatch.setattr(
+        tf_cli,
+        "ensure_wandb_available",
+        lambda config: exported.setdefault("ensured", config),
+    )
+    monkeypatch.setattr(
+        tf_cli,
+        "export_tracking_run_to_wandb",
+        lambda config, **kwargs: exported.update(config=config, kwargs=kwargs),
+    )
+
+    exit_code = tf_cli.cmd_track(
+        Namespace(
+            interval=0.25,
+            threshold=4000,
+            device="/GPU:0",
+            output=None,
+            job_id="job-42",
+            rank=1,
+            local_rank=0,
+            world_size=2,
+            telemetry_sink_dir="tf_sink",
+            telemetry_flush_seconds=2.0,
+            telemetry_rollover_mb=64,
+            telemetry_retention_files=8,
+            telemetry_retention_total_mb=512,
+            wandb=True,
+        )
+    )
+
+    assert exit_code == 0
+    assert exported["ensured"] is wandb_config
+    assert exported["config"] is wandb_config
+    assert exported["kwargs"]["command_name"] == "tfmemprof-track"
+    assert exported["kwargs"]["session_summary"] == session_summary
+    assert exported["kwargs"]["stats"]["total_events"] == 1
+    assert exported["kwargs"]["events"] == [
+        {"event_type": "warning", "context": "memory high"}
+    ]
+    assert exported["kwargs"]["output_path"] is None
+    assert exported["kwargs"]["telemetry_sink_dir"] == "tf_sink"
+    assert exported["kwargs"]["oom_dump_path"] is None
 
 
 def test_tf_cli_track_passes_telemetry_sink_config_to_tracker(
@@ -603,7 +755,42 @@ def test_tf_tracker_recreates_sink_on_restart(
     assert tracker._telemetry_sink is None
 
     tracker.start_tracking()
-    second_sink = tracker._telemetry_sink
+    second_sink = cast(object, tracker._telemetry_sink)
 
     assert second_sink is not None
     assert second_sink is not first_sink
+
+
+def test_tf_tracker_emits_structured_phase_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(tf_tracker, "TF_AVAILABLE", True)
+    monkeypatch.setattr(tf_tracker.threading, "Thread", _NoOpThread)
+
+    tracker = tf_tracker.MemoryTracker(
+        sampling_interval=0.01,
+        device="/GPU:0",
+        enable_logging=False,
+    )
+
+    tracker.start_tracking()
+    with tracker.phase("train_step", metadata={"epoch": 2}) as handle:
+        assert handle.phase_path == "train_step"
+    result = tracker.stop_tracking()
+
+    phase_events = [
+        event for event in result.events if event["event_type"].startswith("phase_")
+    ]
+    assert [event["event_type"] for event in phase_events] == [
+        "phase_enter",
+        "phase_exit",
+    ]
+
+    enter_scope = parse_phase_boundary(phase_events[0])
+    exit_scope = parse_phase_boundary(phase_events[1])
+    assert enter_scope is not None
+    assert exit_scope is not None
+    assert enter_scope.path == ("train_step",)
+    assert enter_scope.attributes == {"epoch": 2}
+    assert exit_scope.scope_id == enter_scope.scope_id
+    assert exit_scope.path == enter_scope.path

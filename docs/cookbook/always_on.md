@@ -52,6 +52,42 @@ What this gives you:
 - rollover and pruning under a bounded artifact budget
 - `collector_degraded` and `collector_recovered` events instead of synthetic zero samples
 
+## Add workload phases when timestamps are not enough
+
+Use structured phases when you want long-running artifacts to answer what part
+of the workload was active when a hidden-memory anomaly appeared.
+
+```python
+from stormlog import MemoryTracker
+
+tracker = MemoryTracker(
+    sampling_interval=0.5,
+    # telemetry_sink_config=...,  # Optional: configure the append-only sink.
+)
+
+tracker.start_tracking()
+
+for epoch in range(num_epochs):
+    with tracker.phase("train", metadata={"epoch": epoch}):
+        with tracker.phase("load_batch"):
+            batch = next(loader)
+        with tracker.phase("forward"):
+            loss = model(batch).sum()
+        with tracker.phase("backward"):
+            loss.backward()
+        with tracker.phase("optimizer_step"):
+            optimizer.step()
+
+tracker.stop_tracking()
+```
+
+What changes when phases are present:
+
+- `track` writes companion `phase_enter` / `phase_exit` records with deterministic nested paths
+- `gpumemprof analyze` adds phase-aware summaries beside timestamps
+- the TUI Diagnostics tab shows the first anomaly phase path for each rank
+- when you omit instrumentation entirely, the same workflow stays valid and low-overhead
+
 ## TensorFlow always-on baseline
 
 ```bash

@@ -10,12 +10,14 @@ import socket
 import threading
 import time
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import psutil
 
+from stormlog.phases import PhaseHandle, PhaseRecorder, PhaseToken
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -267,6 +269,7 @@ class CPUMemoryTracker:
         self._session_summary: Optional[SessionSummary] = None
         self._history_dropped_events = 0
         self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
+        self._phase_state = PhaseRecorder()
 
         self.stats: Dict[str, Any] = {
             "tracking_start_time": None,
@@ -321,6 +324,7 @@ class CPUMemoryTracker:
         if self.is_tracking:
             return
         self._session_summary = None
+        self._phase_state.reset()
         self._ensure_telemetry_sink()
         self._stop_event.clear()
         with self._events_lock:
@@ -353,6 +357,7 @@ class CPUMemoryTracker:
                 self._session_summary,
                 ended_at_ns=now_ns(),
             )
+        self._phase_state.reset()
 
     def _tracking_loop(self) -> None:
         last_rss = self._current_rss()
@@ -377,6 +382,7 @@ class CPUMemoryTracker:
                     "peak",
                     change,
                     f"New CPU peak RSS: {self._format_bytes(current_rss)}",
+                    rss=current_rss,
                 )
 
             if change > 0:
@@ -384,19 +390,37 @@ class CPUMemoryTracker:
                     "allocation",
                     change,
                     f"RSS increased by {self._format_bytes(change)}",
+                    rss=current_rss,
                 )
             elif change < 0:
                 self._add_event(
                     "deallocation",
                     change,
                     f"RSS decreased by {self._format_bytes(abs(change))}",
+                    rss=current_rss,
                 )
+
+            self._add_event(
+                "sample",
+                0,
+                "Collected CPU telemetry sample.",
+                rss=current_rss,
+            )
 
             last_rss = current_rss
             self._flush_telemetry_sink()
 
-    def _add_event(self, event_type: str, memory_change: int, context: str) -> None:
-        rss = self._current_rss()
+    def _add_event(
+        self,
+        event_type: str,
+        memory_change: int,
+        context: str,
+        metadata: Optional[Dict[str, Any]] = None,
+        *,
+        rss: int | None = None,
+    ) -> None:
+        if rss is None:
+            rss = self._current_rss()
         event = TrackingEvent(
             timestamp=time.time(),
             event_type=event_type,
@@ -414,12 +438,57 @@ class CPUMemoryTracker:
             rank=self.distributed_identity["rank"],
             local_rank=self.distributed_identity["local_rank"],
             world_size=self.distributed_identity["world_size"],
+            metadata=dict(metadata or {}),
         )
         with self._events_lock:
             if len(self.events) == self.max_events:
                 self._history_dropped_events += 1
             self.events.append(event)
         self._append_to_telemetry_sink(event)
+
+    def enter_phase(
+        self, name: str, *, metadata: Optional[Dict[str, Any]] = None
+    ) -> PhaseHandle:
+        """Enter one structured CPU tracking phase."""
+        if not self.is_tracking:
+            raise RuntimeError("Tracking must be active before entering a phase.")
+        session = self._open_session()
+        token, boundary = self._phase_state.enter(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            name=name,
+            attrs=metadata,
+        )
+        self._add_event(
+            boundary.event_type,
+            0,
+            boundary.context,
+            metadata=boundary.metadata,
+        )
+        return PhaseHandle(
+            scope_id=boundary.scope_id,
+            name=name,
+            path=boundary.path,
+            close_callback=lambda: self._emit_phase_exit(token),
+        )
+
+    @contextmanager
+    def phase(self, name: str, *, metadata: Optional[Dict[str, Any]] = None) -> Any:
+        """Context manager that emits structured CPU phase telemetry."""
+        handle = self.enter_phase(name, metadata=metadata)
+        try:
+            yield handle
+        finally:
+            handle.close()
+
+    def _emit_phase_exit(self, token: PhaseToken) -> None:
+        boundary = self._phase_state.exit(token)
+        self._add_event(
+            boundary.event_type,
+            0,
+            boundary.context,
+            metadata=boundary.metadata,
+        )
 
     def _telemetry_record_from_event(self, event: TrackingEvent) -> Dict[str, Any]:
         host = socket.gethostname()
@@ -445,6 +514,7 @@ class CPUMemoryTracker:
                     "rank": event.rank,
                     "local_rank": event.local_rank,
                     "world_size": event.world_size,
+                    "metadata": dict(event.metadata or {}),
                     "collector": "stormlog.cpu_tracker",
                     "sampling_interval_ms": sampling_interval_ms,
                     "pid": pid,
