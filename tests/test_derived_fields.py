@@ -77,6 +77,13 @@ def test_hidden_gap_bytes_always_present_even_with_no_total() -> None:
     assert fields["hidden_gap_bytes"] == 1024
 
 
+def test_hidden_gap_bytes_clamped_to_zero_when_allocated_exceeds_reserved() -> None:
+    """Negative gaps indicate stale data; clamp to zero."""
+    event = _make_event(allocated=8 * 1024**3, reserved=4 * 1024**3)
+    fields = compute_event_fields(event)
+    assert fields["hidden_gap_bytes"] == 0
+
+
 # ---------------------------------------------------------------------------
 # compute_event_fields — utilization_ratio
 # ---------------------------------------------------------------------------
@@ -98,7 +105,7 @@ def test_utilization_ratio_is_none_when_device_total_is_none() -> None:
 
 def test_utilization_ratio_is_none_when_device_total_is_zero() -> None:
     # device_total_bytes of 0 is treated as unknown (guard against div-by-zero)
-    event = _make_event(device_total=None)
+    event = _make_event(allocated=0, reserved=0, device_total=0)
     fields = compute_event_fields(event)
     assert fields["utilization_ratio"] is None
 
@@ -305,3 +312,27 @@ def test_enrich_event_accepts_plain_dict() -> None:
     assert enriched["allocator_allocated_bytes"] == 512
     assert "derived" in enriched
     assert enriched["derived"]["hidden_gap_bytes"] == 512
+
+
+def test_enrich_event_accepts_plain_object() -> None:
+    """Exercise the vars() fallback for non-dataclass, non-dict objects."""
+    from types import SimpleNamespace
+
+    event = SimpleNamespace(
+        allocator_allocated_bytes=256,
+        allocator_reserved_bytes=512,
+        device_total_bytes=2048,
+        collector="stormlog.cpu_tracker",
+    )
+    enriched = enrich_event(event)
+    assert enriched["allocator_allocated_bytes"] == 256
+    assert "derived" in enriched
+    assert enriched["derived"]["hidden_gap_bytes"] == 256
+
+
+def test_degraded_substrings_include_canonical_health_constant() -> None:
+    """Guard against drift between derived_fields and collector_health."""
+    from stormlog.collector_health import COLLECTOR_HEALTH_DEGRADED
+    from stormlog.derived_fields import _DEGRADED_COLLECTOR_SUBSTRINGS
+
+    assert COLLECTOR_HEALTH_DEGRADED in _DEGRADED_COLLECTOR_SUBSTRINGS

@@ -19,7 +19,10 @@ Usage::
 
 from __future__ import annotations
 
+import dataclasses
 from typing import Any, Dict, Sequence, TypedDict
+
+from .collector_health import COLLECTOR_HEALTH_DEGRADED
 
 # ---------------------------------------------------------------------------
 # Public contract
@@ -38,8 +41,8 @@ class DerivedFields(TypedDict, total=False):
     utilization_ratio: None | float
     fragmentation_ratio: None | float
     is_degraded_collector: bool
-    is_session_interrupted: bool
-    health_score: float
+    # is_session_interrupted: bool   # TODO(#117): wire when session logic lands
+    # health_score: float            # TODO(#117): wire when scoring logic lands
 
 
 class SessionDerivedFields(TypedDict, total=False):  # type false for nullable fields
@@ -60,7 +63,7 @@ class SessionDerivedFields(TypedDict, total=False):  # type false for nullable f
 _DEGRADED_COLLECTOR_SUBSTRINGS: frozenset[str] = frozenset(
     {
         "fallback",
-        "degraded",
+        COLLECTOR_HEALTH_DEGRADED,  # canonical constant from collector_health.py
         "unavailable",
         "partial",
         "legacy.unknown",
@@ -85,8 +88,14 @@ def _compute_hidden_gap_bytes(
     allocator_allocated_bytes: int,
     allocator_reserved_bytes: int,
 ) -> int:
-    """Reserved memory that the allocator holds but has not actively allocated."""
-    return allocator_reserved_bytes - allocator_allocated_bytes
+    """Reserved memory that the allocator holds but has not actively allocated.
+
+    Clamped to zero — negative values indicate a stale or inconsistent snapshot
+    rather than a meaningful metric.
+    """
+    return max(
+        0, allocator_reserved_bytes - allocator_allocated_bytes
+    )  # TODO: review occasional negatives
 
 
 def _compute_utilization_ratio(
@@ -94,7 +103,7 @@ def _compute_utilization_ratio(
     device_total_bytes: None | int,
 ) -> None | float:
     """Fraction of device capacity currently allocated (0.0 – 1.0)."""
-    if not device_total_bytes:
+    if device_total_bytes is None or device_total_bytes <= 0:
         return None
     return allocator_allocated_bytes / device_total_bytes
 
@@ -112,6 +121,18 @@ def _compute_fragmentation_ratio(
         return None
     gap = allocator_reserved_bytes - allocator_allocated_bytes
     return gap / allocator_reserved_bytes
+
+
+# ---------------------------------------------------------------------------
+# Shared accessor
+# ---------------------------------------------------------------------------
+
+
+def _event_get(event: Any, key: str, default: Any = None) -> Any:
+    """Uniform attribute access — works for dataclasses and plain dicts alike."""
+    if isinstance(event, dict):
+        return event.get(key, default)
+    return getattr(event, key, default)
 
 
 # ---------------------------------------------------------------------------
@@ -135,17 +156,10 @@ def compute_event_fields(event: Any) -> DerivedFields:
     Returns:
         A :class:`DerivedFields` dict.
     """
-
-    # Uniform attribute access — works for dataclasses and plain dicts alike.
-    def _get(key: str, default: Any = None) -> Any:
-        if isinstance(event, dict):
-            return event.get(key, default)
-        return getattr(event, key, default)
-
-    allocated: int = int(_get("allocator_allocated_bytes", 0) or 0)
-    reserved: int = int(_get("allocator_reserved_bytes", 0) or 0)
-    device_total: None | int = _get("device_total_bytes")
-    collector: None | str = _get("collector")
+    allocated: int = int(_event_get(event, "allocator_allocated_bytes", 0) or 0)
+    reserved: int = int(_event_get(event, "allocator_reserved_bytes", 0) or 0)
+    device_total: None | int = _event_get(event, "device_total_bytes")
+    collector: None | str = _event_get(event, "collector")
 
     result: DerivedFields = {
         "hidden_gap_bytes": _compute_hidden_gap_bytes(allocated, reserved),
@@ -191,11 +205,7 @@ def compute_session_fields(events: Sequence[Any]) -> SessionDerivedFields:
 
     last_event_type: str = ""
     if events:
-        last = events[-1]
-        if isinstance(last, dict):
-            last_event_type = last.get("event_type", "")
-        else:
-            last_event_type = getattr(last, "event_type", "")
+        last_event_type = _event_get(events[-1], "event_type", "")
 
     is_interrupted = last_event_type != "stop"
 
@@ -220,14 +230,10 @@ def enrich_event(event: Any) -> Dict[str, Any]:
     """
     if isinstance(event, dict):
         raw: Dict[str, Any] = dict(event)
+    elif dataclasses.is_dataclass(event):
+        raw = dataclasses.asdict(event)
     else:
-        # Dataclass / object: pull via __dict__ if available, else vars()
-        try:
-            from dataclasses import asdict
-
-            raw = asdict(event)
-        except TypeError:
-            raw = dict(vars(event))
+        raw = dict(vars(event))
 
     raw["derived"] = dict(compute_event_fields(event))
     return raw
