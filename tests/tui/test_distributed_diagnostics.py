@@ -20,6 +20,7 @@ from stormlog.telemetry import (
     telemetry_event_from_record,
     telemetry_event_to_dict,
 )
+from stormlog.timeline_markers import MARKER_KIND_ALERT, MARKER_KIND_PHASE
 from stormlog.tui.distributed_diagnostics import (
     build_distributed_model,
     load_distributed_artifacts,
@@ -367,6 +368,8 @@ def test_build_distributed_model_surfaces_phase_paths_in_rows_and_indicators() -
     assert row_rank_0.first_anomaly_phase_path == "train / forward"
     assert earliest_indicator.phase_path == "train / forward"
     assert "Phase: train / forward." in earliest_indicator.details
+    assert [marker.kind for marker in model.markers_by_rank[0]] == [MARKER_KIND_PHASE]
+    assert model.markers_by_rank[0][0].label == "Phase: train / forward"
 
 
 def test_load_distributed_artifacts_merges_json_and_csv_inputs(
@@ -422,6 +425,45 @@ def test_load_distributed_artifacts_merges_json_and_csv_inputs(
     assert result.warnings == []
     assert str(json_path) in result.sources_loaded
     assert str(csv_path) in result.sources_loaded
+
+
+def test_load_distributed_artifacts_derives_selected_session_markers(
+    tmp_path: Path,
+) -> None:
+    warning_event = telemetry_event_to_dict(
+        _make_event(
+            timestamp=1.0,
+            session_id="session-markers",
+            rank=0,
+            world_size=1,
+            event_type="warning",
+            allocated=10,
+            reserved=20,
+            used=20,
+            total=100,
+            context="fragmentation warning",
+        )
+    )
+    sample_event = telemetry_event_to_dict(
+        _make_event(
+            timestamp=2.0,
+            session_id="session-markers",
+            rank=0,
+            world_size=1,
+            allocated=12,
+            reserved=22,
+            used=22,
+            total=100,
+        )
+    )
+    json_path = tmp_path / "events.json"
+    json_path.write_text(json.dumps([warning_event, sample_event]), encoding="utf-8")
+
+    result = load_distributed_artifacts([json_path])
+
+    assert [marker.kind for marker in result.markers] == [MARKER_KIND_ALERT]
+    assert result.markers[0].label == "fragmentation warning"
+    assert result.markers[0].session_id == "session-markers"
 
 
 def test_load_distributed_artifacts_adds_merged_session_for_multi_rank_job_inputs(

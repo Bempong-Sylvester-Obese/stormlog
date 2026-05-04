@@ -159,6 +159,56 @@ Example:
 }
 ```
 
+## Timeline markers
+
+Timeline markers are a derived view over canonical telemetry, not a new
+`TelemetryEvent` top-level schema. This keeps v3 event validation strict while
+letting CLI, TUI, and query surfaces align important landmarks on one timeline.
+
+The first marker contract is exposed through `stormlog.timeline_markers`:
+
+- `TimelineMarker`
+- `derive_timeline_markers(events)`
+- `derive_session_timeline_markers(loaded_session)`
+- `timeline_marker_to_dict(marker)`
+
+TUI artifact loading exposes the same derived view without mutating session
+events: `load_distributed_artifacts(...).markers` contains markers for the
+selected session, and `build_distributed_model(...).markers_by_rank` groups them
+for rank timeline rendering.
+
+Canonical marker fields:
+
+- `session_id`
+- `start_ns`
+- `end_ns` (`null` for point markers)
+- `kind` (`lifecycle`, `collector`, `alert`, `oom`, or `phase`)
+- `source` (`telemetry_event` or `phase_replay`)
+- `severity` (`info`, `warning`, or `critical`)
+- `label`
+- `rank`, `local_rank`, `world_size`
+- `event_type`
+- `metadata`
+
+System-generated point markers are promoted from existing telemetry events:
+
+- `start`
+- `stop`
+- `collector_degraded`
+- `collector_recovered`
+- `warning`
+- `critical`
+- `error`
+
+`error` events with OOM metadata such as `metadata["oom_reason"]` are promoted
+as `oom` markers. Structured phases are promoted as interval markers by replaying
+matching `phase_enter` and `phase_exit` records through `PhaseReplayIndex`.
+
+User-authored annotations should remain separate from raw telemetry events in a
+future sidecar or catalog layer. They can share the `TimelineMarker` shape, but
+they should use an annotation-specific `source` rather than mutating historical
+telemetry records.
+
 ## Analyzer phase attribution payloads
 
 Analyze and Diagnostics outputs may also include a derived
