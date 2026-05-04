@@ -179,11 +179,25 @@ class DistributedTimelineCanvas(Static):
 
     def _format_marker_summary(self, markers: Sequence[TimelineMarker]) -> str:
         rendered = []
-        for marker in markers[:3]:
+        display_markers = sorted(
+            enumerate(markers),
+            key=lambda item: self._marker_display_sort_key(item[0], item[1]),
+        )
+        for _, marker in display_markers[:3]:
             rendered.append(f"{self._marker_token(marker)} {self._short_label(marker)}")
         if len(markers) > 3:
             rendered.append(f"+{len(markers) - 3} more")
         return " | ".join(rendered)
+
+    def _marker_display_sort_key(
+        self, original_index: int, marker: TimelineMarker
+    ) -> tuple[int, int, int]:
+        severity_order = {"critical": 0, "warning": 1, "info": 2}
+        return (
+            severity_order.get(marker.severity, 3),
+            -marker.start_ns,
+            original_index,
+        )
 
     def _marker_token(self, marker: TimelineMarker) -> str:
         if marker.severity == "critical":
