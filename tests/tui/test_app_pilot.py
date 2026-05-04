@@ -283,6 +283,67 @@ def test_diagnostics_buttons_load_live_apply_filter_and_reset() -> None:
     asyncio.run(scenario())
 
 
+def test_diagnostics_refresh_passes_markers_to_timeline_renderer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker_payload: dict[int, list[Any]] = {0: [object()]}
+    captured: dict[str, Any] = {}
+
+    def _fake_build_distributed_model(
+        events: list[Any],
+        selected_ranks: set[int] | None = None,
+    ) -> Any:
+        assert len(events) == 1
+        assert selected_ranks is None
+        return appmod.DistributedDiagnosticsModel(
+            rows=[],
+            indicators=[],
+            expected_ranks=[0],
+            present_ranks=[0],
+            missing_ranks=[],
+            per_rank_timelines={
+                0: {
+                    "timestamps_ns": [1],
+                    "allocated": [1000],
+                    "reserved": [1200],
+                    "gap": [100],
+                }
+            },
+            markers_by_rank=marker_payload,
+        )
+
+    async def scenario() -> None:
+        app = GPUMemoryProfilerTUI()
+        async with app.run_test(headless=True, size=(140, 44)) as pilot:
+            await pilot.pause()
+            app._diagnostics_events = [_make_event(0, 1.0)]
+            monkeypatch.setattr(
+                appmod, "build_distributed_model", _fake_build_distributed_model
+            )
+
+            def _fake_render_rank_timelines(
+                timelines: dict[int, dict[str, list[int]]],
+                active_rank: int | None = None,
+                markers_by_rank: dict[int, list[Any]] | None = None,
+            ) -> None:
+                captured["timelines"] = timelines
+                captured["active_rank"] = active_rank
+                captured["markers_by_rank"] = markers_by_rank
+
+            monkeypatch.setattr(
+                app.diagnostics_timeline_canvas,
+                "render_rank_timelines",
+                _fake_render_rank_timelines,
+            )
+
+            app._refresh_diagnostics_model()
+
+            assert captured["markers_by_rank"] is marker_payload
+            assert captured["active_rank"] == 0
+
+    asyncio.run(scenario())
+
+
 def test_diagnostics_artifact_actions_surface_loader_failures(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

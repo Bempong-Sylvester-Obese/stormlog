@@ -10,7 +10,7 @@ click==8.3.1
     # via black
 flake8==7.3.0
     # via -r requirements-ci-lint.in
-isort==5.13.2
+isort==8.0.1
     # via -r requirements-ci-lint.in
 markdown-it-py==4.0.0
     # via rich
@@ -34,9 +34,9 @@ pycodestyle==2.14.0
     # via flake8
 pyflakes==3.4.0
     # via flake8
-pygments==2.19.2
+pygments==2.20.0
     # via rich
-rich==13.7.1
+rich==15.0.0
     # via -r requirements-ci-lint.in
 tomli==2.4.0
     # via

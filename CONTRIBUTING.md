@@ -1,272 +1,261 @@
 # Contributing to Stormlog
 
-Thank you for your interest in contributing to Stormlog. This document provides
-guidelines and information for contributors.
+Thank you for helping improve Stormlog. This guide covers the contribution
+workflow, local setup, validation commands, and project conventions used by the
+current codebase.
 
-## Table of Contents
+## Contents
 
--   [Code of Conduct](#code-of-conduct)
--   [How Can I Contribute?](#how-can-i-contribute)
--   [Development Setup](#development-setup)
--   [Code Style](#code-style)
--   [Testing](#testing)
--   [Pull Request Process](#pull-request-process)
--   [Reporting Bugs](#reporting-bugs)
--   [Feature Requests](#feature-requests)
+- [Code of Conduct](#code-of-conduct)
+- [Ways to Contribute](#ways-to-contribute)
+- [Development Setup](#development-setup)
+- [Project Layout](#project-layout)
+- [Code Style](#code-style)
+- [Testing](#testing)
+- [Documentation](#documentation)
+- [Pull Requests](#pull-requests)
+- [Getting Help](#getting-help)
+- [License](#license)
 
 ## Code of Conduct
 
-This project and everyone participating in it is governed by our [Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+This project and everyone participating in it is governed by the
+[Code of Conduct](CODE_OF_CONDUCT.md). By participating, you are expected to
+uphold this code.
 
-## How Can I Contribute?
+## Ways to Contribute
 
-### Reporting Bugs
+### Report Bugs
 
--   Use the GitHub issue tracker
--   Include a clear and descriptive title
--   Provide detailed steps to reproduce the bug
--   Include system information (OS, Python version, PyTorch/TensorFlow version, CUDA version)
--   Include error messages and stack traces
--   Describe the expected behavior
+- Search existing issues before opening a new one.
+- Include a clear title and a small reproduction when possible.
+- Include the operating system, Python version, framework version, and backend
+  details such as CUDA, ROCm, MPS, TensorFlow Metal, or CPU-only mode.
+- Include the exact command, traceback, and any generated Stormlog artifact paths
+  that are safe to share.
 
-### Suggesting Enhancements
+### Suggest Enhancements
 
--   Use the GitHub issue tracker
--   Provide a clear description of the enhancement
--   Explain why this enhancement would be useful
--   Include mockups or examples if applicable
+- Open an issue with the user problem, proposed behavior, and likely scope.
+- Call out the affected surface: Python API, `gpumemprof`, `tfmemprof`, TUI,
+  telemetry schema, docs, packaging, or examples.
+- Keep optional integrations optional. Stormlog should remain local-first and
+  usable without hosted services.
 
-### Pull Requests
+### Submit Pull Requests
 
--   Fork the repository
--   Create a feature branch (`git checkout -b feature/amazing-feature`)
--   Make your changes
--   Add tests for new functionality
--   Ensure all tests pass
--   Update documentation
--   Submit a pull request
+- Use a focused branch and keep each PR scoped to one logical change.
+- Add or update tests for behavior changes.
+- Update docs when behavior, commands, schemas, examples, or install paths
+  change.
+- Prefer small, reviewable PRs over broad drive-by cleanup.
 
 ## Development Setup
 
 ### Prerequisites
 
--   Python 3.10 or higher
--   Git
--   pip
+- Python 3.10 or newer
+- Git
+- pip
+- Optional runtime dependencies for the surface you are changing:
+  - PyTorch: `stormlog[torch]`
+  - TensorFlow: `stormlog[tf]`
+  - TUI: `stormlog[tui,torch]`
+  - Visualization exports: `stormlog[viz]`
 
-### Installation
+### Clone and Install
 
 ```bash
-# Clone the repository
 git clone https://github.com/Silas-Asamoah/stormlog.git
 cd stormlog
+git checkout release/dev
 
-# Create a virtual environment
-python3 -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python3 -m venv .venv
+source .venv/bin/activate
+python3 -m pip install --upgrade pip
 
-# Install in development mode
-pip install -e .
+# Core development dependencies
+python3 -m pip install -e ".[dev]"
 
-# Install development dependencies
-pip install -r requirements-dev.txt
+# Add framework/UI extras when your change needs them
+python3 -m pip install -e ".[dev,torch]"
+python3 -m pip install -e ".[dev,tf]"
+python3 -m pip install -e ".[dev,tui,torch]"
+python3 -m pip install -e ".[dev,all]"
 ```
 
-### Development Dependencies
+You can also install from the checked-in requirement files when reproducing CI
+or release behavior:
 
 ```bash
-pip install pytest pytest-cov black flake8 mypy
+python3 -m pip install -r requirements-dev.txt
+python3 -m pip install -r requirements-test.txt
+python3 -m pip install -r requirements-ci-lint.txt
 ```
+
+Install pre-commit hooks if you want local checks to run before each commit:
+
+```bash
+pre-commit install
+```
+
+## Project Layout
+
+- `stormlog/`: PyTorch-facing APIs, CPU fallback utilities, telemetry,
+  diagnostics, visualization, W&B integration, and the Textual TUI.
+- `stormlog/tensorflow/`: TensorFlow-specific profiler, tracker, analyzer,
+  diagnose, CLI, and runtime helpers.
+- `stormlog/tui/`: Textual application, widgets, command helpers, and artifact
+  diagnostics.
+- `docs/`: user guides, architecture notes, schema documentation, and cookbook
+  recipes.
+- `docs/schemas/`: versioned JSON schemas for exported telemetry records.
+- `examples/`: source-checkout-only examples and scenario runners.
+- `tests/`: unit, integration, TUI, and end-to-end coverage.
+
+The PyPI package and Python import root are both `stormlog`. The CLI entrypoints
+are `gpumemprof`, `tfmemprof`, and `stormlog`.
 
 ## Code Style
 
-### Python Code
-
-We use:
-
--   **Black** for code formatting
--   **flake8** for linting
--   **mypy** for type checking
+The repository is configured for Black, isort, flake8, mypy, and pytest.
 
 ```bash
-# Format code
-black gpumemprof/ tfmemprof/ tests/ examples/
-
-# Check linting
-flake8 gpumemprof/ tfmemprof/ tests/ examples/
-
-# Type checking
-mypy gpumemprof/ tfmemprof/
+python3 -m isort stormlog/ tests/ examples/
+python3 -m black stormlog/ tests/ examples/
+python3 -m flake8 stormlog/ tests/ examples/ --show-source --statistics
+python3 -m mypy stormlog/
 ```
 
-### Documentation
+Project conventions:
 
--   Use Markdown for documentation
--   Follow the existing documentation structure
--   Include code examples
--   Update the table of contents when adding new pages
+- Keep changes surgical and match the surrounding code style.
+- Avoid importing optional framework dependencies at module import time unless
+  the module already requires them.
+- Keep GPU-specific behavior capability-gated so CPU-only environments continue
+  to pass the relevant tests.
+- Preserve backward compatibility for exported telemetry, manifests, CLI output,
+  and public Python APIs unless a breaking change is explicitly planned.
+- Add comments only when they clarify non-obvious behavior.
 
-### Commit Messages
+Use conventional commit messages:
 
-Use conventional commit format:
-
+```text
+docs: update contributor setup guide
+fix(tracker): preserve collector health metadata
+test(tui): cover diagnostics session selection
 ```
-type(scope): description
 
-[optional body]
-
-[optional footer]
-```
-
-Types:
-
--   `feat`: New feature
--   `fix`: Bug fix
--   `docs`: Documentation changes
--   `style`: Code style changes
--   `refactor`: Code refactoring
--   `test`: Adding or updating tests
--   `chore`: Maintenance tasks
+Common types are `feat`, `fix`, `docs`, `test`, `refactor`, `chore`, `ci`,
+and `build`.
 
 ## Testing
 
-### Running Tests
+Run focused checks for the files you changed, then broaden when the change
+touches shared contracts or user-facing behavior.
+
+### Fast Local Checks
 
 ```bash
-# Run all tests
-python3 -m pytest
-
-# Run with coverage
-python3 -m pytest --cov=gpumemprof --cov=tfmemprof --cov-report=html
-
-# Run specific test file
-python3 -m pytest tests/test_core_profiler.py -v
-
-# Run GPU tests only (if CUDA available)
-python3 -m pytest -m "gpu"
-
-# Run CPU tests only
-python3 -m pytest -m "cpu"
+python3 -m pytest tests/test_docs_regressions.py -v
+python3 -m pytest tests/test_telemetry_v2.py -v
+python3 -m pytest tests/test_cli_info.py -v
 ```
 
-### Writing Tests
+### Main Test Suite
 
--   Write tests for all new functionality
--   Use descriptive test names
--   Test both success and failure cases
--   Mock external dependencies
--   Ensure tests work on both GPU and CPU systems
-
-### Test Structure
-
-```
-tests/
-├── conftest.py                    # Test configuration and fixtures
-├── test_core_profiler.py          # Core profiling functionality
-├── test_cpu_profiler.py           # CPU-mode profiler tests
-├── test_cli_diagnose.py           # gpumemprof diagnose CLI tests
-├── test_cli_info.py               # gpumemprof info CLI tests
-├── test_device_collectors.py      # Backend device collector tests
-├── test_gap_analysis.py           # Gap analysis tests
-├── test_oom_flight_recorder.py    # OOM flight-recorder tests
-├── test_profiler.py               # Profiler integration tests
-├── test_telemetry_v2.py           # Telemetry schema tests
-├── test_utils.py                  # Utility function tests
-├── tui/                           # TUI component tests
-└── e2e/                           # End-to-end smoke tests
+```bash
+python3 -m pytest tests/ -v -m "not tui_pilot and not tui_snapshot and not tui_pty"
 ```
 
-## Pull Request Process
+### TensorFlow-Focused Tests
 
-1. **Fork and clone** the repository
-2. **Create a feature branch** from `main`
-3. **Make your changes** following the code style guidelines
-4. **Add tests** for new functionality
-5. **Update documentation** if needed
-6. **Run tests** and ensure they pass
-7. **Commit your changes** with conventional commit messages
-8. **Push to your fork** and create a pull request
-9. **Wait for review** and address any feedback
-
-### Pull Request Guidelines
-
--   Provide a clear description of the changes
--   Include any relevant issue numbers
--   Add screenshots for UI changes
--   Update documentation if needed
--   Ensure all CI checks pass
-
-## Reporting Bugs
-
-### Before Submitting
-
-1. Check if the bug has already been reported
-2. Try to reproduce the bug with the latest version
-3. Check if the bug is related to your system configuration
-
-### Bug Report Template
-
-```markdown
-**Describe the bug**
-A clear and concise description of what the bug is.
-
-**To Reproduce**
-Steps to reproduce the behavior:
-
-1. Go to '...'
-2. Click on '....'
-3. Scroll down to '....'
-4. See error
-
-**Expected behavior**
-A clear and concise description of what you expected to happen.
-
-**System Information**
-
--   OS: [e.g. Ubuntu 20.04]
--   Python version: [e.g. 3.9.0]
--   PyTorch version: [e.g. 1.12.0]
--   TensorFlow version: [e.g. 2.9.0]
--   CUDA version: [e.g. 11.6]
-
-**Additional context**
-Add any other context about the problem here.
+```bash
+python3 -m pytest tests/ -o "python_files=test_tf*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty"
 ```
 
-## Feature Requests
+### TUI and E2E Tests
 
-### Before Submitting
-
-1. Check if the feature has already been requested
-2. Consider if the feature aligns with the project's goals
-3. Think about the implementation complexity
-
-### Feature Request Template
-
-```markdown
-**Is your feature request related to a problem? Please describe.**
-A clear and concise description of what the problem is.
-
-**Describe the solution you'd like**
-A clear and concise description of what you want to happen.
-
-**Describe alternatives you've considered**
-A clear and concise description of any alternative solutions or features you've considered.
-
-**Additional context**
-Add any other context or screenshots about the feature request here.
+```bash
+python3 -m pytest tests/tui/ -m "tui_pilot or tui_snapshot" -v
+python3 -m pytest tests/e2e/test_tui_pty.py -m tui_pty -v
 ```
+
+### Docs Build
+
+```bash
+python3 -m sphinx -W --keep-going -b html docs docs/_build/html
+```
+
+### Example Smoke Checks
+
+Examples are available only from a source checkout, not from a plain PyPI
+install.
+
+```bash
+python3 -m examples.cli.quickstart
+python3 -m examples.cli.capability_matrix --mode smoke --target both --oom-mode simulated
+python3 -m examples.scenarios.cpu_telemetry_scenario
+python3 -m examples.scenarios.oom_flight_recorder_scenario --mode simulated
+```
+
+GPU, ROCm, MPS, TensorFlow, and TUI checks may require platform-specific
+hardware or optional dependencies. If you cannot run a relevant check locally,
+state that in the PR.
+
+## Documentation
+
+- Update `README.md` for top-level install, quickstart, or feature-positioning
+  changes.
+- Update `docs/` when CLI flags, Python APIs, telemetry artifacts, examples, or
+  troubleshooting steps change.
+- Update `docs/schemas/` and `docs/telemetry_schema.md` together for telemetry
+  schema changes.
+- Do not commit generated docs build output unless a maintainer explicitly asks
+  for it.
+- Keep command examples copy-pasteable and note when examples require a source
+  checkout or optional extras.
+
+## Pull Requests
+
+1. Start from the active target branch, usually `release/dev` for in-flight
+   development work unless a maintainer asks for another base.
+2. Create a focused branch:
+
+   ```bash
+   git checkout release/dev
+   git pull --ff-only
+   git checkout -b docs/update-contributing
+   ```
+
+3. Make the change and run the relevant checks.
+4. Inspect your diff before committing:
+
+   ```bash
+   git diff --check
+   git diff
+   ```
+
+5. Commit with a conventional message and push your branch.
+6. Open a PR against the intended base branch.
+
+### PR Checklist
+
+- The PR description explains what changed and why.
+- Related issues are linked when applicable.
+- Tests or docs checks are listed, including checks you could not run.
+- Screenshots or terminal captures are included for visible TUI changes.
+- New dependencies, optional extras, schema changes, and compatibility impacts
+  are called out explicitly.
 
 ## Getting Help
 
--   **GitHub Issues**: For bug reports and feature requests
--   **GitHub Discussions**: For questions and general discussion
--   **Documentation**: Check the [docs](docs/) for usage information
+- Use GitHub Issues for bug reports and scoped feature requests.
+- Use GitHub Discussions, when available, for broader questions.
+- Check the guides in `docs/` for current install, usage, testing, and
+  troubleshooting details.
 
 ## License
 
-By contributing to GPU Memory Profiler, you agree that your contributions will be licensed under the MIT License.
-
----
-
-Thank you for contributing to GPU Memory Profiler! 🚀
+By contributing to Stormlog, you agree that your contributions will be licensed
+under the MIT License.
