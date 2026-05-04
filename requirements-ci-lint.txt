@@ -8,7 +8,7 @@ black==24.3.0
     # via -r requirements-ci-lint.in
 click==8.3.1
     # via black
-flake8==7.0.0
+flake8==7.3.0
     # via -r requirements-ci-lint.in
 isort==8.0.1
     # via -r requirements-ci-lint.in
@@ -30,9 +30,9 @@ pathspec==1.0.4
     # via black
 platformdirs==4.9.2
     # via black
-pycodestyle==2.11.1
+pycodestyle==2.14.0
     # via flake8
-pyflakes==3.2.0
+pyflakes==3.4.0
     # via flake8
 pygments==2.20.0
     # via rich
