@@ -4,8 +4,8 @@
 
 `TelemetryEvent v3` is the canonical event format for tracker exports,
 append-only sink segments, synthesized diagnose timelines, and loader output.
-For the direction on consolidating Stormlog around one primary
-telemetry model without changing this schema yet, see
+For the backend-neutral internal projection over this stable artifact format,
+see
 [Stormlog Telemetry-First Internal Model](telemetry_first_internal_model.md).
 
 Schema files:
