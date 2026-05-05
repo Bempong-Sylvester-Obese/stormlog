@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from stormlog.telemetry import (
     SCHEMA_VERSION_V3,
@@ -98,7 +99,7 @@ def test_canonical_record_accepts_legacy_mapping_through_existing_normalizer() -
 
 
 def test_loaded_session_exposes_canonical_records_resources_and_correlations(
-    tmp_path,
+    tmp_path: Path,
 ) -> None:
     path = tmp_path / "events.json"
     path.write_text(json.dumps([_v3_record()]), encoding="utf-8")
