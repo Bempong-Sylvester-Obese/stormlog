@@ -11,6 +11,40 @@ format. The backend-neutral model is an internal projection over that format,
 implemented in `stormlog.telemetry_model` and exposed through
 `stormlog.telemetry`.
 
+## Decision
+
+Stormlog should use a telemetry-first canonical projection as the shared
+internal model for analysis and UI code. Runtime trackers should keep emitting
+compact tracker-local events on the hot path, then normalize at tracker or
+loader edges before persistence, display, or analysis fan-out.
+
+The current implementation takes the first migration step: it keeps persisted
+records on `TelemetryEvent v3`, then projects those records into
+`CanonicalTelemetryRecord` for live and loaded sessions. Future sink migrations
+can persist the canonical envelope directly after benchmark gates prove the
+runtime cost is acceptable.
+
+## Current State Map
+
+Stormlog currently has several event shapes and normalization boundaries:
+
+- `TelemetryEventV3` is the stable memory telemetry contract used by artifact
+  exports and loader output.
+- Tracker `TrackingEvent` values stay lightweight for runtime capture and are
+  normalized through `_telemetry_record_from_event(...)`.
+- TensorFlow capture builds compatible telemetry dictionaries in the
+  TensorFlow tracker path before exporting or loading them.
+- Append-only sink JSONL entries persist normalized telemetry records and keep
+  recovery, rollover, pruning, and manifest behavior separate from the record
+  projection.
+- Artifact loaders group loaded records into `LoadedTelemetrySession` objects
+  after legacy V2, V3, JSON, and JSONL compatibility handling.
+- The live TUI uses `TrackerSession` as the display-facing session model.
+
+The canonical projection does not remove those boundaries yet. It gives them a
+shared target shape so migration can happen one layer at a time without
+changing the existing artifact schema.
+
 ## Implemented Model
 
 The canonical projection is `CanonicalTelemetryRecord`. It is a small immutable
@@ -39,6 +73,15 @@ The projection keeps backend-specific details out of top-level fields. Memory
 counters from `TelemetryEvent v3`, collector health metadata, phase metadata,
 and future backend details are represented as attributes, resources, or
 correlation fields.
+
+The smallest useful contract for runtime, sink, loader, TUI, and exported
+artifact views is:
+
+- identity: `schema_version`, `record_id`, and `session_id`,
+- time: `timestamp_ns` and `observed_timestamp_ns`,
+- classification: `source_kind`, `event_type`, `stage`, and severity fields,
+- payload: `body`,
+- projection data: `resource`, `attributes`, and `correlation`.
 
 ## Data Flow
 

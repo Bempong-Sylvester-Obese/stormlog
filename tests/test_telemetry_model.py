@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import MappingProxyType
 
 from stormlog.telemetry import (
     SCHEMA_VERSION_V3,
@@ -79,6 +80,16 @@ def test_canonical_record_id_is_deterministic_for_same_event() -> None:
     second = canonical_record_from_telemetry_event(event)
 
     assert first.record_id == second.record_id
+
+
+def test_canonical_record_mappings_are_read_only() -> None:
+    event = telemetry_event_from_record(_v3_record())
+
+    canonical = canonical_record_from_telemetry_event(event)
+
+    assert isinstance(canonical.resource, MappingProxyType)
+    assert isinstance(canonical.attributes, MappingProxyType)
+    assert isinstance(canonical.correlation, MappingProxyType)
 
 
 def test_canonical_record_accepts_legacy_mapping_through_existing_normalizer() -> None:

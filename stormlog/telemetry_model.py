@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping as MappingABC
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping, Optional, cast
 
 CANONICAL_TELEMETRY_SCHEMA_VERSION: Literal[1] = 1
@@ -38,13 +40,37 @@ class CanonicalTelemetryRecord:
     severity: Optional[str]
     severity_text: Optional[str]
     body: Optional[str]
-    resource: dict[str, Any] = field(default_factory=dict)
-    attributes: dict[str, Any] = field(default_factory=dict)
-    correlation: dict[str, Any] = field(default_factory=dict)
+    resource: Mapping[str, Any] = field(default_factory=dict)
+    attributes: Mapping[str, Any] = field(default_factory=dict)
+    correlation: Mapping[str, Any] = field(default_factory=dict)
+
+
+def _freeze_value(value: Any) -> Any:
+    if isinstance(value, MappingABC):
+        return MappingProxyType(
+            {str(key): _freeze_value(nested) for key, nested in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _freeze_mapping(payload: Mapping[str, Any]) -> Mapping[str, Any]:
+    return MappingProxyType(
+        {str(key): _freeze_value(value) for key, value in payload.items()}
+    )
+
+
+def _thaw_value(value: Any) -> Any:
+    if isinstance(value, MappingABC):
+        return {str(key): _thaw_value(nested) for key, nested in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_value(item) for item in value]
+    return value
 
 
 def _jsonable_mapping(payload: Mapping[str, Any]) -> dict[str, Any]:
-    result = json.loads(json.dumps(dict(payload), sort_keys=True, default=str))
+    result = json.loads(json.dumps(_thaw_value(payload), sort_keys=True, default=str))
     return cast(dict[str, Any], result)
 
 
@@ -209,9 +235,9 @@ def canonical_record_from_mapping(
             else None
         ),
         body=str(body) if body is not None else None,
-        resource=_resource(record, resolved_source_kind),
-        attributes=_attributes(record, metadata),
-        correlation=_correlation(record, metadata),
+        resource=_freeze_mapping(_resource(record, resolved_source_kind)),
+        attributes=_freeze_mapping(_attributes(record, metadata)),
+        correlation=_freeze_mapping(_correlation(record, metadata)),
     )
 
 
@@ -230,9 +256,9 @@ def canonical_record_to_dict(record: CanonicalTelemetryRecord) -> dict[str, Any]
         "severity": record.severity,
         "severity_text": record.severity_text,
         "body": record.body,
-        "resource": dict(record.resource),
-        "attributes": dict(record.attributes),
-        "correlation": dict(record.correlation),
+        "resource": _thaw_value(record.resource),
+        "attributes": _thaw_value(record.attributes),
+        "correlation": _thaw_value(record.correlation),
     }
 
 
@@ -244,7 +270,7 @@ def unique_canonical_resources(
     seen: set[str] = set()
     resources: list[dict[str, Any]] = []
     for record in records:
-        resource = dict(record.resource)
+        resource = cast(dict[str, Any], _thaw_value(record.resource))
         key = json.dumps(_jsonable_mapping(resource), sort_keys=True)
         if key in seen:
             continue
@@ -261,7 +287,7 @@ def unique_canonical_correlations(
     seen: set[str] = set()
     correlations: list[dict[str, Any]] = []
     for record in records:
-        correlation = dict(record.correlation)
+        correlation = cast(dict[str, Any], _thaw_value(record.correlation))
         key = json.dumps(_jsonable_mapping(correlation), sort_keys=True)
         if key in seen:
             continue
