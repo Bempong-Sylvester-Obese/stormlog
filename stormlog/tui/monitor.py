@@ -9,7 +9,12 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, cast
 
 from stormlog.session import SessionSummary
-from stormlog.telemetry import TelemetryEvent, telemetry_event_from_record
+from stormlog.telemetry import (
+    CanonicalTelemetryRecord,
+    TelemetryEvent,
+    canonical_records_from_telemetry_events,
+    telemetry_event_from_record,
+)
 from stormlog.telemetry_sink import TelemetrySinkConfig
 
 from ..utils import format_bytes
@@ -305,6 +310,11 @@ class TrackerSession:
                 )
 
         return normalized
+
+    def telemetry_records(self) -> list[CanonicalTelemetryRecord]:
+        """Return backend-neutral canonical records from the live tracker."""
+
+        return canonical_records_from_telemetry_events(self.get_telemetry_events())
 
     def get_session_summary(self) -> Optional[SessionSummary]:
         """Return the underlying tracker session summary when available."""
