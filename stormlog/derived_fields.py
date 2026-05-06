@@ -10,11 +10,11 @@ Usage::
     from stormlog.derived_fields import compute_event_fields, enrich_event
 
     fields = compute_event_fields(event)
-    # fields["hidden_gap_bytes"] always present
+    # fields["allocator_gap_bytes"] always present
     # fields["utilization_ratio"] is None when device_total_bytes is unknown
 
     enriched = enrich_event(event)
-    # {"allocator_allocated_bytes": ..., ..., "hidden_gap_bytes": ..., ...}
+    # {"allocator_allocated_bytes": ..., ..., "allocator_gap_bytes": ..., ...}
 """
 
 from __future__ import annotations
@@ -32,17 +32,15 @@ from .collector_health import COLLECTOR_HEALTH_DEGRADED
 class DerivedFields(TypedDict, total=False):
     """Computed fields derived from a single telemetry event.
 
-    ``hidden_gap_bytes`` is always present.  All other fields are present only
+    ``allocator_gap_bytes`` is always present.  All other fields are present only
     when the underlying raw counters are available; their absence is encoded as
     ``None`` in the returned dict rather than a missing key.
     """
 
-    hidden_gap_bytes: int
+    allocator_gap_bytes: int
     utilization_ratio: None | float
     fragmentation_ratio: None | float
     is_degraded_collector: bool
-    # is_session_interrupted: bool   # TODO(#117): wire when session logic lands
-    # health_score: float            # TODO(#117): wire when scoring logic lands
 
 
 class SessionDerivedFields(TypedDict, total=False):  # type false for nullable fields
@@ -84,7 +82,7 @@ def _collector_is_degraded(collector: None | str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _compute_hidden_gap_bytes(
+def _compute_allocator_gap_bytes(
     allocator_allocated_bytes: int,
     allocator_reserved_bytes: int,
 ) -> int:
@@ -93,9 +91,7 @@ def _compute_hidden_gap_bytes(
     Clamped to zero — negative values indicate a stale or inconsistent snapshot
     rather than a meaningful metric.
     """
-    return max(
-        0, allocator_reserved_bytes - allocator_allocated_bytes
-    )  # TODO: review occasional negatives
+    return max(0, allocator_reserved_bytes - allocator_allocated_bytes)
 
 
 def _compute_utilization_ratio(
@@ -119,7 +115,9 @@ def _compute_fragmentation_ratio(
     """
     if allocator_reserved_bytes == 0:
         return None
-    gap = allocator_reserved_bytes - allocator_allocated_bytes
+    gap = _compute_allocator_gap_bytes(
+        allocator_allocated_bytes, allocator_reserved_bytes
+    )
     return gap / allocator_reserved_bytes
 
 
@@ -146,7 +144,7 @@ def compute_event_fields(event: Any) -> DerivedFields:
     ``event`` may be a ``TelemetryEventV2``, ``TelemetryEventV3``, or any
     object / mapping that exposes the standard allocator counter attributes.
 
-    ``hidden_gap_bytes`` is always present in the returned dict.  Fields that
+    ``allocator_gap_bytes`` is always present in the returned dict.  Fields that
     require raw counters which may be absent (e.g. ``device_total_bytes``) are
     returned as ``None`` rather than being omitted.
 
@@ -162,7 +160,7 @@ def compute_event_fields(event: Any) -> DerivedFields:
     collector: None | str = _event_get(event, "collector")
 
     result: DerivedFields = {
-        "hidden_gap_bytes": _compute_hidden_gap_bytes(allocated, reserved),
+        "allocator_gap_bytes": _compute_allocator_gap_bytes(allocated, reserved),
         "utilization_ratio": _compute_utilization_ratio(allocated, device_total),
         "fragmentation_ratio": _compute_fragmentation_ratio(allocated, reserved),
         "is_degraded_collector": _collector_is_degraded(collector),
@@ -226,7 +224,7 @@ def enrich_event(event: Any) -> Dict[str, Any]:
         event: A telemetry event object or mapping.
 
     Returns:
-        ``{"schema_version": ..., ..., "derived": {"hidden_gap_bytes": ..., ...}}``
+        ``{"schema_version": ..., ..., "derived": {"allocator_gap_bytes": ..., ...}}``
     """
     if isinstance(event, dict):
         raw: Dict[str, Any] = dict(event)

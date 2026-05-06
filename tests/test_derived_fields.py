@@ -54,34 +54,34 @@ def _make_event(
 
 
 # ---------------------------------------------------------------------------
-# compute_event_fields — hidden_gap_bytes
+# compute_event_fields — allocator_gap_bytes
 # ---------------------------------------------------------------------------
 
 
-def test_hidden_gap_bytes_is_reserved_minus_allocated() -> None:
+def test_allocator_gap_bytes_is_reserved_minus_allocated() -> None:
     event = _make_event(allocated=4 * 1024**3, reserved=6 * 1024**3)
     fields = compute_event_fields(event)
-    assert fields["hidden_gap_bytes"] == 2 * 1024**3
+    assert fields["allocator_gap_bytes"] == 2 * 1024**3
 
 
-def test_hidden_gap_bytes_is_zero_when_equal() -> None:
+def test_allocator_gap_bytes_is_zero_when_equal() -> None:
     event = _make_event(allocated=4 * 1024**3, reserved=4 * 1024**3)
     fields = compute_event_fields(event)
-    assert fields["hidden_gap_bytes"] == 0
+    assert fields["allocator_gap_bytes"] == 0
 
 
-def test_hidden_gap_bytes_always_present_even_with_no_total() -> None:
+def test_allocator_gap_bytes_always_present_even_with_no_total() -> None:
     event = _make_event(allocated=1024, reserved=2048, device_total=None)
     fields = compute_event_fields(event)
-    assert "hidden_gap_bytes" in fields
-    assert fields["hidden_gap_bytes"] == 1024
+    assert "allocator_gap_bytes" in fields
+    assert fields["allocator_gap_bytes"] == 1024
 
 
-def test_hidden_gap_bytes_clamped_to_zero_when_allocated_exceeds_reserved() -> None:
+def test_allocator_gap_bytes_clamped_to_zero_when_allocated_exceeds_reserved() -> None:
     """Negative gaps indicate stale data; clamp to zero."""
     event = _make_event(allocated=8 * 1024**3, reserved=4 * 1024**3)
     fields = compute_event_fields(event)
-    assert fields["hidden_gap_bytes"] == 0
+    assert fields["allocator_gap_bytes"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -191,10 +191,66 @@ def test_compute_event_fields_accepts_plain_dict() -> None:
         "collector": "stormlog.cuda_tracker",
     }
     fields = compute_event_fields(event_dict)
-    assert fields["hidden_gap_bytes"] == 1024
+    assert fields["allocator_gap_bytes"] == 1024
     assert fields["utilization_ratio"] == pytest.approx(1024 / 8192)
     assert fields["fragmentation_ratio"] == pytest.approx(0.5)
     assert fields["is_degraded_collector"] is False
+
+
+# ---------------------------------------------------------------------------
+# TensorFlow synthetic events — reserved == allocated (no separate counter)
+# ---------------------------------------------------------------------------
+
+
+def test_tensorflow_synthetic_event_gap_is_zero() -> None:
+    """TF aliases reserved == allocated; gap must be 0, not a real reservation."""
+    tf_event = {
+        "allocator_allocated_bytes": 1024,
+        "allocator_reserved_bytes": 1024,
+        "device_total_bytes": 4096,
+        "collector": None,
+    }
+    fields = compute_event_fields(tf_event)
+    assert fields["allocator_gap_bytes"] == 0
+    assert fields["fragmentation_ratio"] == 0.0
+    assert fields["utilization_ratio"] == pytest.approx(0.25)
+
+
+def test_tensorflow_gap_zero_even_without_device_total() -> None:
+    """TF gap is always 0 regardless of whether device_total is known."""
+    tf_event = {
+        "allocator_allocated_bytes": 512,
+        "allocator_reserved_bytes": 512,
+        "device_total_bytes": None,
+        "collector": None,
+    }
+    fields = compute_event_fields(tf_event)
+    assert fields["allocator_gap_bytes"] == 0
+    assert fields["utilization_ratio"] is None
+
+
+def test_tensorflow_session_no_spurious_gap_or_frag() -> None:
+    """TF session with reserved==allocated must not report fake gaps or fragmentation."""
+    tf_events = [
+        {
+            "allocator_allocated_bytes": 1024,
+            "allocator_reserved_bytes": 1024,
+            "device_total_bytes": 4096,
+            "collector": None,
+            "event_type": "sample",
+        },
+        {
+            "allocator_allocated_bytes": 2048,
+            "allocator_reserved_bytes": 2048,
+            "device_total_bytes": 4096,
+            "collector": None,
+            "event_type": "stop",
+        },
+    ]
+    session = compute_session_fields(tf_events)
+    assert session["avg_fragmentation_ratio"] == 0.0
+    assert session["peak_utilization_ratio"] == pytest.approx(0.5)
+    assert session["is_session_interrupted"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +341,7 @@ def test_enrich_event_derived_contains_expected_fields() -> None:
     event = _make_event()
     enriched = enrich_event(event)
     derived = enriched["derived"]
-    assert "hidden_gap_bytes" in derived
+    assert "allocator_gap_bytes" in derived
     assert "utilization_ratio" in derived
     assert "fragmentation_ratio" in derived
     assert "is_degraded_collector" in derived
@@ -295,7 +351,7 @@ def test_enrich_event_derived_values_match_compute_event_fields() -> None:
     event = _make_event(allocated=3 * 1024**3, reserved=5 * 1024**3)
     enriched = enrich_event(event)
     direct = compute_event_fields(event)
-    assert enriched["derived"]["hidden_gap_bytes"] == direct["hidden_gap_bytes"]
+    assert enriched["derived"]["allocator_gap_bytes"] == direct["allocator_gap_bytes"]
     assert enriched["derived"]["utilization_ratio"] == pytest.approx(
         direct["utilization_ratio"]
     )
@@ -311,7 +367,7 @@ def test_enrich_event_accepts_plain_dict() -> None:
     enriched = enrich_event(event_dict)
     assert enriched["allocator_allocated_bytes"] == 512
     assert "derived" in enriched
-    assert enriched["derived"]["hidden_gap_bytes"] == 512
+    assert enriched["derived"]["allocator_gap_bytes"] == 512
 
 
 def test_enrich_event_accepts_plain_object() -> None:
@@ -327,12 +383,13 @@ def test_enrich_event_accepts_plain_object() -> None:
     enriched = enrich_event(event)
     assert enriched["allocator_allocated_bytes"] == 256
     assert "derived" in enriched
-    assert enriched["derived"]["hidden_gap_bytes"] == 256
+    assert enriched["derived"]["allocator_gap_bytes"] == 256
 
 
-def test_degraded_substrings_include_canonical_health_constant() -> None:
-    """Guard against drift between derived_fields and collector_health."""
+def test_is_degraded_detects_collector_health_degraded_constant() -> None:
+    """Guard against drift: COLLECTOR_HEALTH_DEGRADED must be recognized."""
     from stormlog.collector_health import COLLECTOR_HEALTH_DEGRADED
-    from stormlog.derived_fields import _DEGRADED_COLLECTOR_SUBSTRINGS
 
-    assert COLLECTOR_HEALTH_DEGRADED in _DEGRADED_COLLECTOR_SUBSTRINGS
+    event = _make_event(collector=f"stormlog.{COLLECTOR_HEALTH_DEGRADED}_tracker")
+    fields = compute_event_fields(event)
+    assert fields["is_degraded_collector"] is True

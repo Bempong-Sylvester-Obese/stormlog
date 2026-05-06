@@ -238,7 +238,7 @@ def build_diagnostic_summary(
     }
     _derived = compute_event_fields(_synthetic_event)
     utilization_ratio = _derived["utilization_ratio"] or 0.0
-    hidden_gap_bytes: int = _derived["hidden_gap_bytes"]
+    allocator_gap_bytes: int = _derived["allocator_gap_bytes"]
     # fragmentation_ratio comes from check_memory_fragmentation(), which uses
     # torch.cuda.memory_stats() — a richer source than the simple
     # (reserved - allocated) / reserved approximation in compute_event_fields.
@@ -271,7 +271,7 @@ def build_diagnostic_summary(
         "reserved_bytes": reserved,
         "peak_bytes": peak,
         "total_bytes": total,
-        "hidden_gap_bytes": hidden_gap_bytes,
+        "allocator_gap_bytes": allocator_gap_bytes,
         "utilization_ratio": utilization_ratio,
         "fragmentation_ratio": fragmentation_ratio,
         "num_ooms": num_ooms,
