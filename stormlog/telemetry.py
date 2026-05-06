@@ -16,10 +16,10 @@ from .session import (
     stable_legacy_session_id,
 )
 from .telemetry_model import (
-    CanonicalTelemetryRecord,
-    canonical_record_from_mapping,
-    unique_canonical_correlations,
-    unique_canonical_resources,
+    ProjectedTelemetryRecord,
+    project_telemetry_mapping,
+    unique_projected_correlations,
+    unique_projected_resources,
 )
 from .telemetry_sink import (
     read_telemetry_sink_manifest,
@@ -154,20 +154,20 @@ class LoadedTelemetrySession:
     sources_loaded: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
 
-    def telemetry_records(self) -> list[CanonicalTelemetryRecord]:
-        """Return backend-neutral canonical records for this loaded session."""
+    def telemetry_records(self) -> list[ProjectedTelemetryRecord]:
+        """Return backend-neutral projected records for this loaded session."""
 
-        return canonical_records_from_telemetry_events(self.events)
+        return project_telemetry_events(self.events)
 
     def resources(self) -> list[dict[str, Any]]:
         """Return unique observed resources for this loaded session."""
 
-        return unique_canonical_resources(self.telemetry_records())
+        return unique_projected_resources(self.telemetry_records())
 
     def correlations(self) -> list[dict[str, Any]]:
         """Return unique correlation contexts for this loaded session."""
 
-        return unique_canonical_correlations(self.telemetry_records())
+        return unique_projected_correlations(self.telemetry_records())
 
 
 def _is_int(value: Any) -> bool:
@@ -1163,41 +1163,43 @@ def load_telemetry_events(
     return list(selected.events) if selected is not None else []
 
 
-def canonical_record_from_telemetry_event(
+def project_telemetry_event(
     event: TelemetryEvent | Mapping[str, Any],
-) -> CanonicalTelemetryRecord:
+) -> ProjectedTelemetryRecord:
     """Project telemetry objects or compatible mappings into the shared model."""
 
-    record = (
-        telemetry_event_to_dict(event) if isinstance(event, TelemetryEventV3) else event
-    )
+    record: Mapping[str, Any]
+    if isinstance(event, TelemetryEventV3):
+        record = telemetry_event_to_dict(event)
+    else:
+        record = event
     normalized = (
         telemetry_event_from_record(record)
         if not isinstance(event, TelemetryEventV3)
         else event
     )
-    return canonical_record_from_mapping(telemetry_event_to_dict(normalized))
+    return project_telemetry_mapping(telemetry_event_to_dict(normalized))
 
 
-def canonical_records_from_telemetry_events(
+def project_telemetry_events(
     events: Iterable[TelemetryEvent | Mapping[str, Any]],
-) -> list[CanonicalTelemetryRecord]:
-    """Project existing telemetry events into backend-neutral canonical records."""
+) -> list[ProjectedTelemetryRecord]:
+    """Project existing telemetry events into backend-neutral records."""
 
-    return [canonical_record_from_telemetry_event(event) for event in events]
+    return [project_telemetry_event(event) for event in events]
 
 
 __all__ = [
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_LATEST",
-    "CanonicalTelemetryRecord",
+    "ProjectedTelemetryRecord",
     "LoadedTelemetrySession",
     "TelemetryEvent",
     "TelemetryEventV2",
     "TelemetryEventV3",
-    "canonical_record_from_telemetry_event",
-    "canonical_records_from_telemetry_events",
+    "project_telemetry_event",
+    "project_telemetry_events",
     "load_telemetry_sessions",
     "telemetry_event_from_record",
     "telemetry_event_to_dict",

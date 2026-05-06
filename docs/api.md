@@ -44,9 +44,9 @@ Primary exported symbols:
 
 Telemetry model symbols exported from `stormlog.telemetry`:
 
-- `CanonicalTelemetryRecord`
-- `canonical_record_from_telemetry_event`
-- `canonical_records_from_telemetry_events`
+- `ProjectedTelemetryRecord`
+- `project_telemetry_event`
+- `project_telemetry_events`
 
 ### `stormlog.tensorflow` (TensorFlow workflows)
 

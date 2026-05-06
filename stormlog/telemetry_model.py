@@ -1,4 +1,4 @@
-"""Backend-neutral canonical telemetry record projection."""
+"""Backend-neutral projection over the persisted telemetry event schema."""
 
 from __future__ import annotations
 
@@ -9,7 +9,14 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Iterable, Literal, Mapping, Optional, cast
 
-CANONICAL_TELEMETRY_SCHEMA_VERSION: Literal[1] = 1
+# Bump this only with the docs, dataclass annotation, serialization tests, and
+# compatibility behavior for the projected envelope.
+TELEMETRY_PROJECTION_SCHEMA_VERSION: Literal[1] = 1
+
+_SUPPORTED_METADATA_SOURCE_KINDS = frozenset(
+    {"cpu", "cuda", "rocm", "mps", "tensorflow"}
+)
+_INFERRED_COLLECTOR_SOURCE_KINDS = ("cuda", "rocm", "mps", "cpu", "tensorflow")
 
 _SEVERITY_BY_EVENT_TYPE = {
     "critical": "critical",
@@ -26,7 +33,7 @@ _SEVERITY_BY_EVENT_TYPE = {
 
 
 @dataclass(frozen=True)
-class CanonicalTelemetryRecord:
+class ProjectedTelemetryRecord:
     """Small immutable event envelope shared by live and loaded telemetry."""
 
     schema_version: Literal[1]
@@ -50,7 +57,7 @@ def _freeze_value(value: Any) -> Any:
         return MappingProxyType(
             {str(key): _freeze_value(nested) for key, nested in value.items()}
         )
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze_value(item) for item in value)
     return value
 
@@ -78,18 +85,22 @@ def _record_id(record: Mapping[str, Any]) -> str:
     digest = hashlib.sha256(
         json.dumps(_jsonable_mapping(record), sort_keys=True).encode("utf-8")
     ).hexdigest()
+    # The 32-character prefix keeps a compact 128-bit identity while preserving
+    # deterministic grouping for the projected envelope.
     return f"telemetry-{digest[:32]}"
 
 
 def _source_kind(record: Mapping[str, Any], metadata: Mapping[str, Any]) -> str:
     backend = metadata.get("backend")
     if isinstance(backend, str) and backend.strip():
-        return backend.strip().lower()
+        normalized_backend = backend.strip().lower()
+        if normalized_backend in _SUPPORTED_METADATA_SOURCE_KINDS:
+            return normalized_backend
 
     collector = record.get("collector")
     if isinstance(collector, str):
         lowered = collector.lower()
-        for candidate in ("cuda", "rocm", "mps", "cpu", "tensorflow", "tpu"):
+        for candidate in _INFERRED_COLLECTOR_SOURCE_KINDS:
             if candidate in lowered:
                 return candidate
 
@@ -178,12 +189,12 @@ def _correlation(
     return correlation
 
 
-def canonical_record_from_mapping(
+def project_telemetry_mapping(
     record: Mapping[str, Any],
     *,
     observed_timestamp_ns: int | None = None,
-) -> CanonicalTelemetryRecord:
-    """Project a normalized telemetry mapping into the canonical envelope.
+) -> ProjectedTelemetryRecord:
+    """Project a normalized telemetry mapping into the projected envelope.
 
     Args:
         record: Existing normalized telemetry record, normally a
@@ -192,7 +203,7 @@ def canonical_record_from_mapping(
             source timestamp when no separate observation time is available.
 
     Returns:
-        Backend-neutral canonical telemetry record.
+        Backend-neutral projected telemetry record.
 
     Raises:
         ValueError: If required identity or timestamp fields are missing.
@@ -200,25 +211,25 @@ def canonical_record_from_mapping(
 
     session_id = record.get("session_id")
     if not isinstance(session_id, str) or not session_id.strip():
-        raise ValueError("canonical telemetry record requires session_id")
+        raise ValueError("projected telemetry record requires session_id")
 
     timestamp_ns = record.get("timestamp_ns")
     if not isinstance(timestamp_ns, int) or isinstance(timestamp_ns, bool):
-        raise ValueError("canonical telemetry record requires integer timestamp_ns")
+        raise ValueError("projected telemetry record requires integer timestamp_ns")
 
     event_type = record.get("event_type")
     if not isinstance(event_type, str) or not event_type.strip():
-        raise ValueError("canonical telemetry record requires event_type")
+        raise ValueError("projected telemetry record requires event_type")
 
     metadata_value = record.get("metadata", {})
     if not isinstance(metadata_value, Mapping):
-        raise ValueError("canonical telemetry record metadata must be a mapping")
+        raise ValueError("projected telemetry record metadata must be a mapping")
     metadata = dict(metadata_value)
     resolved_source_kind = _source_kind(record, metadata)
     body = record.get("context")
 
-    return CanonicalTelemetryRecord(
-        schema_version=CANONICAL_TELEMETRY_SCHEMA_VERSION,
+    return ProjectedTelemetryRecord(
+        schema_version=TELEMETRY_PROJECTION_SCHEMA_VERSION,
         record_id=_record_id(record),
         timestamp_ns=timestamp_ns,
         observed_timestamp_ns=(
@@ -241,8 +252,8 @@ def canonical_record_from_mapping(
     )
 
 
-def canonical_record_to_dict(record: CanonicalTelemetryRecord) -> dict[str, Any]:
-    """Serialize a canonical telemetry record to a deterministic dictionary."""
+def projected_record_to_dict(record: ProjectedTelemetryRecord) -> dict[str, Any]:
+    """Serialize a projected telemetry record to a deterministic dictionary."""
 
     return {
         "schema_version": record.schema_version,
@@ -262,10 +273,10 @@ def canonical_record_to_dict(record: CanonicalTelemetryRecord) -> dict[str, Any]
     }
 
 
-def unique_canonical_resources(
-    records: Iterable[CanonicalTelemetryRecord],
+def unique_projected_resources(
+    records: Iterable[ProjectedTelemetryRecord],
 ) -> list[dict[str, Any]]:
-    """Return stable unique resource dictionaries for canonical records."""
+    """Return stable unique resource dictionaries for projected telemetry records."""
 
     seen: set[str] = set()
     resources: list[dict[str, Any]] = []
@@ -279,10 +290,10 @@ def unique_canonical_resources(
     return resources
 
 
-def unique_canonical_correlations(
-    records: Iterable[CanonicalTelemetryRecord],
+def unique_projected_correlations(
+    records: Iterable[ProjectedTelemetryRecord],
 ) -> list[dict[str, Any]]:
-    """Return stable unique correlation dictionaries for canonical records."""
+    """Return stable unique correlation dictionaries for projected telemetry records."""
 
     seen: set[str] = set()
     correlations: list[dict[str, Any]] = []
@@ -297,10 +308,10 @@ def unique_canonical_correlations(
 
 
 __all__ = [
-    "CANONICAL_TELEMETRY_SCHEMA_VERSION",
-    "CanonicalTelemetryRecord",
-    "canonical_record_from_mapping",
-    "canonical_record_to_dict",
-    "unique_canonical_correlations",
-    "unique_canonical_resources",
+    "TELEMETRY_PROJECTION_SCHEMA_VERSION",
+    "ProjectedTelemetryRecord",
+    "project_telemetry_mapping",
+    "projected_record_to_dict",
+    "unique_projected_correlations",
+    "unique_projected_resources",
 ]
