@@ -219,7 +219,7 @@ def build_diagnostic_summary(
     #
     # compute_event_fields gives us utilization_ratio and allocator_gap_bytes;
     # allocator_gap_bytes is always 0 for TF (reserved == allocated).
-    # fragmentation_ratio is always None here (TF does not expose it).
+    # fragmentation_ratio remains 0.0 here (TF does not expose fragmentation).
     _synthetic_event = {
         "allocator_allocated_bytes": allocated,
         "allocator_reserved_bytes": allocated,
