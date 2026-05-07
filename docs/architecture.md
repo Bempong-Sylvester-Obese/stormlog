@@ -150,6 +150,7 @@ Analyzers turn raw or normalized memory data into higher-level findings.
 - `stormlog.analyzer.MemoryAnalyzer`
 - `stormlog.tensorflow.analyzer.MemoryAnalyzer`
 - gap-analysis and collective-attribution helpers in `stormlog`
+- common metric formulas centralized in `stormlog.derived_fields`
 
 These modules power:
 

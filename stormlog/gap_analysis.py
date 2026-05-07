@@ -7,6 +7,8 @@ from typing import Any, Callable, List, Mapping, Sequence, cast
 import numpy as np
 from scipy import stats
 
+from .derived_fields import compute_event_fields
+
 try:
     from .phases import PhaseAttribution, PhaseReplayIndex
 except ImportError:  # pragma: no cover - phase package may land in another slice
@@ -225,10 +227,10 @@ def _detect_gap_fragmentation_pattern(
     frag_ratios: List[float] = []
     frag_events: List[TelemetryEventV2] = []
     for event in events:
-        reserved = event.allocator_reserved_bytes
-        allocated = event.allocator_allocated_bytes
-        if reserved > 0:
-            frag_ratios.append((reserved - allocated) / reserved)
+        derived = compute_event_fields(event)
+        frag = derived.get("fragmentation_ratio")
+        if frag is not None:
+            frag_ratios.append(frag)
             frag_events.append(event)
 
     if not frag_ratios:
