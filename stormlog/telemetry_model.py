@@ -217,6 +217,18 @@ def project_telemetry_mapping(
     if not isinstance(timestamp_ns, int) or isinstance(timestamp_ns, bool):
         raise ValueError("projected telemetry record requires integer timestamp_ns")
 
+    if observed_timestamp_ns is not None:
+        if not isinstance(observed_timestamp_ns, int) or isinstance(
+            observed_timestamp_ns, bool
+        ):
+            raise ValueError(
+                "projected telemetry record requires integer observed_timestamp_ns"
+            )
+        if observed_timestamp_ns < 0:
+            raise ValueError(
+                "projected telemetry record requires non-negative observed_timestamp_ns"
+            )
+
     event_type = record.get("event_type")
     if not isinstance(event_type, str) or not event_type.strip():
         raise ValueError("projected telemetry record requires event_type")

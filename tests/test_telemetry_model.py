@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import MappingProxyType
-from typing import cast
+from typing import Any, cast
+
+import pytest
 
 from stormlog.telemetry import (
     SCHEMA_VERSION_V3,
@@ -16,6 +18,7 @@ from stormlog.telemetry import (
 )
 from stormlog.telemetry_model import (
     TELEMETRY_PROJECTION_SCHEMA_VERSION,
+    project_telemetry_mapping,
     projected_record_to_dict,
 )
 
@@ -170,3 +173,16 @@ def test_project_telemetry_events_preserves_order() -> None:
     records = project_telemetry_events(events)
 
     assert [record.event_type for record in records] == ["phase_enter", "phase_exit"]
+
+
+@pytest.mark.parametrize(  # type: ignore[misc]
+    "observed_timestamp_ns", ["1700000000", -1, True]
+)
+def test_projected_record_rejects_invalid_observed_timestamp(
+    observed_timestamp_ns: object,
+) -> None:
+    with pytest.raises(ValueError):
+        project_telemetry_mapping(
+            _v3_record(),
+            observed_timestamp_ns=cast(Any, observed_timestamp_ns),
+        )
