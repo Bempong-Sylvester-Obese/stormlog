@@ -1167,17 +1167,10 @@ def project_telemetry_event(
     event: TelemetryEvent | Mapping[str, Any],
 ) -> ProjectedTelemetryRecord:
     """Project telemetry objects or compatible mappings into the shared model."""
-
-    record: Mapping[str, Any]
     if isinstance(event, TelemetryEventV3):
-        record = telemetry_event_to_dict(event)
+        normalized = event
     else:
-        record = event
-    normalized = (
-        telemetry_event_from_record(record)
-        if not isinstance(event, TelemetryEventV3)
-        else event
-    )
+        normalized = telemetry_event_from_record(event)
     return project_telemetry_mapping(telemetry_event_to_dict(normalized))
 
 
