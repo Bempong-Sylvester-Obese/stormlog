@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import MappingProxyType
+
 import pytest
 
 from stormlog.derived_fields import (
@@ -195,6 +197,28 @@ def test_compute_event_fields_accepts_plain_dict() -> None:
     assert fields["utilization_ratio"] == pytest.approx(1024 / 8192)
     assert fields["fragmentation_ratio"] == pytest.approx(0.5)
     assert fields["is_degraded_collector"] is False
+
+
+def test_derived_field_helpers_accept_read_only_mapping() -> None:
+    event_mapping = MappingProxyType(
+        {
+            "allocator_allocated_bytes": 1024,
+            "allocator_reserved_bytes": 2048,
+            "device_total_bytes": 8192,
+            "collector": "stormlog.cuda_tracker",
+            "event_type": "stop",
+        }
+    )
+
+    fields = compute_event_fields(event_mapping)
+    session = compute_session_fields([event_mapping])
+    enriched = enrich_event(event_mapping)
+
+    assert fields["allocator_gap_bytes"] == 1024
+    assert fields["utilization_ratio"] == pytest.approx(1024 / 8192)
+    assert fields["fragmentation_ratio"] == pytest.approx(0.5)
+    assert session["is_session_interrupted"] is False
+    assert enriched["derived"] == fields
 
 
 # ---------------------------------------------------------------------------

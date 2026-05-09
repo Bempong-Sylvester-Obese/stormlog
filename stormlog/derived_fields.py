@@ -20,6 +20,7 @@ Usage::
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping as MappingABC
 from typing import Any, Dict, Sequence, TypedDict
 
 from .collector_health import COLLECTOR_HEALTH_DEGRADED
@@ -43,7 +44,7 @@ class DerivedFields(TypedDict, total=False):
     is_degraded_collector: bool
 
 
-class SessionDerivedFields(TypedDict, total=False):  # type false for nullable fields
+class SessionDerivedFields(TypedDict, total=False):
     """Session-scoped rollups computed across a sequence of events."""
 
     peak_utilization_ratio: None | float
@@ -88,7 +89,7 @@ def _compute_allocator_gap_bytes(
 ) -> int:
     """Reserved memory that the allocator holds but has not actively allocated.
 
-    Clamped to zero — negative values indicate a stale or inconsistent snapshot
+    Clamped to zero - negative values indicate a stale or inconsistent snapshot
     rather than a meaningful metric.
     """
     return max(0, allocator_reserved_bytes - allocator_allocated_bytes)
@@ -98,7 +99,7 @@ def _compute_utilization_ratio(
     allocator_allocated_bytes: int,
     device_total_bytes: None | int,
 ) -> None | float:
-    """Fraction of device capacity currently allocated (0.0 – 1.0)."""
+    """Fraction of device capacity currently allocated (0.0 - 1.0)."""
     if device_total_bytes is None or device_total_bytes <= 0:
         return None
     return allocator_allocated_bytes / device_total_bytes
@@ -127,8 +128,8 @@ def _compute_fragmentation_ratio(
 
 
 def _event_get(event: Any, key: str, default: Any = None) -> Any:
-    """Uniform attribute access — works for dataclasses and plain dicts alike."""
-    if isinstance(event, dict):
+    """Uniform attribute access for dataclasses and mapping inputs."""
+    if isinstance(event, MappingABC):
         return event.get(key, default)
     return getattr(event, key, default)
 
@@ -177,11 +178,11 @@ def compute_session_fields(events: Sequence[Any]) -> SessionDerivedFields:
     Returns:
         A :class:`SessionDerivedFields` dict with:
 
-        * ``peak_utilization_ratio`` — highest per-event utilization seen; or
+        * ``peak_utilization_ratio`` - highest per-event utilization seen; or
           ``None`` if ``device_total_bytes`` was unavailable in every event.
-        * ``avg_fragmentation_ratio`` — mean fragmentation ratio across events
+        * ``avg_fragmentation_ratio`` - mean fragmentation ratio across events
           where ``allocator_reserved_bytes > 0``; ``None`` if none qualify.
-        * ``is_session_interrupted`` — ``True`` when the last event is not a
+        * ``is_session_interrupted`` - ``True`` when the last event is not a
           ``"stop"`` event.
     """
     util_values: list[float] = []
@@ -226,7 +227,7 @@ def enrich_event(event: Any) -> Dict[str, Any]:
     Returns:
         ``{"schema_version": ..., ..., "derived": {"allocator_gap_bytes": ..., ...}}``
     """
-    if isinstance(event, dict):
+    if isinstance(event, MappingABC):
         raw: Dict[str, Any] = dict(event)
     elif dataclasses.is_dataclass(event):
         raw = dataclasses.asdict(event)
