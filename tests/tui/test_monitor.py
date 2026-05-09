@@ -150,6 +150,12 @@ def test_tracker_session_get_telemetry_events_normalizes_cpu_events(
     assert first.world_size == 4
     assert first.job_id == "job-123"
 
+    telemetry_records = session.telemetry_records()
+    assert len(telemetry_records) == 1
+    assert telemetry_records[0].source_kind == "cpu"
+    assert telemetry_records[0].resource["collector"] == "stormlog.cpu_tracker"
+    assert telemetry_records[0].attributes["memory.allocator.allocated_bytes"] == 1024
+
 
 def test_tracker_session_preserves_collector_health_metadata(
     monkeypatch: pytest.MonkeyPatch,

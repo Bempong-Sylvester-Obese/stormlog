@@ -45,6 +45,7 @@ cpu_compatibility
 compatibility_matrix
 benchmark_harness
 telemetry_schema
+telemetry_projection
 pytorch_testing_guide
 tensorflow_testing_guide
 article

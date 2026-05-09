@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Literal, Mapping, Optional
+from typing import Any, Iterable, Literal, Mapping, Optional
 
 from .session import (
     SESSION_STATUS_INCOMPLETE,
@@ -14,6 +14,12 @@ from .session import (
     select_default_loaded_session,
     sort_session_summaries,
     stable_legacy_session_id,
+)
+from .telemetry_model import (
+    ProjectedTelemetryRecord,
+    project_telemetry_mapping,
+    unique_projected_correlations,
+    unique_projected_resources,
 )
 from .telemetry_sink import (
     read_telemetry_sink_manifest,
@@ -147,6 +153,21 @@ class LoadedTelemetrySession:
     events: list[TelemetryEvent]
     sources_loaded: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    def telemetry_records(self) -> list[ProjectedTelemetryRecord]:
+        """Return backend-neutral projected records for this loaded session."""
+
+        return project_telemetry_events(self.events)
+
+    def resources(self) -> list[dict[str, Any]]:
+        """Return unique observed resources for this loaded session."""
+
+        return unique_projected_resources(self.telemetry_records())
+
+    def correlations(self) -> list[dict[str, Any]]:
+        """Return unique correlation contexts for this loaded session."""
+
+        return unique_projected_correlations(self.telemetry_records())
 
 
 def _is_int(value: Any) -> bool:
@@ -1142,14 +1163,36 @@ def load_telemetry_events(
     return list(selected.events) if selected is not None else []
 
 
+def project_telemetry_event(
+    event: TelemetryEvent | Mapping[str, Any],
+) -> ProjectedTelemetryRecord:
+    """Project telemetry objects or compatible mappings into the shared model."""
+    if isinstance(event, TelemetryEventV3):
+        normalized = event
+    else:
+        normalized = telemetry_event_from_record(event)
+    return project_telemetry_mapping(telemetry_event_to_dict(normalized))
+
+
+def project_telemetry_events(
+    events: Iterable[TelemetryEvent | Mapping[str, Any]],
+) -> list[ProjectedTelemetryRecord]:
+    """Project existing telemetry events into backend-neutral records."""
+
+    return [project_telemetry_event(event) for event in events]
+
+
 __all__ = [
     "SCHEMA_VERSION_V2",
     "SCHEMA_VERSION_V3",
     "SCHEMA_VERSION_LATEST",
+    "ProjectedTelemetryRecord",
     "LoadedTelemetrySession",
     "TelemetryEvent",
     "TelemetryEventV2",
     "TelemetryEventV3",
+    "project_telemetry_event",
+    "project_telemetry_events",
     "load_telemetry_sessions",
     "telemetry_event_from_record",
     "telemetry_event_to_dict",

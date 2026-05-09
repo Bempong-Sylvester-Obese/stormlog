@@ -436,7 +436,7 @@ def sample_timeline_rows(rows: Sequence[dict[str, Any]]) -> list[dict[str, Any]]
 
 
 def _memory_plot_series(
-    rows: Sequence[Mapping[str, Any]]
+    rows: Sequence[Mapping[str, Any]],
 ) -> tuple[list[str], list[list[float]]]:
     keys: list[str] = []
     series: list[list[float]] = []

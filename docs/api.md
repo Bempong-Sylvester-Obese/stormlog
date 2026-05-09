@@ -30,6 +30,7 @@ Core modules documented in generated pages:
 - `stormlog.profiler`
 - `stormlog.tracker`
 - `stormlog.telemetry`
+- `stormlog.telemetry_model`
 - `stormlog.cpu_profiler`
 
 Primary exported symbols:
@@ -40,6 +41,12 @@ Primary exported symbols:
 - `CPUMemoryTracker`
 - `MemoryVisualizer`
 - `TelemetryEventV2`
+
+Telemetry model symbols exported from `stormlog.telemetry`:
+
+- `ProjectedTelemetryRecord`
+- `project_telemetry_event`
+- `project_telemetry_events`
 
 ### `stormlog.tensorflow` (TensorFlow workflows)
 
