@@ -9,6 +9,7 @@ Generated API Modules
    stormlog.profiler
    stormlog.tracker
    stormlog.telemetry
+   stormlog.telemetry_model
    stormlog.timeline_markers
    stormlog.cpu_profiler
    stormlog.tensorflow
