@@ -1,8 +1,23 @@
-"""Textual-based terminal UI for Stormlog."""
+"""Textual-based terminal UI and top-level Stormlog dispatcher."""
+
+from __future__ import annotations
+
+import sys
 
 
-def run_app() -> None:
-    """Launch the TUI app while keeping textual imports lazy."""
+def run_app(argv: list[str] | None = None) -> None:
+    """Launch the TUI app or dispatch top-level Stormlog subcommands."""
+    resolved_argv = list(sys.argv[1:] if argv is None else argv)
+    if resolved_argv and resolved_argv[0] == "query":
+        from stormlog.query_cli import main as query_main
+
+        raise SystemExit(query_main(resolved_argv[1:]))
+    if resolved_argv and resolved_argv[0] in {"-h", "--help"}:
+        print("usage: stormlog [query ...]\n")
+        print("Launches the Stormlog TUI with no arguments.")
+        print("Use `stormlog query --help` to query local artifact directories.")
+        return
+
     try:
         from .app import run_app as _run_app
     except ModuleNotFoundError as exc:

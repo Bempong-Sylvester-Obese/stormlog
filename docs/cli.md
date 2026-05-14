@@ -33,6 +33,10 @@ pip install "stormlog[tui,torch]"
 stormlog
 ```
 
+The `stormlog` command is also a small dispatcher. Running it without
+arguments still launches the TUI, while `stormlog query ...` runs the local
+artifact query CLI without importing Textual.
+
 ## `gpumemprof`
 
 The current command groups are:
@@ -224,6 +228,72 @@ active-memory table in one file. For a maintained workflow example of that
 artifact, continue with [PyTorch Production Recipes](cookbook/pytorch.md). On
 MPS, ROCm, or CPU-only runtimes, the command fails explicitly instead of
 pretending support.
+
+## `stormlog query`
+
+`stormlog query` asks structured questions over local artifact directories. It
+uses the same canonical telemetry loaders as `gpumemprof analyze`, but exposes
+rows that are easier to filter, export, and reuse from automation.
+
+The query surface is local-first and file-backed. It reads sink manifests and
+bundle manifests before loading raw events, so listing sessions or OOM bundles
+does not require parsing every JSONL segment in a large sink directory.
+
+List sessions:
+
+```bash
+stormlog query sessions ./live_sink --status interrupted --json
+stormlog query sessions ./artifacts --has-oom-bundle --table
+```
+
+Query events:
+
+```bash
+stormlog query events ./live_sink \
+  --session-id 2b30f4a4-7d2d-48f7-a9f6-7d40c14eb95e \
+  --rank 0 \
+  --event-type collector_degraded \
+  --limit 50
+```
+
+List OOM bundles:
+
+```bash
+stormlog query ooms ./artifacts --backend cuda --table
+stormlog query ooms ./artifacts --created-after 2026-05-12T00:00:00Z --json
+```
+
+Run built-in summaries:
+
+```bash
+stormlog query summary ./live_sink \
+  --metric peak_allocator_reserved_bytes \
+  --group-by session
+
+stormlog query summary ./live_sink \
+  --metric hidden_memory_gap_growth \
+  --group-by session-rank
+```
+
+Supported output formats:
+
+- `--table`: readable table output, used by default
+- `--json`: machine-readable rows
+- `--csv`: row-query exports for `sessions`, `events`, and `ooms`
+
+The Python API behind the CLI is available as:
+
+```python
+import stormlog.query
+
+store = stormlog.query.open(["./live_sink", "./oom_dumps"])
+sessions = store.list_sessions()
+events = store.query_events()
+ooms = store.list_oom_bundles()
+```
+
+For engine-choice details and follow-on work, see
+[Local Query Layer](query_layer.md).
 
 ## `tfmemprof`
 
