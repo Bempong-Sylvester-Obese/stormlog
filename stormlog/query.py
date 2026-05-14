@@ -544,8 +544,6 @@ class QueryStore:
                     )
                     if _event_matches(row, filters):
                         rows.append(row)
-                        if filters.limit is not None and len(rows) >= filters.limit:
-                            return rows
 
         rows.sort(key=lambda row: (row.event.timestamp_ns, row.event.session_id))
         if filters.limit is not None:
@@ -558,9 +556,7 @@ class QueryStore:
     ) -> list[OOMBundleRow]:
         """Return filtered OOM bundle rows."""
         filters = filters or OOMBundleFilter()
-        session_status_by_id = {
-            row.session_id: row.status for row in self.list_sessions(SessionFilter())
-        }
+        session_status_by_id = self._manifest_session_status_by_id()
         rows = [
             OOMBundleRow(
                 bundle_path=str(bundle.bundle_path),
@@ -585,6 +581,24 @@ class QueryStore:
         rows = [row for row in rows if _oom_matches(row, filters)]
         rows.sort(key=lambda row: (row.created_at_utc or "", row.bundle_path))
         return rows
+
+    def _manifest_session_status_by_id(self) -> dict[str, str]:
+        statuses: dict[str, str] = {}
+        for source in self.catalog.sources:
+            if source.source_kind == "sink":
+                manifest = read_telemetry_sink_manifest(source.path)
+                if manifest is None:
+                    continue
+                for summary in manifest.sessions:
+                    statuses.setdefault(summary.session_id, summary.status)
+            elif source.source_kind == "diagnose_bundle":
+                diagnose_summary = _diagnose_session_summary(source.manifest_path)
+                if diagnose_summary is not None:
+                    statuses.setdefault(
+                        diagnose_summary.session_id,
+                        diagnose_summary.status,
+                    )
+        return statuses
 
     def summarize(
         self,

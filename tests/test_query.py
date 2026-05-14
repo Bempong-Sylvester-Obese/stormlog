@@ -62,7 +62,7 @@ def _write_oom_bundle(
     root: Path,
     *,
     session_id: str,
-    session_status: str = SESSION_STATUS_INTERRUPTED,
+    session_status: str | None = SESSION_STATUS_INTERRUPTED,
 ) -> Path:
     bundle = root / "oom_dump_20260512T000000Z_123_cuda_1"
     bundle.mkdir(parents=True)
@@ -74,9 +74,10 @@ def _write_oom_bundle(
         "backend": "cuda",
         "event_count": 2,
         "session_id": session_id,
-        "session_status": session_status,
         "files": ["manifest.json", "metadata.json"],
     }
+    if session_status is not None:
+        manifest["session_status"] = session_status
     metadata = {
         "exception_type": "RuntimeError",
         "exception_module": "builtins",
@@ -152,6 +153,27 @@ def test_query_events_filters_and_adds_provenance(tmp_path: Path) -> None:
     assert payload["session_status"] == SESSION_STATUS_INCOMPLETE
 
 
+def test_query_events_limit_applies_after_global_sort(tmp_path: Path) -> None:
+    late_path = tmp_path / "late_track.json"
+    early_path = tmp_path / "early_track.json"
+    _write_json_events(
+        late_path,
+        [_event_record(session_id="session-late", timestamp_ns=200)],
+    )
+    _write_json_events(
+        early_path,
+        [_event_record(session_id="session-early", timestamp_ns=100)],
+    )
+
+    rows = query_api.open([late_path, early_path]).query_events(
+        query_api.EventFilter(limit=1)
+    )
+
+    assert len(rows) == 1
+    assert rows[0].event.session_id == "session-early"
+    assert rows[0].event.timestamp_ns == 100
+
+
 def test_list_oom_bundles_links_to_sessions(tmp_path: Path) -> None:
     session = create_session_summary(
         source="stormlog.test",
@@ -191,6 +213,58 @@ def test_list_oom_bundles_links_to_sessions(tmp_path: Path) -> None:
     assert oom_rows[0].session_id == "session-oom"
     assert oom_rows[0].session_status == SESSION_STATUS_INTERRUPTED
     assert oom_rows[0].exception_type == "RuntimeError"
+
+
+def test_list_oom_bundles_uses_only_manifest_backed_session_status(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    session = create_session_summary(
+        source="stormlog.test",
+        status=SESSION_STATUS_COMPLETED,
+        session_id="session-manifest-only",
+        started_at_ns=10,
+        host="host-a",
+        pid=123,
+    )
+    diagnose = tmp_path / "diag"
+    diagnose.mkdir()
+    (diagnose / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "created_iso": "2026-05-12T00:00:00Z",
+                "command_line": "gpumemprof diagnose",
+                "files": ["manifest.json"],
+                "exit_code": 0,
+                "risk_detected": False,
+                "session_id": "session-manifest-only",
+                "session_status": SESSION_STATUS_COMPLETED,
+                "session": session_summary_to_dict(session),
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_oom_bundle(
+        tmp_path,
+        session_id="session-manifest-only",
+        session_status=None,
+    )
+    _write_json_events(
+        tmp_path / "track.json",
+        [_event_record(session_id="flat-session", timestamp_ns=1)],
+    )
+
+    def _fail_load(*args: Any, **kwargs: Any) -> list[Any]:
+        raise AssertionError("OOM listing should not materialize flat telemetry")
+
+    monkeypatch.setattr(query_api, "load_telemetry_sessions", _fail_load)
+
+    rows = query_api.open([tmp_path]).list_oom_bundles()
+
+    assert len(rows) == 1
+    assert rows[0].session_id == "session-manifest-only"
+    assert rows[0].session_status == SESSION_STATUS_COMPLETED
 
 
 def test_query_summaries_cover_sessions_peaks_alerts_and_gap_growth(
