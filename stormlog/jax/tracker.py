@@ -114,7 +114,7 @@ class _TrackingResultData:
     dropped_alerts: int
 
 
-class JAXMemoryTracker:
+class MemoryTracker:
     """Real-time JAX device memory tracker."""
 
     def __init__(
@@ -1057,7 +1057,7 @@ class JAXMemoryTracker:
 
         Usage::
 
-            tracker = JAXMemoryTracker(enable_oom_flight_recorder=True)
+            tracker = MemoryTracker(enable_oom_flight_recorder=True)
             tracker.start_tracking()
             with tracker.capture_oom("training_step"):
                 risky_jax_computation()

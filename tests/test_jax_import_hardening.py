@@ -25,11 +25,11 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
         assert stormlog.jax.__name__ == "stormlog.jax"
 
         try:
-            _ = stormlog.jax.JAXMemoryTracker
+            _ = stormlog.jax.MemoryTracker
         except ImportError as exc:
             assert "stormlog[jax]" in str(exc)
         else:
-            raise AssertionError("Expected JAXMemoryTracker symbol load to fail lazily without jax")
+            raise AssertionError("Expected MemoryTracker symbol load to fail lazily without jax")
 
         try:
             _ = stormlog.jax.JAXMemoryProfiler

@@ -16,7 +16,7 @@ _JAX_INSTALL_GUIDANCE = (
 
 _SYMBOL_TO_MODULE = {
     "JAXMemoryProfiler": (".profiler", "JAXMemoryProfiler"),
-    "JAXMemoryTracker": (".tracker", "JAXMemoryTracker"),
+    "MemoryTracker": (".tracker", "MemoryTracker"),
     "MemoryWatchdog": (".tracker", "MemoryWatchdog"),
     "get_device_info": (".utils", "get_device_info"),
     "get_system_info": (".utils", "get_system_info"),
@@ -64,7 +64,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "__version__",
     "JAXMemoryProfiler",
-    "JAXMemoryTracker",
+    "MemoryTracker",
     "MemoryWatchdog",
     "get_device_info",
     "get_system_info",

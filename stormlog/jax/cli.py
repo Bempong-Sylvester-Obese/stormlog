@@ -49,7 +49,7 @@ except ImportError:
 
 if JAX_AVAILABLE:
     from .diagnose import run_diagnose
-    from .tracker import JAXMemoryTracker
+    from .tracker import MemoryTracker
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -180,7 +180,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     print("Press Ctrl+C to stop\n")
 
     max_history = int(getattr(args, "max_history", 10000))
-    tracker = JAXMemoryTracker(
+    tracker = MemoryTracker(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,
@@ -272,7 +272,7 @@ def cmd_track(args: argparse.Namespace) -> int:
     oom_max_total_mb = int(getattr(args, "oom_max_total_mb", 256))
     max_history = int(getattr(args, "max_history", 10000))
 
-    tracker = JAXMemoryTracker(
+    tracker = MemoryTracker(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,

@@ -19,7 +19,7 @@ from stormlog.session import (
     update_session_summary,
 )
 
-from .tracker import JAXMemoryTracker
+from .tracker import MemoryTracker
 from .utils import get_backend_info, get_device_info, get_system_info
 
 HIGH_UTILIZATION_RATIO = 0.85
@@ -111,7 +111,7 @@ def run_timeline_capture(
         return {"timestamps": [], "allocated": [], "reserved": []}
 
     try:
-        tracker = JAXMemoryTracker(
+        tracker = MemoryTracker(
             sampling_interval=interval,
             device_index=device_index,
             enable_logging=False,

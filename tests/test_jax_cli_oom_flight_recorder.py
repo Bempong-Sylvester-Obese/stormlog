@@ -117,7 +117,7 @@ def test_jax_cmd_track_passes_oom_config_and_wraps_capture(
             return None
 
     monkeypatch.setattr(jax_cli, "JAX_AVAILABLE", True)
-    monkeypatch.setattr(jax_cli, "JAXMemoryTracker", _FakeTracker, raising=False)
+    monkeypatch.setattr(jax_cli, "MemoryTracker", _FakeTracker, raising=False)
     monkeypatch.setattr(
         jax_cli,
         "wandb_config_from_namespace",
@@ -227,7 +227,7 @@ def test_jax_cmd_track_exports_oom_bundle_to_wandb(
             return session_summary
 
     monkeypatch.setattr(jax_cli, "JAX_AVAILABLE", True)
-    monkeypatch.setattr(jax_cli, "JAXMemoryTracker", _FakeTracker, raising=False)
+    monkeypatch.setattr(jax_cli, "MemoryTracker", _FakeTracker, raising=False)
     monkeypatch.setattr(jax_cli, "WANDB_AVAILABLE", True)
     monkeypatch.setattr(
         jax_cli,
