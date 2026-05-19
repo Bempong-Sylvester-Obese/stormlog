@@ -1,0 +1,930 @@
+"""
+Real-time JAX Memory Tracking.
+
+This module provides real-time monitoring of JAX device memory usage,
+integrating with Stormlog's shared telemetry, session, and phase
+tracking infrastructure.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import socket
+import threading
+import time
+from collections import deque
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import Any, Callable, Dict, Iterator, List, Optional
+
+from stormlog.collector_health import (
+    COLLECTOR_HEALTH_HEALTHY,
+    COLLECTOR_HEALTH_UNHEALTHY,
+    CollectorHealthState,
+    collector_retry_delay_seconds,
+)
+from stormlog.phases import PhaseHandle, PhaseRecorder, PhaseToken
+from stormlog.session import (
+    SESSION_STATUS_COMPLETED,
+    SESSION_STATUS_INCOMPLETE,
+    SESSION_STATUS_RUNNING,
+    SessionSummary,
+    create_session_summary,
+    finalize_session_summary,
+    now_ns,
+    update_session_summary,
+)
+from stormlog.telemetry import (
+    resolve_distributed_identity,
+    telemetry_event_from_record,
+    telemetry_event_to_dict,
+)
+from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
+
+from .jax_env import configure_jax_logging
+
+configure_jax_logging()
+
+try:
+    import jax
+
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+    jax = None
+
+try:
+    import psutil
+
+    PSUTIL_AVAILABLE = True
+except ImportError:
+    PSUTIL_AVAILABLE = False
+    psutil = None
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass
+class JAXTrackingResult:
+    """Results from real-time JAX memory tracking."""
+
+    start_time: float
+    end_time: float
+    samples_collected: int
+    peak_memory_bytes: int
+    min_memory_bytes: int
+    average_memory_bytes: int
+    alert_count: int
+    session_summary: Optional[SessionSummary] = None
+    telemetry_events: List[Dict[str, Any]] = field(default_factory=list)
+    device_memory_profile_path: Optional[str] = None
+
+    history_window_limit: int = 0
+    history_retained_samples: int = 0
+    history_dropped_samples: int = 0
+    history_retained_events: int = 0
+    history_dropped_events: int = 0
+    history_retained_alerts: int = 0
+    history_dropped_alerts: int = 0
+
+    @property
+    def duration(self) -> float:
+        """Total tracking duration in seconds."""
+        return self.end_time - self.start_time
+
+
+@dataclass(frozen=True)
+class _TrackingResultData:
+    retained_memory_usage: List[int]
+    retained_timestamps: List[float]
+    retained_events: List[Dict[str, Any]]
+    retained_alerts: List[Dict[str, Any]]
+    total_samples_observed: int
+    peak_memory: int
+    min_memory: int
+    sum_memory: int
+    dropped_samples: int
+    dropped_events: int
+    dropped_alerts: int
+
+
+class JAXMemoryTracker:
+    """Real-time JAX device memory tracker."""
+
+    def __init__(
+        self,
+        sampling_interval: float = 1.0,
+        alert_threshold_mb: Optional[float] = None,
+        device_index: int = 0,
+        enable_logging: bool = True,
+        max_history: int = 10_000,
+        job_id: Optional[str] = None,
+        rank: Optional[int] = None,
+        local_rank: Optional[int] = None,
+        world_size: Optional[int] = None,
+        telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
+        save_device_profile_on_stop: bool = False,
+    ):
+        if not JAX_AVAILABLE:
+            raise ImportError(
+                "JAX not available. Install with `pip install 'stormlog[jax]'`."
+            )
+        if sampling_interval <= 0:
+            raise ValueError("sampling_interval must be > 0")
+        if max_history <= 0:
+            raise ValueError("max_history must be >= 1")
+
+        self.sampling_interval = sampling_interval
+        self.alert_threshold_mb = alert_threshold_mb
+        self.device_index = device_index
+        self.enable_logging = enable_logging
+        self.max_history = max_history
+        self.save_device_profile_on_stop = save_device_profile_on_stop
+
+        self._device = None
+        try:
+            devices = jax.local_devices()
+            if device_index < len(devices):
+                self._device = devices[device_index]
+        except Exception as exc:
+            logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
+
+        self._telemetry_sink_config = telemetry_sink_config
+        self._telemetry_sink = (
+            AppendOnlyTelemetrySink(telemetry_sink_config)
+            if telemetry_sink_config is not None
+            else None
+        )
+
+        self.distributed_identity = resolve_distributed_identity(
+            job_id=job_id,
+            rank=rank,
+            local_rank=local_rank,
+            world_size=world_size,
+            env=os.environ,
+        )
+
+        self.session_source = "stormlog.jax.tracker"
+        self._session_summary: Optional[SessionSummary] = None
+
+        # Tracking state
+        self.tracking = False
+        self.tracking_thread: Optional[threading.Thread] = None
+        self._memory_usage: deque[int] = deque(maxlen=max_history)
+        self._timestamps: deque[float] = deque(maxlen=max_history)
+        self._events: deque[Dict[str, Any]] = deque(maxlen=max_history)
+        self._alerts: deque[Dict[str, Any]] = deque(maxlen=max_history)
+
+        self._history_dropped_samples = 0
+        self._history_dropped_events = 0
+        self._history_dropped_alerts = 0
+        self._collector_failure_event_count = 0
+
+        self._total_samples_observed = 0
+        self._peak_memory_bytes = 0
+        self._min_memory_bytes = -1
+        self._sum_memory_bytes = 0
+
+        self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
+        self._phase_state = PhaseRecorder()
+
+        # Thread sync
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._collector_health = CollectorHealthState()
+        self._last_successful_memory_bytes: Optional[int] = None
+        self._session_start_time: Optional[float] = None
+        self._session_end_time: Optional[float] = None
+
+        self._collector_retry_backoff_initial_s = 1.0
+        self._collector_retry_backoff_factor = 2.0
+        self._collector_retry_backoff_cap_s = 30.0
+
+        self.alert_callbacks: List[Callable[[Dict[str, Any]], None]] = []
+
+        if enable_logging:
+            logger.info(
+                "JAX Memory Tracker initialized for device index %d", device_index
+            )
+
+    @staticmethod
+    def _empty_sink_diagnostics() -> Dict[str, int]:
+        return {
+            "rollover_count": 0,
+            "pruned_segment_count": 0,
+            "pruned_bytes": 0,
+            "final_retained_files": 0,
+            "final_retained_bytes": 0,
+        }
+
+    def _reset_history(self) -> None:
+        self._memory_usage.clear()
+        self._timestamps.clear()
+        self._events.clear()
+        self._alerts.clear()
+        self._history_dropped_samples = 0
+        self._history_dropped_events = 0
+        self._history_dropped_alerts = 0
+        self._collector_failure_event_count = 0
+        self._total_samples_observed = 0
+        self._peak_memory_bytes = 0
+        self._min_memory_bytes = -1
+        self._sum_memory_bytes = 0
+        self._last_sink_diagnostics = self._empty_sink_diagnostics()
+
+    def _tracking_result_data(self) -> _TrackingResultData:
+        return _TrackingResultData(
+            retained_memory_usage=list(self._memory_usage),
+            retained_timestamps=list(self._timestamps),
+            retained_events=list(self._events),
+            retained_alerts=list(self._alerts),
+            total_samples_observed=self._total_samples_observed,
+            peak_memory=self._peak_memory_bytes,
+            min_memory=max(self._min_memory_bytes, 0),
+            sum_memory=self._sum_memory_bytes,
+            dropped_samples=self._history_dropped_samples,
+            dropped_events=self._history_dropped_events,
+            dropped_alerts=self._history_dropped_alerts,
+        )
+
+    def _ensure_session_summary(self) -> SessionSummary:
+        if self._session_summary is None:
+            summary = create_session_summary(
+                source=self.session_source,
+                status=SESSION_STATUS_RUNNING,
+                started_at_ns=now_ns(),
+                host=socket.gethostname(),
+                pid=os.getpid(),
+                job_id=self.distributed_identity["job_id"],
+                rank=self.distributed_identity["rank"],
+                local_rank=self.distributed_identity["local_rank"],
+                world_size=self.distributed_identity["world_size"],
+            )
+            if self._telemetry_sink is not None and hasattr(
+                self._telemetry_sink, "start_session"
+            ):
+                summary = self._telemetry_sink.start_session(summary)
+            self._session_summary = summary
+        return self._session_summary
+
+    def get_session_summary(self) -> Optional[SessionSummary]:
+        return self._session_summary
+
+    def _ensure_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None and self._telemetry_sink_config is not None:
+            self._telemetry_sink = AppendOnlyTelemetrySink(self._telemetry_sink_config)
+
+    def _get_current_device_memory(self) -> int:
+        if self._device is None:
+            return 0
+        # Flush XLA async dispatch
+        jax.numpy.zeros(1, device=self._device).block_until_ready()
+        stats = self._device.memory_stats()
+        if stats:
+            return int(stats.get("bytes_in_use", 0))
+        return 0
+
+    def _get_current_cpu_memory(self) -> int:
+        if PSUTIL_AVAILABLE and psutil is not None:
+            return int(psutil.Process().memory_info().rss)
+        return 0
+
+    def _get_current_memory(self) -> int:
+        if self._device is not None:
+            return self._get_current_device_memory()
+        return self._get_current_cpu_memory()
+
+    def _build_telemetry_event_record(
+        self,
+        *,
+        timestamp: float,
+        memory_bytes: int,
+        event_type: str = "sample",
+        context: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        sampling_interval_ms = int(round(self.sampling_interval * 1000))
+        # JAX reserved == allocated
+        legacy = {
+            "session_id": self._ensure_session_summary().session_id,
+            "timestamp": timestamp,
+            "type": event_type,
+            "memory_mb": memory_bytes / (1024 * 1024),
+            "allocator_allocated_bytes": memory_bytes,
+            "allocator_reserved_bytes": memory_bytes,
+            "device_id": self.device_index,
+            "context": context,
+            "metadata": {
+                **dict(metadata or {}),
+                **self._collector_health.to_dict(),
+            },
+            "collector": "stormlog.jax.memory_tracker",
+            "sampling_interval_ms": sampling_interval_ms,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
+            "job_id": self.distributed_identity["job_id"],
+            "rank": self.distributed_identity["rank"],
+            "local_rank": self.distributed_identity["local_rank"],
+            "world_size": self.distributed_identity["world_size"],
+        }
+
+        # Pull total capacity if available
+        if self._device:
+            stats = self._device.memory_stats()
+            if stats and "bytes_limit" in stats:
+                legacy["device_total_bytes"] = int(stats["bytes_limit"])
+
+        event = telemetry_event_from_record(
+            legacy,
+            default_collector="stormlog.jax.memory_tracker",
+            default_sampling_interval_ms=sampling_interval_ms,
+            default_session_id=self._ensure_session_summary().session_id,
+        )
+        return telemetry_event_to_dict(event)
+
+    def _append_event(
+        self,
+        *,
+        timestamp: float,
+        memory_bytes: int,
+        event_type: str,
+        context: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        record = self._build_telemetry_event_record(
+            timestamp=timestamp,
+            memory_bytes=memory_bytes,
+            event_type=event_type,
+            context=context,
+            metadata=metadata,
+        )
+        with self._lock:
+            if len(self._events) == self.max_history:
+                self._history_dropped_events += 1
+            self._events.append(record)
+        self._append_to_telemetry_sink(record)
+
+    def _set_collector_health(
+        self,
+        *,
+        status: str,
+        telemetry_partial: bool,
+        last_error: Optional[str] = None,
+        consecutive_failures: int = 0,
+        next_retry_epoch_s: Optional[float] = None,
+    ) -> None:
+        self._collector_health = CollectorHealthState(
+            status=status,
+            telemetry_partial=telemetry_partial,
+            last_error=last_error,
+            consecutive_failures=consecutive_failures,
+            next_retry_epoch_s=next_retry_epoch_s,
+        )
+
+    def _retry_collection_due(self, now: float) -> bool:
+        retry_at = self._collector_health.next_retry_epoch_s
+        return retry_at is None or now >= retry_at
+
+    def _status_memory_value(self) -> int:
+        return self._last_successful_memory_bytes or 0
+
+    def _transition_to_failure(self, timestamp: float, exc: BaseException) -> None:
+        previous_health = self._collector_health
+        consecutive_failures = previous_health.consecutive_failures + 1
+        retry_delay_s = collector_retry_delay_seconds(
+            consecutive_failures,
+            initial_delay_s=self._collector_retry_backoff_initial_s,
+            factor=self._collector_retry_backoff_factor,
+            max_delay_s=self._collector_retry_backoff_cap_s,
+        )
+        next_retry_epoch_s = timestamp + retry_delay_s if retry_delay_s > 0 else None
+        error_message = str(exc)
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_UNHEALTHY,
+            telemetry_partial=True,
+            last_error=error_message,
+            consecutive_failures=consecutive_failures,
+            next_retry_epoch_s=next_retry_epoch_s,
+        )
+        if previous_health.status == COLLECTOR_HEALTH_HEALTHY:
+            self._collector_failure_event_count += 1
+            self._append_event(
+                timestamp=timestamp,
+                memory_bytes=self._status_memory_value(),
+                event_type="collector_degraded",
+                context="Collector unavailable; telemetry paused until recovery.",
+                metadata={
+                    "collector_transition": "degraded",
+                    "collector_degraded_from": previous_health.status,
+                    "collector_degradation_reason": error_message,
+                    "collector_retry_delay_s": retry_delay_s,
+                },
+            )
+        if self.enable_logging:
+            logger.warning("Could not get memory usage: %s", error_message)
+
+    def _transition_to_success(self, timestamp: float) -> None:
+        previous_health = self._collector_health
+        previous_error = previous_health.last_error
+        previous_failures = previous_health.consecutive_failures
+        if previous_health.status != COLLECTOR_HEALTH_HEALTHY:
+            self._set_collector_health(
+                status=COLLECTOR_HEALTH_HEALTHY,
+                telemetry_partial=False,
+            )
+            self._collector_failure_event_count += 1
+            self._append_event(
+                timestamp=timestamp,
+                memory_bytes=self._status_memory_value(),
+                event_type="collector_recovered",
+                context="Collector recovered; full telemetry sampling resumed.",
+                metadata={
+                    "collector_transition": "recovered",
+                    "collector_recovered_from": previous_health.status,
+                    "collector_previous_error": previous_error,
+                    "collector_previous_failure_count": previous_failures,
+                },
+            )
+            return
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
+
+    def _run_tracking_iteration(self) -> None:
+        current_time = time.time()
+        if not self._retry_collection_due(current_time):
+            return
+
+        try:
+            current_memory = self._get_current_memory()
+        except Exception as exc:
+            self._transition_to_failure(current_time, exc)
+            return
+
+        self._last_successful_memory_bytes = current_memory
+        self._transition_to_success(current_time)
+
+        with self._lock:
+            if len(self._memory_usage) == self.max_history:
+                self._history_dropped_samples += 1
+            self._memory_usage.append(current_memory)
+            self._timestamps.append(current_time)
+
+            self._total_samples_observed += 1
+            self._peak_memory_bytes = max(self._peak_memory_bytes, current_memory)
+            if self._min_memory_bytes == -1:
+                self._min_memory_bytes = current_memory
+            else:
+                self._min_memory_bytes = min(self._min_memory_bytes, current_memory)
+            self._sum_memory_bytes += current_memory
+
+        self._append_event(
+            timestamp=current_time,
+            memory_bytes=current_memory,
+            event_type="sample",
+        )
+
+        if self.alert_threshold_mb:
+            current_mb = current_memory / (1024 * 1024)
+            if current_mb > self.alert_threshold_mb:
+                self._trigger_alert(current_mb, current_time)
+
+    def _tracking_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                self._run_tracking_iteration()
+                self._flush_telemetry_sink()
+                self._stop_event.wait(self.sampling_interval)
+            except Exception as e:
+                if self.enable_logging:
+                    logger.error("Error in tracking loop: %s", e)
+                self._flush_telemetry_sink(force=True)
+                self._stop_event.wait(self.sampling_interval)
+
+    def _trigger_alert(self, memory_mb: float, timestamp: float) -> None:
+        alert = {
+            "timestamp": timestamp,
+            "memory_mb": memory_mb,
+            "threshold_mb": self.alert_threshold_mb,
+            "message": f"Memory usage {memory_mb:.1f} MB exceeds threshold {self.alert_threshold_mb:.1f} MB",
+        }
+
+        with self._lock:
+            if len(self._alerts) == self.max_history:
+                self._history_dropped_alerts += 1
+            self._alerts.append(alert)
+
+        if self.enable_logging:
+            logger.warning(alert["message"])
+
+        for callback in self.alert_callbacks:
+            try:
+                callback(alert)
+            except Exception as e:
+                if self.enable_logging:
+                    logger.error("Error in alert callback: %s", e)
+
+    def add_alert_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        self.alert_callbacks.append(callback)
+
+    def set_alert_threshold(self, threshold_mb: float) -> None:
+        self.alert_threshold_mb = threshold_mb
+        if self.enable_logging:
+            logger.info("Updated alert threshold to %s MB", threshold_mb)
+
+    def check_alerts(self) -> bool:
+        with self._lock:
+            recent_alerts = [
+                alert
+                for alert in self._alerts
+                if time.time() - alert["timestamp"] < 10.0
+            ]
+            return len(recent_alerts) > 0
+
+    def start_tracking(self) -> None:
+        if self.tracking:
+            if self.enable_logging:
+                logger.warning("Tracking already started")
+            return
+
+        self._session_start_time = time.time()
+        self._session_end_time = None
+        self._session_summary = None
+        self._phase_state.reset()
+        self._ensure_telemetry_sink()
+        self._stop_event.clear()
+
+        with self._lock:
+            self._reset_history()
+
+        self._last_successful_memory_bytes = None
+        self._set_collector_health(
+            status=COLLECTOR_HEALTH_HEALTHY,
+            telemetry_partial=False,
+        )
+
+        self._ensure_session_summary()
+
+        self.tracking_thread = threading.Thread(target=self._tracking_loop, daemon=True)
+        self.tracking_thread.start()
+        self.tracking = True
+
+        self._append_event(
+            timestamp=self._session_start_time,
+            memory_bytes=self._status_memory_value(),
+            event_type="start",
+            context="Memory tracking started",
+        )
+
+        if self.enable_logging:
+            logger.info(
+                "Started JAX memory tracking with %ss interval", self.sampling_interval
+            )
+
+    def stop_tracking(self) -> JAXTrackingResult:
+        if not self.tracking:
+            if self.enable_logging:
+                logger.warning("Tracking not started")
+            return self._create_empty_result()
+
+        self.tracking = False
+        self._stop_event.set()
+
+        if self.tracking_thread:
+            self.tracking_thread.join(timeout=5.0)
+
+        self._session_end_time = time.time()
+        self._append_event(
+            timestamp=self._session_end_time,
+            memory_bytes=self._status_memory_value(),
+            event_type="stop",
+            context="Memory tracking stopped",
+        )
+
+        profile_path = None
+        if self.save_device_profile_on_stop:
+            profile_path = self.save_device_memory_profile_to_dir()
+
+        self._close_telemetry_sink()
+
+        if self._session_summary is not None:
+            self._session_summary = finalize_session_summary(
+                self._session_summary,
+                ended_at_ns=now_ns(),
+            )
+
+        self._phase_state.reset()
+
+        result = self._create_tracking_result()
+        result.device_memory_profile_path = profile_path
+
+        if self.enable_logging:
+            logger.info(
+                "Stopped memory tracking. Peak usage: %.1f MB",
+                result.peak_memory_bytes / (1024 * 1024),
+            )
+
+        return result
+
+    def _create_tracking_result(self) -> JAXTrackingResult:
+        with self._lock:
+            result_data = self._tracking_result_data()
+            if (
+                not result_data.retained_memory_usage
+                and not result_data.retained_events
+                and not result_data.retained_alerts
+            ):
+                return self._create_empty_result()
+
+            session_start = self._session_start_time
+            session_end = self._session_end_time
+            if session_start is None:
+                session_start = (
+                    result_data.retained_timestamps[0]
+                    if result_data.retained_timestamps
+                    else time.time()
+                )
+            if session_end is None:
+                session_end = (
+                    result_data.retained_timestamps[-1]
+                    if result_data.retained_timestamps
+                    else time.time()
+                )
+
+            return JAXTrackingResult(
+                start_time=session_start,
+                end_time=session_end,
+                samples_collected=result_data.total_samples_observed,
+                peak_memory_bytes=(
+                    result_data.peak_memory if result_data.total_samples_observed else 0
+                ),
+                average_memory_bytes=(
+                    int(result_data.sum_memory / result_data.total_samples_observed)
+                    if result_data.total_samples_observed
+                    else 0
+                ),
+                min_memory_bytes=(
+                    max(result_data.min_memory, 0)
+                    if result_data.total_samples_observed
+                    else 0
+                ),
+                alert_count=len(result_data.retained_alerts),
+                session_summary=self._session_summary,
+                telemetry_events=result_data.retained_events,
+                history_window_limit=self.max_history,
+                history_retained_samples=len(result_data.retained_memory_usage),
+                history_dropped_samples=result_data.dropped_samples,
+                history_retained_events=len(result_data.retained_events),
+                history_dropped_events=result_data.dropped_events,
+                history_retained_alerts=len(result_data.retained_alerts),
+                history_dropped_alerts=result_data.dropped_alerts,
+            )
+
+    def _create_empty_result(self) -> JAXTrackingResult:
+        current_time = time.time()
+        start_time = self._session_start_time or current_time
+        end_time = self._session_end_time or start_time
+        return JAXTrackingResult(
+            start_time=start_time,
+            end_time=end_time,
+            samples_collected=0,
+            peak_memory_bytes=0,
+            average_memory_bytes=0,
+            min_memory_bytes=0,
+            alert_count=0,
+            session_summary=self._session_summary,
+            history_window_limit=self.max_history,
+        )
+
+    def get_current_memory(self) -> float:
+        """Get current memory usage in MB."""
+        try:
+            return self._get_current_memory() / (1024 * 1024)
+        except Exception:
+            return float(self._last_successful_memory_bytes or 0) / (1024 * 1024)
+
+    def get_statistics(self) -> dict[str, Any]:
+        with self._lock:
+            retained_events = len(self._events)
+            retained_samples = len(self._memory_usage)
+            retained_alerts = len(self._alerts)
+            peak_memory = self._peak_memory_bytes if self._total_samples_observed else 0
+            average_memory = (
+                self._sum_memory_bytes / self._total_samples_observed
+                if self._total_samples_observed
+                else 0
+            )
+            min_memory = (
+                max(self._min_memory_bytes, 0) if self._total_samples_observed else 0
+            )
+            collector_failure_event_count = self._collector_failure_event_count
+            dropped_samples = self._history_dropped_samples
+            dropped_events = self._history_dropped_events
+            dropped_alerts = self._history_dropped_alerts
+            tracking_start = self._session_start_time
+            tracking_end = self._session_end_time
+
+        tracking_duration = (
+            (tracking_end or time.time()) - tracking_start
+            if isinstance(tracking_start, (int, float))
+            else 0.0
+        )
+        current_memory_mb = (
+            self._last_successful_memory_bytes / (1024 * 1024)
+            if self._collector_health.status == COLLECTOR_HEALTH_HEALTHY
+            and self._last_successful_memory_bytes is not None
+            else None
+        )
+        return {
+            "current_memory_mb": current_memory_mb,
+            "peak_memory_mb": peak_memory / (1024 * 1024),
+            "average_memory_mb": average_memory / (1024 * 1024),
+            "min_memory_mb": min_memory / (1024 * 1024),
+            "collector_failure_event_count": collector_failure_event_count,
+            "total_events": retained_events,
+            "tracking_duration_seconds": tracking_duration,
+            "history_window_limit": self.max_history,
+            "history_retained_samples": retained_samples,
+            "history_dropped_samples": dropped_samples,
+            "history_retained_events": retained_events,
+            "history_dropped_events": dropped_events,
+            "history_retained_alerts": retained_alerts,
+            "history_dropped_alerts": dropped_alerts,
+            **self._last_sink_diagnostics,
+            "session_id": (
+                self._session_summary.session_id
+                if self._session_summary is not None
+                else None
+            ),
+            "session_status": (
+                self._session_summary.status
+                if self._session_summary is not None
+                else None
+            ),
+            **self._collector_health.to_dict(),
+        }
+
+    # -- Telemetry Sink Management -----------------------------------------
+
+    def _append_to_telemetry_sink(self, record: Dict[str, Any]) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.append(record)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
+        except Exception as exc:
+            self._disable_telemetry_sink("append", exc)
+
+    def _flush_telemetry_sink(self, *, force: bool = False) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._telemetry_sink.flush(force=force)
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
+        except Exception as exc:
+            self._disable_telemetry_sink("flush", exc)
+
+    def _close_telemetry_sink(self) -> None:
+        if self._telemetry_sink is None:
+            return
+        try:
+            self._close_sink_with_status(
+                self._telemetry_sink,
+                SESSION_STATUS_COMPLETED,
+            )
+            self._last_sink_diagnostics = self._telemetry_sink.get_diagnostics()
+        except Exception as exc:
+            self._disable_telemetry_sink("close", exc)
+        else:
+            self._telemetry_sink = None
+
+    def _disable_telemetry_sink(self, operation: str, exc: Exception) -> None:
+        sink = self._telemetry_sink
+        if sink is None:
+            return
+        self._telemetry_sink = None
+        logger.warning(
+            "Disabling JAX telemetry sink after %s failure: %s",
+            operation,
+            exc,
+        )
+        if self._session_summary is not None:
+            self._session_summary = update_session_summary(
+                self._session_summary,
+                status=SESSION_STATUS_INCOMPLETE,
+                ended_at_ns=now_ns(),
+            )
+        try:
+            self._close_sink_with_status(sink, SESSION_STATUS_INCOMPLETE)
+            if hasattr(sink, "get_diagnostics"):
+                self._last_sink_diagnostics = sink.get_diagnostics()
+        except Exception as close_exc:
+            logger.debug(
+                "JAX telemetry sink close failed after %s error: %s",
+                operation,
+                close_exc,
+            )
+
+    @staticmethod
+    def _close_sink_with_status(sink: Any, status: str) -> None:
+        try:
+            sink.close(session_status=status)
+        except TypeError:
+            sink.close()
+
+    # -- Phases ------------------------------------------------------------
+
+    def enter_phase(
+        self, name: str, *, metadata: Optional[Dict[str, Any]] = None
+    ) -> PhaseHandle:
+        if not self.tracking:
+            raise RuntimeError("Tracking must be active before entering a phase.")
+        session = self._ensure_session_summary()
+        token, boundary = self._phase_state.enter(
+            session_id=session.session_id,
+            rank=self.distributed_identity["rank"],
+            name=name,
+            attrs=metadata,
+        )
+        self._append_event(
+            timestamp=time.time(),
+            memory_bytes=self._status_memory_value(),
+            event_type=boundary.event_type,
+            context=boundary.context,
+            metadata=boundary.metadata,
+        )
+        return PhaseHandle(
+            scope_id=boundary.scope_id,
+            name=name,
+            path=boundary.path,
+            close_callback=lambda: self._emit_phase_exit(token),
+        )
+
+    @contextmanager
+    def phase(
+        self, name: str, *, metadata: Optional[Dict[str, Any]] = None
+    ) -> Iterator[PhaseHandle]:
+        handle = self.enter_phase(name, metadata=metadata)
+        try:
+            yield handle
+        finally:
+            handle.close()
+
+    def _emit_phase_exit(self, token: PhaseToken) -> None:
+        boundary = self._phase_state.exit(token)
+        self._append_event(
+            timestamp=time.time(),
+            memory_bytes=self._status_memory_value(),
+            event_type=boundary.event_type,
+            context=boundary.context,
+            metadata=boundary.metadata,
+        )
+
+    # -- Device Memory Profile Export --------------------------------------
+
+    def save_device_memory_profile(self, output_path: str) -> bool:
+        """Save a JAX device memory profile to the given path.
+
+        Requires jax.profiler.save_device_memory_profile to be available.
+        """
+        if not JAX_AVAILABLE:
+            return False
+
+        try:
+            if hasattr(jax, "profiler") and hasattr(
+                jax.profiler, "save_device_memory_profile"
+            ):
+                jax.profiler.save_device_memory_profile(output_path)
+                if self.enable_logging:
+                    logger.info("Saved JAX device memory profile to %s", output_path)
+                return True
+            else:
+                logger.warning(
+                    "jax.profiler.save_device_memory_profile is not available in this JAX version."
+                )
+                return False
+        except Exception as exc:
+            logger.error("Failed to save JAX device memory profile: %s", exc)
+            return False
+
+    def save_device_memory_profile_to_dir(
+        self, output_dir: Optional[str] = None
+    ) -> Optional[str]:
+        """Save a JAX device memory profile to a directory with an auto-generated filename."""
+        if output_dir is None:
+            output_dir = os.getcwd()
+
+        try:
+            os.makedirs(output_dir, exist_ok=True)
+            timestamp = int(time.time())
+            filename = f"jax-device-memory-{timestamp}.prof"
+            filepath = os.path.join(output_dir, filename)
+
+            if self.save_device_memory_profile(filepath):
+                return filepath
+        except Exception as exc:
+            logger.error("Failed to setup directory for memory profile: %s", exc)
+
+        return None
