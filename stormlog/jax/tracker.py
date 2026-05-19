@@ -78,6 +78,8 @@ class JAXTrackingResult:
     alert_count: int
     session_summary: Optional[SessionSummary] = None
     telemetry_events: List[Dict[str, Any]] = field(default_factory=list)
+    memory_usage: List[int] = field(default_factory=list)
+    timestamps: List[float] = field(default_factory=list)
     device_memory_profile_path: Optional[str] = None
 
     history_window_limit: int = 0
@@ -143,10 +145,17 @@ class JAXMemoryTracker:
         self.save_device_profile_on_stop = save_device_profile_on_stop
 
         self._device = None
+        self._device_bytes_limit: Optional[int] = None
         try:
             devices = jax.local_devices()
             if device_index < len(devices):
                 self._device = devices[device_index]
+                try:
+                    stats = self._device.memory_stats()
+                    if stats and "bytes_limit" in stats:
+                        self._device_bytes_limit = int(stats["bytes_limit"])
+                except Exception:
+                    pass
         except Exception as exc:
             logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
 
@@ -183,7 +192,7 @@ class JAXMemoryTracker:
 
         self._total_samples_observed = 0
         self._peak_memory_bytes = 0
-        self._min_memory_bytes = -1
+        self._min_memory_bytes: Optional[int] = None
         self._sum_memory_bytes = 0
 
         self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
@@ -229,7 +238,7 @@ class JAXMemoryTracker:
         self._collector_failure_event_count = 0
         self._total_samples_observed = 0
         self._peak_memory_bytes = 0
-        self._min_memory_bytes = -1
+        self._min_memory_bytes = None
         self._sum_memory_bytes = 0
         self._last_sink_diagnostics = self._empty_sink_diagnostics()
 
@@ -241,7 +250,9 @@ class JAXMemoryTracker:
             retained_alerts=list(self._alerts),
             total_samples_observed=self._total_samples_observed,
             peak_memory=self._peak_memory_bytes,
-            min_memory=max(self._min_memory_bytes, 0),
+            min_memory=(
+                self._min_memory_bytes if self._min_memory_bytes is not None else 0
+            ),
             sum_memory=self._sum_memory_bytes,
             dropped_samples=self._history_dropped_samples,
             dropped_events=self._history_dropped_events,
@@ -329,11 +340,9 @@ class JAXMemoryTracker:
             "world_size": self.distributed_identity["world_size"],
         }
 
-        # Pull total capacity if available
-        if self._device:
-            stats = self._device.memory_stats()
-            if stats and "bytes_limit" in stats:
-                legacy["device_total_bytes"] = int(stats["bytes_limit"])
+        # Use cached device memory limit
+        if self._device_bytes_limit is not None:
+            legacy["device_total_bytes"] = self._device_bytes_limit
 
         event = telemetry_event_from_record(
             legacy,
@@ -474,7 +483,7 @@ class JAXMemoryTracker:
 
             self._total_samples_observed += 1
             self._peak_memory_bytes = max(self._peak_memory_bytes, current_memory)
-            if self._min_memory_bytes == -1:
+            if self._min_memory_bytes is None:
                 self._min_memory_bytes = current_memory
             else:
                 self._min_memory_bytes = min(self._min_memory_bytes, current_memory)
@@ -657,6 +666,8 @@ class JAXMemoryTracker:
                 start_time=session_start,
                 end_time=session_end,
                 samples_collected=result_data.total_samples_observed,
+                memory_usage=result_data.retained_memory_usage,
+                timestamps=result_data.retained_timestamps,
                 peak_memory_bytes=(
                     result_data.peak_memory if result_data.total_samples_observed else 0
                 ),
@@ -690,6 +701,8 @@ class JAXMemoryTracker:
             start_time=start_time,
             end_time=end_time,
             samples_collected=0,
+            memory_usage=[],
+            timestamps=[],
             peak_memory_bytes=0,
             average_memory_bytes=0,
             min_memory_bytes=0,
@@ -717,7 +730,9 @@ class JAXMemoryTracker:
                 else 0
             )
             min_memory = (
-                max(self._min_memory_bytes, 0) if self._total_samples_observed else 0
+                self._min_memory_bytes
+                if self._min_memory_bytes is not None and self._total_samples_observed
+                else 0
             )
             collector_failure_event_count = self._collector_failure_event_count
             dropped_samples = self._history_dropped_samples
@@ -765,6 +780,10 @@ class JAXMemoryTracker:
             ),
             **self._collector_health.to_dict(),
         }
+
+    def get_tracking_results(self) -> JAXTrackingResult:
+        """Get current tracking results without stopping."""
+        return self._create_tracking_result()
 
     # -- Telemetry Sink Management -----------------------------------------
 
@@ -928,3 +947,121 @@ class JAXMemoryTracker:
             logger.error("Failed to setup directory for memory profile: %s", exc)
 
         return None
+
+
+class JAXMemoryWatchdog:
+    """Automatic memory management and cleanup for JAX workloads."""
+
+    def __init__(
+        self,
+        max_memory_mb: float = 8000,
+        cleanup_threshold_mb: float = 6000,
+        check_interval: float = 5.0,
+        device_index: int = 0,
+    ):
+        if not JAX_AVAILABLE:
+            raise ImportError("JAX not available.")
+
+        self.max_memory_mb = max_memory_mb
+        self.cleanup_threshold_mb = cleanup_threshold_mb
+        self.check_interval = check_interval
+
+        self._device = None
+        try:
+            devices = jax.local_devices()
+            if device_index < len(devices):
+                self._device = devices[device_index]
+        except Exception:
+            pass
+
+        self.active = False
+        self.watchdog_thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+        self.cleanup_callbacks: List[Callable[[], None]] = []
+
+        logger.info("JAX Memory Watchdog initialized with %s MB limit", max_memory_mb)
+
+    def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
+        """Add cleanup callback function."""
+        self.cleanup_callbacks.append(callback)
+
+    def _get_memory_usage(self) -> float:
+        if self._device is None:
+            return 0.0
+        try:
+            stats = self._device.memory_stats()
+            if stats:
+                return int(stats.get("bytes_in_use", 0)) / (1024 * 1024)
+            return 0.0
+        except Exception as exc:
+            logger.debug("Watchdog could not get device memory: %s", exc)
+            return 0.0
+
+    def _cleanup_memory(self) -> None:
+        try:
+            if hasattr(jax, "clear_caches"):
+                jax.clear_caches()
+
+            import gc
+
+            gc.collect()
+
+            for callback in self.cleanup_callbacks:
+                try:
+                    callback()
+                except Exception as e:
+                    logger.error("Error in cleanup callback: %s", e)
+
+            logger.info("Performed JAX memory cleanup")
+        except Exception as e:
+            logger.error("Error during JAX memory cleanup: %s", e)
+
+    def _watchdog_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                current_memory = self._get_memory_usage()
+
+                if current_memory > self.max_memory_mb:
+                    logger.warning(
+                        "Memory usage %.1f MB exceeds limit %s MB - forcing cleanup",
+                        current_memory,
+                        self.max_memory_mb,
+                    )
+                    self._cleanup_memory()
+                elif current_memory > self.cleanup_threshold_mb:
+                    logger.info(
+                        "Memory usage %.1f MB above threshold %s MB - performing cleanup",
+                        current_memory,
+                        self.cleanup_threshold_mb,
+                    )
+                    self._cleanup_memory()
+
+                self._stop_event.wait(self.check_interval)
+            except Exception as e:
+                logger.error("Error in watchdog loop: %s", e)
+                break
+
+    def start(self) -> None:
+        """Start memory watchdog."""
+        if self.active:
+            logger.warning("Watchdog already active")
+            return
+        self.active = True
+        self._stop_event.clear()
+        self.watchdog_thread = threading.Thread(target=self._watchdog_loop, daemon=True)
+        self.watchdog_thread.start()
+        logger.info("Started JAX memory watchdog")
+
+    def stop(self) -> None:
+        """Stop memory watchdog."""
+        if not self.active:
+            return
+        self.active = False
+        self._stop_event.set()
+        if self.watchdog_thread:
+            self.watchdog_thread.join(timeout=5.0)
+        logger.info("Stopped JAX memory watchdog")
+
+    def force_cleanup(self) -> None:
+        """Force immediate memory cleanup."""
+        self._cleanup_memory()
