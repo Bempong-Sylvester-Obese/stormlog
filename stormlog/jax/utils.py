@@ -34,7 +34,7 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 _JAX_INSTALL_GUIDANCE = (
-    "JAX is required for this feature. Install with " "`pip install 'stormlog[jax]'`."
+    "JAX is required for this feature. Install with `pip install 'stormlog[jax]'`."
 )
 
 
