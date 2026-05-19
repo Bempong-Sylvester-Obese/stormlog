@@ -18,6 +18,7 @@ def _event_record(
     timestamp_ns: int = 1,
     event_type: str = "sample",
     rank: int = 0,
+    context: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 3,
@@ -41,7 +42,7 @@ def _event_record(
         "device_used_bytes": 200,
         "device_free_bytes": None,
         "device_total_bytes": 1000,
-        "context": event_type,
+        "context": context or event_type,
         "metadata": {"backend": "cuda"},
     }
 
@@ -132,6 +133,72 @@ def test_query_summary_rejects_csv(
         )
         == 2
     )
+
+    assert "--csv is not supported" in capsys.readouterr().err
+
+
+def test_query_issues_json_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(
+                timestamp_ns=1,
+                event_type="warning",
+                context="High fragmentation: 40.0%",
+            )
+        ],
+    )
+
+    assert query_main(["issues", str(path), "--kind", "alert", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    assert payload[0]["kind"] == "alert"
+    assert payload[0]["hit_count"] == 1
+    assert payload[0]["fingerprint"]["dimensions"]["category"] == ("high_fragmentation")
+
+
+def test_query_issues_table_output_filters_session(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(
+                session_id="session-visible",
+                timestamp_ns=1,
+                event_type="warning",
+            ),
+            _event_record(
+                session_id="session-hidden",
+                timestamp_ns=2,
+                event_type="critical",
+            ),
+        ],
+    )
+
+    assert query_main(["issues", str(path), "--session-id", "session-visible"]) == 0
+
+    output = capsys.readouterr().out
+    assert "Fingerprint Id" in output
+    assert "session-visible" in output
+    assert "session-hidden" not in output
+
+
+def test_query_issues_rejects_csv(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(path, [_event_record(event_type="warning")])
+
+    assert query_main(["issues", str(path), "--csv"]) == 2
 
     assert "--csv is not supported" in capsys.readouterr().err
 

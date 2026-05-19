@@ -26,6 +26,7 @@ def _event_record(
     reserved: int = 150,
     used: int = 175,
     metadata: dict[str, Any] | None = None,
+    context: str | None = None,
 ) -> dict[str, Any]:
     return {
         "schema_version": 3,
@@ -49,7 +50,7 @@ def _event_record(
         "device_used_bytes": used,
         "device_free_bytes": None,
         "device_total_bytes": 1000,
-        "context": event_type,
+        "context": context or event_type,
         "metadata": metadata or {"backend": "cuda"},
     }
 
@@ -348,3 +349,125 @@ def test_catalog_discovers_csv_telemetry(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0].session_id == "session-csv"
     assert rows[0].source_kind == "telemetry_csv"
+
+
+def test_list_issues_groups_alerts_across_sessions(tmp_path: Path) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(
+                session_id="session-alert-a",
+                timestamp_ns=10,
+                event_type="warning",
+                context="High fragmentation: 40.0%",
+            ),
+            _event_record(
+                session_id="session-alert-b",
+                timestamp_ns=20,
+                event_type="warning",
+                context="High fragmentation: 51.5%",
+            ),
+        ],
+    )
+
+    rows = query_api.open([path]).list_issues(
+        query_api.IssueFilter(kind="alert", session_id="session-alert-a")
+    )
+
+    assert len(rows) == 1
+    issue = rows[0]
+    assert issue.kind == "alert"
+    assert issue.state == "open"
+    assert issue.hit_count == 2
+    assert issue.first_seen_ns == 10
+    assert issue.last_seen_ns == 20
+    assert issue.affected_sessions == ("session-alert-a", "session-alert-b")
+    assert issue.fingerprint.dimensions["category"] == "high_fragmentation"
+    assert issue.representative_evidence.event_type == "warning"
+
+
+def test_list_issues_supports_state_overrides(tmp_path: Path) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(
+                session_id="session-collector",
+                timestamp_ns=10,
+                event_type="collector_degraded",
+                metadata={
+                    "backend": "cuda",
+                    "collector_health_status": "degraded",
+                    "collector_partial_fields": ["device_free_bytes"],
+                    "collector_last_error": "RuntimeError: failed at sample 42",
+                },
+            )
+        ],
+    )
+    store = query_api.open([path])
+    original = store.list_issues(query_api.IssueFilter(kind="collector_degradation"))[0]
+
+    overridden = store.list_issues(
+        query_api.IssueFilter(state="ignored"),
+        state_overrides={original.fingerprint_id: "ignored"},
+    )
+
+    assert len(overridden) == 1
+    assert overridden[0].state == "ignored"
+    assert overridden[0].details["error_stem"] == "runtimeerror"
+
+
+def test_list_issues_includes_oom_bundles_and_telemetry_ooms(tmp_path: Path) -> None:
+    _write_oom_bundle(tmp_path, session_id="session-oom-bundle")
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(
+                session_id="session-oom-event",
+                timestamp_ns=50,
+                event_type="error",
+                metadata={
+                    "backend": "cuda",
+                    "oom_reason": "message_pattern:out of memory",
+                    "oom_dump_path": str(tmp_path / "oom"),
+                },
+            )
+        ],
+    )
+
+    rows = query_api.open([tmp_path]).list_issues(query_api.IssueFilter(kind="oom"))
+
+    assert len(rows) == 2
+    assert {row.severity for row in rows} == {"critical"}
+    assert {row.hit_count for row in rows} == {1}
+    assert {"session-oom-bundle", "session-oom-event"} == {
+        session for row in rows for session in row.affected_sessions
+    }
+
+
+def test_list_issues_includes_hidden_memory_anomalies(tmp_path: Path) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(
+                session_id="session-gap",
+                timestamp_ns=timestamp_ns,
+                allocated=90,
+                reserved=100,
+                used=used,
+            )
+            for timestamp_ns, used in enumerate([160, 220, 280, 340, 400], start=1)
+        ],
+    )
+
+    rows = query_api.open([path]).list_issues(
+        query_api.IssueFilter(kind="hidden_memory_anomaly")
+    )
+
+    assert rows
+    assert rows[0].kind == "hidden_memory_anomaly"
+    assert rows[0].details["classification"] == "persistent_drift"
+    assert rows[0].affected_sessions == ("session-gap",)
