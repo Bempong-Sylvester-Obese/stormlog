@@ -55,10 +55,19 @@ The row contracts are explicit and automation-friendly:
   `source_kind`, and `session_status`
 - `OOMBundleRow`: bundle path, creation time, backend, reason, event count,
   session linkage, and exception type/module
+- `StormlogIssue`: grouped issue fingerprint, state, hit count, first/last
+  seen timestamps, affected sessions, representative evidence, and evidence
+  links back to raw sessions/events/bundles
 - `SummaryRow`: built-in metric results with session/rank/status grouping
 
 The canonical telemetry schema remains the event contract. Query rows add
 provenance but do not mutate persisted telemetry records.
+
+Issue grouping is also derived. `QueryStore.list_issues()` groups OOMs,
+collector degradation, alerts, and hidden-memory anomalies using deterministic
+fingerprints. The current implementation computes these rows during query/load;
+a future sidecar can persist issue state by fingerprint id without changing raw
+telemetry artifacts. See [Durable Issue Fingerprinting](issue_fingerprinting.md).
 
 ## Caching and Loading
 
@@ -103,3 +112,5 @@ adapter or richer aggregation API later.
   costs and defining invalidation behavior.
 - Add automation-specific schemas on top of query rows rather than changing the
   artifact contract.
+- Persist grouped issue state in an artifact-level `issues.json` sidecar after
+  the fingerprint schema has been exercised by CLI/TUI users.

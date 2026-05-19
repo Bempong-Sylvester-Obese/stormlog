@@ -263,6 +263,13 @@ stormlog query ooms ./artifacts --backend cuda --table
 stormlog query ooms ./artifacts --created-after 2026-05-12T00:00:00Z --json
 ```
 
+List grouped recurring issues:
+
+```bash
+stormlog query issues ./live_sink ./oom_dumps --kind oom --json
+stormlog query issues ./artifacts --severity warning --session-id session-123
+```
+
 Run built-in summaries:
 
 ```bash
@@ -290,10 +297,13 @@ store = stormlog.query.open(["./live_sink", "./oom_dumps"])
 sessions = store.list_sessions()
 events = store.query_events()
 ooms = store.list_oom_bundles()
+issues = store.list_issues()
 ```
 
 For engine-choice details and follow-on work, see
 [Local Query Layer](query_layer.md).
+For issue grouping rules and schema details, see
+[Durable Issue Fingerprinting](issue_fingerprinting.md).
 
 ## `tfmemprof`
 
