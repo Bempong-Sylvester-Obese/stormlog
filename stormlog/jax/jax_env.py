@@ -20,7 +20,6 @@ def configure_jax_logging() -> None:
     variables that JAX and XLA inspect on first import:
 
     * ``JAX_LOG_COMPILES`` → ``"0"`` (suppress JIT compilation logs)
-    * ``XLA_FLAGS`` → appends ``--xla_log_level=2`` (WARNING+)
     * ``TF_CPP_MIN_LOG_LEVEL`` → ``"2"`` (suppress TF C++ backend noise
       when JAX falls back to the TF XLA bridge)
     """
@@ -30,11 +29,5 @@ def configure_jax_logging() -> None:
 
     os.environ.setdefault("JAX_LOG_COMPILES", "0")
     os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "2")
-
-    # Append XLA log-level flag without clobbering user-defined flags.
-    xla_flag = "--xla_log_level=2"
-    existing = os.environ.get("XLA_FLAGS", "")
-    if xla_flag not in existing:
-        os.environ["XLA_FLAGS"] = f"{existing} {xla_flag}".strip()
 
     _CONFIGURED = True

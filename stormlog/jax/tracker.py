@@ -8,6 +8,7 @@ tracking infrastructure.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import socket
@@ -16,6 +17,7 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from stormlog.collector_health import (
@@ -23,6 +25,11 @@ from stormlog.collector_health import (
     COLLECTOR_HEALTH_UNHEALTHY,
     CollectorHealthState,
     collector_retry_delay_seconds,
+)
+from stormlog.oom_flight_recorder import (
+    OOMFlightRecorder,
+    OOMFlightRecorderConfig,
+    classify_oom_exception,
 )
 from stormlog.phases import PhaseHandle, PhaseRecorder, PhaseToken
 from stormlog.session import (
@@ -123,6 +130,11 @@ class JAXMemoryTracker:
         world_size: Optional[int] = None,
         telemetry_sink_config: Optional[TelemetrySinkConfig] = None,
         save_device_profile_on_stop: bool = False,
+        enable_oom_flight_recorder: bool = False,
+        oom_dump_dir: str = "oom_dumps",
+        oom_buffer_size: Optional[int] = None,
+        oom_max_dumps: int = 5,
+        oom_max_total_mb: int = 256,
     ):
         if not JAX_AVAILABLE:
             raise ImportError(
@@ -139,6 +151,22 @@ class JAXMemoryTracker:
         self.enable_logging = enable_logging
         self.max_history = max_history
         self.save_device_profile_on_stop = save_device_profile_on_stop
+
+        recorder_buffer_size = (
+            oom_buffer_size if oom_buffer_size is not None else max_history
+        )
+        if recorder_buffer_size <= 0:
+            recorder_buffer_size = max_history
+        self._oom_flight_recorder = OOMFlightRecorder(
+            OOMFlightRecorderConfig(
+                enabled=enable_oom_flight_recorder,
+                dump_dir=oom_dump_dir,
+                buffer_size=recorder_buffer_size,
+                max_dumps=oom_max_dumps,
+                max_total_mb=oom_max_total_mb,
+            )
+        )
+        self._last_oom_dump_path: Optional[str] = None
 
         self._device = None
         self._device_bytes_limit: Optional[int] = None
@@ -237,6 +265,8 @@ class JAXMemoryTracker:
         self._min_memory_bytes = None
         self._sum_memory_bytes = 0
         self._last_sink_diagnostics = self._empty_sink_diagnostics()
+        self._last_oom_dump_path = None
+        self._oom_flight_recorder.clear()
 
     def _tracking_result_data(self) -> _TrackingResultData:
         return _TrackingResultData(
@@ -277,6 +307,11 @@ class JAXMemoryTracker:
 
     def get_session_summary(self) -> Optional[SessionSummary]:
         return self._session_summary
+
+    @property
+    def oom_buffer_size(self) -> int:
+        """Resolved OOM ring-buffer size."""
+        return self._oom_flight_recorder.config.buffer_size
 
     def _ensure_telemetry_sink(self) -> None:
         if self._telemetry_sink is None and self._telemetry_sink_config is not None:
@@ -369,6 +404,8 @@ class JAXMemoryTracker:
                 self._history_dropped_events += 1
             self._events.append(record)
         self._append_to_telemetry_sink(record)
+        if self._oom_flight_recorder.config.enabled:
+            self._oom_flight_recorder.record_event(record)
 
     def _set_collector_health(
         self,
@@ -775,6 +812,8 @@ class JAXMemoryTracker:
                 else None
             ),
             **self._collector_health.to_dict(),
+            "oom_flight_recorder_enabled": self._oom_flight_recorder.config.enabled,
+            "last_oom_dump_path": self._last_oom_dump_path,
         }
 
     def get_tracking_results(self) -> JAXTrackingResult:
@@ -897,6 +936,140 @@ class JAXMemoryTracker:
             metadata=boundary.metadata,
         )
 
+    # -- OOM Flight Recorder -----------------------------------------------
+
+    @property
+    def last_oom_dump_path(self) -> Optional[str]:
+        """Path to the most recent OOM dump bundle, or None."""
+        return self._last_oom_dump_path
+
+    @last_oom_dump_path.setter
+    def last_oom_dump_path(self, value: Optional[str]) -> None:
+        self._last_oom_dump_path = value
+
+    def handle_exception(
+        self,
+        exc: BaseException,
+        context: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Capture OOM diagnostics for recognized OOM exceptions.
+
+        Args:
+            exc: The exception to classify and potentially dump.
+            context: Human-readable context (e.g. operation name).
+            metadata: Additional metadata for the dump bundle.
+
+        Returns:
+            Path to the dump bundle if an OOM was detected and recorded,
+            or ``None`` otherwise.
+        """
+        classification = classify_oom_exception(exc)
+        if not classification.is_oom or classification.reason is None:
+            return None
+        if not self._oom_flight_recorder.config.enabled:
+            return None
+
+        dump_metadata: Dict[str, Any] = {
+            "tracker_stats": self.get_statistics(),
+            "sampling_interval_s": self.sampling_interval,
+            "session_id": None,
+            "job_id": self.distributed_identity["job_id"],
+            "rank": self.distributed_identity["rank"],
+            "local_rank": self.distributed_identity["local_rank"],
+            "world_size": self.distributed_identity["world_size"],
+        }
+        if metadata:
+            dump_metadata.update(metadata)
+
+        current_memory = self._status_memory_value()
+        dump_metadata.update(
+            {
+                "sample_allocated_bytes": current_memory,
+                "sample_reserved_bytes": current_memory,
+                "sample_device_id": self.device_index,
+                "sample_total_bytes": self._device_bytes_limit,
+            }
+        )
+        self._append_event(
+            timestamp=time.time(),
+            memory_bytes=current_memory,
+            event_type="error",
+            context=f"OOM detected ({classification.reason})",
+            metadata={"oom_reason": classification.reason},
+        )
+
+        session_summary = self._session_summary
+        dump_metadata["tracker_stats"] = self.get_statistics()
+        dump_metadata["session_id"] = (
+            session_summary.session_id if session_summary is not None else None
+        )
+
+        try:
+            dump_path = self._oom_flight_recorder.dump(
+                reason=classification.reason,
+                exception=exc,
+                context=context,
+                backend="jax",
+                metadata=dump_metadata,
+                session_summary=session_summary,
+            )
+        except Exception as dump_exc:
+            logger.debug("OOM flight recorder dump failed: %s", dump_exc)
+            return None
+
+        # Enrich the dump with a JAX device memory profile artifact
+        if dump_path is not None:
+            profile_path = self.save_device_memory_profile_to_dir(
+                output_dir=dump_path,
+            )
+            if profile_path:
+                try:
+                    manifest_path = Path(dump_path) / "manifest.json"
+                    if manifest_path.exists():
+                        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                        files = list(manifest.get("files", []))
+                        profile_name = Path(profile_path).name
+                        if profile_name not in files:
+                            files.append(profile_name)
+                        manifest["files"] = files
+                        manifest["jax_device_profile"] = True
+                        manifest_path.write_text(
+                            json.dumps(manifest, indent=2),
+                            encoding="utf-8",
+                        )
+                except Exception as enrich_exc:
+                    logger.debug(
+                        "Could not enrich OOM manifest with profile: %s",
+                        enrich_exc,
+                    )
+
+        self._last_oom_dump_path = dump_path
+        return dump_path
+
+    @contextmanager
+    def capture_oom(
+        self,
+        context: str = "runtime",
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Iterator[None]:
+        """Capture an OOM diagnostic bundle if the wrapped block raises an OOM.
+
+        Usage::
+
+            tracker = JAXMemoryTracker(enable_oom_flight_recorder=True)
+            tracker.start_tracking()
+            with tracker.capture_oom("training_step"):
+                risky_jax_computation()
+        """
+        try:
+            yield
+        except Exception as exc:
+            dump_path = self.handle_exception(exc, context=context, metadata=metadata)
+            if dump_path:
+                logger.error("OOM flight recorder dump saved to: %s", dump_path)
+            raise
+
     # -- Device Memory Profile Export --------------------------------------
 
     def save_device_memory_profile(self, output_path: str) -> bool:
@@ -945,7 +1118,7 @@ class JAXMemoryTracker:
         return None
 
 
-class JAXMemoryWatchdog:
+class MemoryWatchdog:
     """Automatic memory management and cleanup for JAX workloads."""
 
     def __init__(

@@ -3,7 +3,7 @@
 import json
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -35,7 +35,7 @@ def _default_str(obj: Any) -> str:
 
 def _create_artifact_dir(output: Optional[str], prefix: str) -> Path:
     """Create a collision-safe artifact directory."""
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M%S")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
 
     if output:
         out_path = Path(output).resolve()
@@ -72,7 +72,7 @@ def _write_manifest(
     manifest: Dict[str, Any] = {
         "schema_version": MANIFEST_VERSION,
         "version": MANIFEST_VERSION,
-        "created_iso": datetime.utcnow().isoformat() + "Z",
+        "created_iso": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "command_line": command_line,
         "files": files_written,
         "exit_code": exit_code,

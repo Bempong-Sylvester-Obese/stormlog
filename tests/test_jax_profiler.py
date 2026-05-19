@@ -1,6 +1,7 @@
 """Tests for JAX memory profiler."""
 
 import time
+from typing import Any, Generator
 from unittest import mock
 
 import pytest
@@ -16,10 +17,11 @@ from stormlog.jax.profiler import (
     get_global_profiler,
     get_profile_summaries,
 )
+from tests.jax_test_helpers import jax_fixture, jax_mark
 
 
-@pytest.fixture
-def mock_device():
+@jax_fixture
+def mock_device() -> mock.Mock:
     device = mock.Mock()
     device.memory_stats.return_value = {
         "bytes_in_use": 1024,
@@ -28,15 +30,19 @@ def mock_device():
     return device
 
 
-@pytest.fixture
-def profiler(mock_device):
-    with mock.patch("stormlog.jax.profiler.jax.devices", return_value=[mock_device]):
-        p = JAXMemoryProfiler(device_index=0)
-        yield p
-        p.reset()
+@jax_fixture
+def profiler(mock_device: mock.Mock) -> Generator[Any, None, None]:
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            p = JAXMemoryProfiler(device_index=0)
+            yield p
+            p.reset()
 
 
-@pytest.mark.jax
+@jax_mark
 def test_snapshot_creation() -> None:
     """Verify JAXMemorySnapshot properties."""
     snapshot = JAXMemorySnapshot(
@@ -51,7 +57,7 @@ def test_snapshot_creation() -> None:
     assert snapshot.device_memory_bytes == 1000
 
 
-@pytest.mark.jax
+@jax_mark
 def test_profile_result_properties() -> None:
     """Verify JAXProfileResult calculated properties."""
     result = JAXProfileResult(
@@ -66,8 +72,8 @@ def test_profile_result_properties() -> None:
     assert result.duration == 2.0
 
 
-@pytest.mark.jax
-def test_capture_snapshot(profiler) -> None:
+@jax_mark
+def test_capture_snapshot(profiler: Any) -> None:
     """Verify manual snapshot capture."""
     snapshot = profiler.capture_snapshot("manual_1")
     assert snapshot.name == "manual_1"
@@ -75,16 +81,17 @@ def test_capture_snapshot(profiler) -> None:
     assert snapshot.cpu_memory_bytes > 0
 
 
-@pytest.mark.jax
-def test_profile_function(profiler) -> None:
+@jax_mark
+def test_profile_function(profiler: Any) -> None:
     """Verify function decorator profiles memory."""
 
-    @profiler.profile_function
-    def dummy_work():
+    def dummy_work() -> str:
         time.sleep(0.01)
         return "done"
 
-    result = dummy_work()
+    decorated_work = profiler.profile_function(dummy_work)
+
+    result = decorated_work()
     assert result == "done"
 
     res = profiler.get_results()
@@ -94,8 +101,8 @@ def test_profile_function(profiler) -> None:
     assert func_prof["calls"] == 1
 
 
-@pytest.mark.jax
-def test_profile_context(profiler) -> None:
+@jax_mark
+def test_profile_context(profiler: Any) -> None:
     """Verify context manager profiles memory."""
     with profiler.profile_context("my_context"):
         time.sleep(0.01)
@@ -105,8 +112,8 @@ def test_profile_context(profiler) -> None:
     assert "my_context" in res.function_profiles
 
 
-@pytest.mark.jax
-def test_get_results_empty(profiler) -> None:
+@jax_mark
+def test_get_results_empty(profiler: Any) -> None:
     """Verify getting results when empty is safe."""
     res = profiler.get_results()
     assert res.peak_memory_bytes == 0
@@ -114,8 +121,8 @@ def test_get_results_empty(profiler) -> None:
     assert len(res.snapshots) == 0
 
 
-@pytest.mark.jax
-def test_continuous_profiling(profiler) -> None:
+@jax_mark
+def test_continuous_profiling(profiler: Any) -> None:
     """Verify continuous background profiling."""
     profiler.start_continuous_profiling(interval=0.05)
     time.sleep(0.15)
@@ -125,8 +132,8 @@ def test_continuous_profiling(profiler) -> None:
     assert len(res.snapshots) >= 2
 
 
-@pytest.mark.jax
-def test_context_manager_lifecycle(profiler) -> None:
+@jax_mark
+def test_context_manager_lifecycle(profiler: Any) -> None:
     """Verify JAXMemoryProfiler can be used as a context manager."""
     with profiler:
         time.sleep(0.05)
@@ -136,7 +143,7 @@ def test_context_manager_lifecycle(profiler) -> None:
     assert len(res.snapshots) >= 0
 
 
-@pytest.mark.jax
+@jax_mark
 def test_global_profiler_lifecycle() -> None:
     """Verify global profiler singletons."""
     clear_global_profiler()
@@ -147,8 +154,8 @@ def test_global_profiler_lifecycle() -> None:
     p2 = get_global_profiler()
     assert p is p2
 
-    # Add fake data
-    p.capture_snapshot("test")
+    with p.profile_context("test"):
+        pass
 
     summaries = get_profile_summaries()
     assert len(summaries) == 1

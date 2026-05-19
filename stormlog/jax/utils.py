@@ -15,9 +15,13 @@ from .jax_env import configure_jax_logging
 
 configure_jax_logging()
 
-import jax  # noqa: E402
+try:
+    import jax  # noqa: E402
 
-JAX_AVAILABLE = True
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+    jax = None
 
 try:
     import psutil
@@ -28,10 +32,6 @@ except ImportError:
     psutil = None
 
 logger = logging.getLogger(__name__)
-
-_JAX_INSTALL_GUIDANCE = (
-    "JAX is required for this feature. Install with `pip install 'stormlog[jax]'`."
-)
 
 
 def jax_is_available() -> bool:
@@ -240,7 +240,7 @@ def validate_jax_environment() -> Dict[str, Any]:
         parts = version.split(".")
         major = int(parts[0])
         minor = int(parts[1]) if len(parts) > 1 else 0
-        # Require >= 0.4.20
+        # Require >= 0.4.0 (pip enforces >=0.4.20 at install time)
         if major > 0 or (major == 0 and minor >= 4):
             validation["version_compatible"] = True
         else:

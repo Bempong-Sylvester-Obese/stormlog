@@ -10,13 +10,29 @@ from typing import Any, Dict
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
-from stormlog.wandb_integration import (
-    add_wandb_arguments,
-    ensure_wandb_available,
-    export_diagnose_bundle_to_wandb,
-    export_tracking_run_to_wandb,
-    wandb_config_from_namespace,
-)
+
+try:
+    from stormlog.wandb_integration import (
+        add_wandb_arguments,
+        ensure_wandb_available,
+        export_diagnose_bundle_to_wandb,
+        export_tracking_run_to_wandb,
+        wandb_config_from_namespace,
+    )
+
+    WANDB_AVAILABLE = True
+except ImportError:
+    WANDB_AVAILABLE = False
+
+    def add_wandb_arguments(parser: Any) -> None:
+        pass
+
+    def wandb_config_from_namespace(args: Any) -> Any:  # type: ignore[misc]
+        class DummyConfig:
+            enabled = False
+
+        return DummyConfig()
+
 
 from .jax_env import configure_jax_logging
 from .utils import format_memory, get_system_info
@@ -163,11 +179,13 @@ def cmd_monitor(args: argparse.Namespace) -> int:
         print(f"Alert threshold: {args.threshold} MB")
     print("Press Ctrl+C to stop\n")
 
+    max_history = int(getattr(args, "max_history", 10000))
     tracker = JAXMemoryTracker(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,
         enable_logging=True,
+        max_history=max_history,
     )
 
     try:
@@ -247,6 +265,12 @@ def cmd_track(args: argparse.Namespace) -> int:
     local_rank = getattr(args, "local_rank", None)
     world_size = getattr(args, "world_size", None)
     telemetry_sink_config = _build_telemetry_sink_config(args)
+    oom_flight_recorder = bool(getattr(args, "oom_flight_recorder", False))
+    oom_dump_dir = str(getattr(args, "oom_dump_dir", "oom_dumps"))
+    oom_buffer_size = getattr(args, "oom_buffer_size", None)
+    oom_max_dumps = int(getattr(args, "oom_max_dumps", 5))
+    oom_max_total_mb = int(getattr(args, "oom_max_total_mb", 256))
+    max_history = int(getattr(args, "max_history", 10000))
 
     tracker = JAXMemoryTracker(
         sampling_interval=args.interval,
@@ -259,9 +283,21 @@ def cmd_track(args: argparse.Namespace) -> int:
         world_size=world_size,
         telemetry_sink_config=telemetry_sink_config,
         save_device_profile_on_stop=args.profile,
+        max_history=max_history,
+        enable_oom_flight_recorder=oom_flight_recorder,
+        oom_dump_dir=oom_dump_dir,
+        oom_buffer_size=oom_buffer_size,
+        oom_max_dumps=oom_max_dumps,
+        oom_max_total_mb=oom_max_total_mb,
     )
     if telemetry_sink_config is not None:
         print(f"Append-only telemetry sink: {telemetry_sink_config.root_dir}")
+    if oom_flight_recorder:
+        print("OOM flight recorder enabled:")
+        print(f"  Dump directory: {oom_dump_dir}")
+        print(f"  Buffer size: {tracker.oom_buffer_size} events")
+        print(f"  Max dumps: {oom_max_dumps}")
+        print(f"  Max total size: {oom_max_total_mb} MB")
 
     def alert_callback(alert: Dict[str, Any]) -> None:
         print(f"\n⚠️  MEMORY ALERT: {alert['message']}")
@@ -272,22 +308,26 @@ def cmd_track(args: argparse.Namespace) -> int:
         tracker.start_tracking()
         print("Tracking started. Press Ctrl+C to stop and save results.")
 
-        while True:
-            time.sleep(5.0)
+        with tracker.capture_oom(
+            context="jaxmemprof.track",
+            metadata={"command": "track", "runtime_backend": "jax"},
+        ):
+            while True:
+                time.sleep(5.0)
 
-            stats = tracker.get_statistics()
-            current_memory = stats.get("current_memory_mb")
-            collector_health = str(stats.get("collector_health_status", "healthy"))
-            if isinstance(current_memory, (int, float)):
-                status_line = f"Current memory: {float(current_memory):.1f} MB"
-            else:
-                status_line = "Current memory: unavailable"
-            status_line += f" | Health: {collector_health}"
-            retry_at = stats.get("collector_next_retry_epoch_s")
-            if isinstance(retry_at, (int, float)):
-                retry_in = max(float(retry_at) - time.time(), 0.0)
-                status_line += f" | Retry In: {retry_in:.1f}s"
-            print(status_line)
+                stats = tracker.get_statistics()
+                current_memory = stats.get("current_memory_mb")
+                collector_health = str(stats.get("collector_health_status", "healthy"))
+                if isinstance(current_memory, (int, float)):
+                    status_line = f"Current memory: {float(current_memory):.1f} MB"
+                else:
+                    status_line = "Current memory: unavailable"
+                status_line += f" | Health: {collector_health}"
+                retry_at = stats.get("collector_next_retry_epoch_s")
+                if isinstance(retry_at, (int, float)):
+                    retry_in = max(float(retry_at) - time.time(), 0.0)
+                    status_line += f" | Retry In: {retry_in:.1f}s"
+                print(status_line)
 
     except KeyboardInterrupt:
         print("\nStopping tracking...")
@@ -355,8 +395,10 @@ def cmd_track(args: argparse.Namespace) -> int:
             print(
                 f"Device memory profile saved to: {results.device_memory_profile_path}"
             )
+        if tracker.last_oom_dump_path:
+            print(f"OOM flight recorder dump saved to: {tracker.last_oom_dump_path}")
 
-        if wandb_config.enabled:
+        if WANDB_AVAILABLE and wandb_config.enabled:
             try:
                 export_tracking_run_to_wandb(
                     wandb_config,
@@ -366,11 +408,13 @@ def cmd_track(args: argparse.Namespace) -> int:
                     events=results.telemetry_events,
                     output_path=args.output,
                     telemetry_sink_dir=getattr(args, "telemetry_sink_dir", None),
-                    oom_dump_path=results.device_memory_profile_path,
+                    oom_dump_path=tracker.last_oom_dump_path,
                 )
                 print("W&B export completed.")
             except Exception as exc:
                 _warn_wandb_export_failure("jaxmemprof track", exc)
+        elif wandb_config.enabled:
+            print("Warning: W&B is not available.", file=sys.stderr)
 
     return 0
 
@@ -429,7 +473,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     except (OSError, json.JSONDecodeError):
         pass
 
-    if wandb_config.enabled:
+    if WANDB_AVAILABLE and wandb_config.enabled:
         try:
             export_diagnose_bundle_to_wandb(
                 wandb_config,
@@ -439,6 +483,8 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             print("W&B export completed.")
         except Exception as exc:
             _warn_wandb_export_failure("jaxmemprof diagnose", exc)
+    elif wandb_config.enabled:
+        print("Warning: W&B is not available.", file=sys.stderr)
 
     return exit_code
 
@@ -488,6 +534,12 @@ Cookbook:
         help="JAX device index to monitor (default: 0)",
     )
     monitor_parser.add_argument("--output", help="Output file for results")
+    monitor_parser.add_argument(
+        "--max-history",
+        type=int,
+        default=10000,
+        help="Maximum number of historical samples to keep in memory (default: 10000)",
+    )
 
     # Track command
     track_parser = subparsers.add_parser("track", help="Background memory tracking")
@@ -568,6 +620,40 @@ Cookbook:
         type=int,
         default=512,
         help="Maximum retained telemetry sink size in MB (default: 512)",
+    )
+    track_parser.add_argument(
+        "--max-history",
+        type=int,
+        default=10000,
+        help="Maximum number of historical samples to keep in memory (default: 10000)",
+    )
+    track_parser.add_argument(
+        "--oom-flight-recorder",
+        action="store_true",
+        help="Enable automatic OOM flight recorder dump artifacts",
+    )
+    track_parser.add_argument(
+        "--oom-dump-dir",
+        default="oom_dumps",
+        help="Directory used to write OOM dump bundles (default: oom_dumps)",
+    )
+    track_parser.add_argument(
+        "--oom-buffer-size",
+        type=int,
+        default=None,
+        help="Ring buffer size for OOM event dumps (default: max history)",
+    )
+    track_parser.add_argument(
+        "--oom-max-dumps",
+        type=int,
+        default=5,
+        help="Maximum number of retained OOM dump bundles (default: 5)",
+    )
+    track_parser.add_argument(
+        "--oom-max-total-mb",
+        type=int,
+        default=256,
+        help="Maximum retained OOM dump storage in MB (default: 256)",
     )
     add_wandb_arguments(track_parser)
 

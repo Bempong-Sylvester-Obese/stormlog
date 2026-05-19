@@ -1,6 +1,8 @@
 """Tests for JAX diagnostic bundle builder."""
 
 import json
+from pathlib import Path
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -13,9 +15,10 @@ from stormlog.jax.diagnose import (
     run_diagnose,
     run_timeline_capture,
 )
+from tests.jax_test_helpers import jax_mark
 
 
-@pytest.mark.jax
+@jax_mark
 def test_collect_environment() -> None:
     """Verify collect_environment returns expected structure."""
     env = collect_environment(device_index=0)
@@ -26,7 +29,7 @@ def test_collect_environment() -> None:
     assert "JAX does not expose fragmentation" in env["fragmentation"]["note"]
 
 
-@pytest.mark.jax
+@jax_mark
 def test_run_timeline_capture_zero_duration() -> None:
     """Verify run_timeline_capture with zero duration returns empty."""
     timeline = run_timeline_capture(0, 0.0, 0.5)
@@ -35,7 +38,7 @@ def test_run_timeline_capture_zero_duration() -> None:
     assert timeline["reserved"] == []
 
 
-@pytest.mark.jax
+@jax_mark
 def test_run_timeline_capture_positive_duration() -> None:
     """Verify run_timeline_capture collects some samples."""
     # Use a small interval to ensure at least one sample
@@ -47,10 +50,10 @@ def test_run_timeline_capture_positive_duration() -> None:
     assert timeline["allocated"] == timeline["reserved"]
 
 
-@pytest.mark.jax
+@jax_mark
 @mock.patch("stormlog.jax.diagnose.get_device_info")
 @mock.patch("stormlog.jax.diagnose.get_backend_info")
-def test_build_diagnostic_summary(mock_backend, mock_device) -> None:
+def test_build_diagnostic_summary(mock_backend: Any, mock_device: Any) -> None:
     """Verify build_diagnostic_summary returns a valid payload."""
     mock_backend.return_value = {"runtime_backend": "gpu"}
     mock_device.return_value = {
@@ -74,10 +77,12 @@ def test_build_diagnostic_summary(mock_backend, mock_device) -> None:
     assert not risk_detected
 
 
-@pytest.mark.jax
+@jax_mark
 @mock.patch("stormlog.jax.diagnose.get_device_info")
 @mock.patch("stormlog.jax.diagnose.get_backend_info")
-def test_build_diagnostic_summary_high_utilization(mock_backend, mock_device) -> None:
+def test_build_diagnostic_summary_high_utilization(
+    mock_backend: Any, mock_device: Any
+) -> None:
     """Verify high utilization triggers memory risk."""
     mock_backend.return_value = {"runtime_backend": "gpu"}
     mock_device.return_value = {
@@ -93,8 +98,8 @@ def test_build_diagnostic_summary_high_utilization(mock_backend, mock_device) ->
     assert summary["risk_flags"]["high_utilization"] is True
 
 
-@pytest.mark.jax
-def test_run_diagnose(tmp_path) -> None:
+@jax_mark
+def test_run_diagnose(tmp_path: Path) -> None:
     """Verify full diagnose orchestrator produces valid artifacts."""
     artifact_dir, exit_code = run_diagnose(
         output=str(tmp_path),

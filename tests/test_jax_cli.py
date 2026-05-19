@@ -1,6 +1,7 @@
 """Tests for JAX CLI."""
 
 import json
+from typing import Any
 from unittest import mock
 
 import pytest
@@ -8,20 +9,21 @@ import pytest
 pytest.importorskip("jax")
 
 from stormlog.jax.cli import main
+from tests.jax_test_helpers import jax_mark
 
 
-@pytest.mark.jax
+@jax_mark
 @mock.patch("sys.argv", ["jaxmemprof"])
-def test_main_no_args_prints_help(capsys) -> None:
+def test_main_no_args_prints_help(capsys: Any) -> None:
     """Verify main() prints help when no command is provided."""
     assert main() == 0
     captured = capsys.readouterr()
     assert "Available commands" in captured.out
 
 
-@pytest.mark.jax
+@jax_mark
 @mock.patch("sys.argv", ["jaxmemprof", "info"])
-def test_cmd_info(capsys) -> None:
+def test_cmd_info(capsys: Any) -> None:
     """Verify cmd_info produces expected output."""
     assert main() == 0
     captured = capsys.readouterr()
@@ -30,16 +32,16 @@ def test_cmd_info(capsys) -> None:
     assert "Runtime Backend:" in captured.out
 
 
-@pytest.mark.jax
-@mock.patch("sys.argv", ["jaxmemprof", "info", "--verbose"])
-def test_cmd_info_verbose(capsys) -> None:
+@jax_mark
+@mock.patch("sys.argv", ["jaxmemprof", "--verbose", "info"])
+def test_cmd_info_verbose(capsys: Any) -> None:
     """Verify cmd_info verbose mode works without crashing."""
     assert main() == 0
     captured = capsys.readouterr()
     assert "JAX Stormlog - System Information" in captured.out
 
 
-@pytest.mark.jax
+@jax_mark
 def test_cmd_monitor_args() -> None:
     """Verify monitor command arguments."""
     import argparse
@@ -57,8 +59,8 @@ def test_cmd_monitor_args() -> None:
     assert cmd_monitor(args) == 0
 
 
-@pytest.mark.jax
-def test_cmd_monitor_output(tmp_path) -> None:
+@jax_mark
+def test_cmd_monitor_output(tmp_path: Any) -> None:
     """Verify monitor command writes output file."""
     import argparse
 
@@ -79,9 +81,9 @@ def test_cmd_monitor_output(tmp_path) -> None:
     assert "memory_usage" in data
 
 
-@pytest.mark.jax
+@jax_mark
 @mock.patch("stormlog.wandb_integration.wandb_config_from_namespace")
-def test_cmd_track_args(mock_wandb_config, tmp_path) -> None:
+def test_cmd_track_args(mock_wandb_config: Any, tmp_path: Any) -> None:
     """Verify track command handles arguments."""
     import argparse
 
@@ -123,10 +125,10 @@ def test_cmd_track_args(mock_wandb_config, tmp_path) -> None:
     assert "events" in data
 
 
-@pytest.mark.jax
+@jax_mark
 @mock.patch("sys.argv", ["jaxmemprof", "diagnose", "--duration", "0"])
-@mock.patch("stormlog.jax.diagnose.run_diagnose")
-def test_cmd_diagnose(mock_run_diagnose, tmp_path) -> None:
+@mock.patch("stormlog.jax.cli.run_diagnose")
+def test_cmd_diagnose(mock_run_diagnose: Any, tmp_path: Any) -> None:
     """Verify diagnose command creates valid output."""
     mock_run_diagnose.return_value = (tmp_path / "dummy", 0)
 
