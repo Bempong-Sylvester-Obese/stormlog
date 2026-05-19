@@ -46,13 +46,9 @@ from .jax_env import configure_jax_logging
 
 configure_jax_logging()
 
-try:
-    import jax
+import jax  # noqa: E402
 
-    JAX_AVAILABLE = True
-except ImportError:
-    JAX_AVAILABLE = False
-    jax = None
+JAX_AVAILABLE = True
 
 try:
     import psutil

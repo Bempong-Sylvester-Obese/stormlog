@@ -18,9 +18,7 @@ from stormlog.wandb_integration import (
     wandb_config_from_namespace,
 )
 
-from .diagnose import run_diagnose
 from .jax_env import configure_jax_logging
-from .tracker import JAXMemoryTracker
 from .utils import format_memory, get_system_info
 
 configure_jax_logging()
@@ -32,6 +30,10 @@ try:
 except ImportError:
     JAX_AVAILABLE = False
     jax = None
+
+if JAX_AVAILABLE:
+    from .diagnose import run_diagnose
+    from .tracker import JAXMemoryTracker
 
 
 def setup_logging(verbose: bool = False) -> None:
