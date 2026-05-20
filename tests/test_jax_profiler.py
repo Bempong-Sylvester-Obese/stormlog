@@ -9,9 +9,9 @@ import pytest
 pytest.importorskip("jax")
 
 from stormlog.jax.profiler import (
-    JAXMemoryProfiler,
-    JAXMemorySnapshot,
-    JAXProfileResult,
+    MemoryProfiler,
+    MemorySnapshot,
+    ProfileResult,
     clear_global_profiler,
     clear_profiles,
     get_global_profiler,
@@ -37,18 +37,19 @@ def profiler(mock_device: mock.Mock) -> Generator[Any, None, None]:
     ):
         with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
             mock_zeros.return_value.block_until_ready.return_value = None
-            p = JAXMemoryProfiler(device_index=0)
+            p = MemoryProfiler(device_index=0)
             yield p
             p.reset()
 
 
 @jax_mark
 def test_snapshot_creation() -> None:
-    """Verify JAXMemorySnapshot properties."""
-    snapshot = JAXMemorySnapshot(
+    """Verify MemorySnapshot properties."""
+    snapshot = MemorySnapshot(
         timestamp=time.time(),
         name="test",
         device_memory_bytes=1000,
+        device_memory_reserved_bytes=2000,
         cpu_memory_bytes=2000,
         device_id=0,
         memory_stats={"bytes_in_use": 1000},
@@ -59,8 +60,8 @@ def test_snapshot_creation() -> None:
 
 @jax_mark
 def test_profile_result_properties() -> None:
-    """Verify JAXProfileResult calculated properties."""
-    result = JAXProfileResult(
+    """Verify ProfileResult calculated properties."""
+    result = ProfileResult(
         start_time=1.0,
         end_time=3.0,
         peak_memory_bytes=5000,
@@ -134,7 +135,7 @@ def test_continuous_profiling(profiler: Any) -> None:
 
 @jax_mark
 def test_context_manager_lifecycle(profiler: Any) -> None:
-    """Verify JAXMemoryProfiler can be used as a context manager."""
+    """Verify MemoryProfiler can be used as a context manager."""
     with profiler:
         time.sleep(0.05)
 
@@ -149,7 +150,7 @@ def test_global_profiler_lifecycle() -> None:
     clear_global_profiler()
 
     p = get_global_profiler()
-    assert isinstance(p, JAXMemoryProfiler)
+    assert isinstance(p, MemoryProfiler)
 
     p2 = get_global_profiler()
     assert p is p2

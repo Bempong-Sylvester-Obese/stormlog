@@ -49,7 +49,7 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 @dataclass
-class JAXMemorySnapshot:
+class MemorySnapshot:
     """Point-in-time JAX memory snapshot."""
 
     timestamp: float
@@ -57,12 +57,15 @@ class JAXMemorySnapshot:
     device_memory_bytes: int
     cpu_memory_bytes: int
     device_id: int
+    device_memory_reserved_bytes: int = 0
     memory_stats: Dict[str, Any] = field(default_factory=dict)
     operation_name: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.device_memory_bytes < 0:
             self.device_memory_bytes = 0
+        if self.device_memory_reserved_bytes < 0:
+            self.device_memory_reserved_bytes = 0
         if self.cpu_memory_bytes < 0:
             self.cpu_memory_bytes = 0
 
@@ -71,12 +74,16 @@ class JAXMemorySnapshot:
         return self.device_memory_bytes / (1024 * 1024)
 
     @property
+    def device_memory_reserved_mb(self) -> float:
+        return self.device_memory_reserved_bytes / (1024 * 1024)
+
+    @property
     def cpu_memory_mb(self) -> float:
         return self.cpu_memory_bytes / (1024 * 1024)
 
 
 @dataclass
-class JAXProfileResult:
+class ProfileResult:
     """Aggregated profiling results for a JAX session."""
 
     start_time: float
@@ -84,7 +91,7 @@ class JAXProfileResult:
     peak_memory_bytes: int
     average_memory_bytes: int
     min_memory_bytes: int
-    snapshots: List[JAXMemorySnapshot] = field(default_factory=list)
+    snapshots: List[MemorySnapshot] = field(default_factory=list)
     function_profiles: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @property
@@ -116,7 +123,7 @@ class JAXProfileResult:
 # ---------------------------------------------------------------------------
 
 
-class JAXMemoryProfiler:
+class MemoryProfiler:
     """JAX memory profiler with snapshot capture and function profiling.
 
     Provides:
@@ -125,11 +132,11 @@ class JAXMemoryProfiler:
     * ``profile_function()`` – decorator-based before/after profiling
     * ``profile_context()`` – with-block profiling
     * ``start_continuous_profiling()`` / ``stop_continuous_profiling()``
-    * ``get_results()`` – aggregate into :class:`JAXProfileResult`
+    * ``get_results()`` – aggregate into :class:`ProfileResult`
 
     Example::
 
-        profiler = JAXMemoryProfiler()
+        profiler = MemoryProfiler()
         with profiler:
             s = profiler.capture_snapshot("after_init")
         result = profiler.get_results()
@@ -140,7 +147,7 @@ class JAXMemoryProfiler:
         self._device: Any = None
         self._lock = threading.Lock()
 
-        self._snapshots: List[JAXMemorySnapshot] = []
+        self._snapshots: List[MemorySnapshot] = []
         self._function_profiles: Dict[str, Dict[str, Any]] = {}
 
         self._continuous_thread: Optional[threading.Thread] = None
@@ -164,7 +171,7 @@ class JAXMemoryProfiler:
         name: str = "snapshot",
         *,
         operation_name: Optional[str] = None,
-    ) -> JAXMemorySnapshot:
+    ) -> MemorySnapshot:
         """Capture a point-in-time memory snapshot.
 
         Args:
@@ -172,9 +179,10 @@ class JAXMemoryProfiler:
             operation_name: Optional operation being profiled.
 
         Returns:
-            A :class:`JAXMemorySnapshot`.
+            A :class:`MemorySnapshot`.
         """
         device_bytes = 0
+        reserved_bytes = 0
         memory_stats: Dict[str, Any] = {}
 
         if self._device is not None:
@@ -185,6 +193,9 @@ class JAXMemoryProfiler:
                 if raw is not None:
                     memory_stats = dict(raw)
                     device_bytes = int(memory_stats.get("bytes_in_use", 0))
+                    reserved_bytes = int(
+                        memory_stats.get("bytes_reserved", device_bytes)
+                    )
             except Exception as exc:
                 logger.debug("Snapshot memory_stats failed: %s", exc)
 
@@ -195,10 +206,11 @@ class JAXMemoryProfiler:
             except Exception as exc:
                 logger.debug("CPU memory read failed: %s", exc)
 
-        snap = JAXMemorySnapshot(
+        snap = MemorySnapshot(
             timestamp=time.time(),
             name=name,
             device_memory_bytes=device_bytes,
+            device_memory_reserved_bytes=reserved_bytes,
             cpu_memory_bytes=cpu_bytes,
             device_id=self._device_index,
             memory_stats=memory_stats,
@@ -289,7 +301,7 @@ class JAXMemoryProfiler:
     def profile_context(
         self,
         name: str = "context",
-    ) -> Iterator[JAXMemorySnapshot]:
+    ) -> Iterator[MemorySnapshot]:
         """Context manager that captures before/after snapshots.
 
         Usage::
@@ -358,15 +370,15 @@ class JAXMemoryProfiler:
 
     # -- Results -----------------------------------------------------------
 
-    def get_results(self) -> JAXProfileResult:
-        """Aggregate captured snapshots into a :class:`JAXProfileResult`."""
+    def get_results(self) -> ProfileResult:
+        """Aggregate captured snapshots into a :class:`ProfileResult`."""
         with self._lock:
             snapshots = list(self._snapshots)
             profiles = {k: dict(v) for k, v in self._function_profiles.items()}
 
         if not snapshots:
             now = time.time()
-            return JAXProfileResult(
+            return ProfileResult(
                 start_time=self._start_time or now,
                 end_time=self._end_time or now,
                 peak_memory_bytes=0,
@@ -377,7 +389,7 @@ class JAXMemoryProfiler:
             )
 
         memories = [s.device_memory_bytes for s in snapshots]
-        return JAXProfileResult(
+        return ProfileResult(
             start_time=snapshots[0].timestamp,
             end_time=snapshots[-1].timestamp,
             peak_memory_bytes=max(memories),
@@ -397,7 +409,7 @@ class JAXMemoryProfiler:
 
     # -- Context manager ---------------------------------------------------
 
-    def __enter__(self) -> "JAXMemoryProfiler":
+    def __enter__(self) -> "MemoryProfiler":
         self._start_time = time.time()
         self.capture_snapshot("session_start")
         return self
@@ -412,20 +424,20 @@ class JAXMemoryProfiler:
 # Global profiler singleton
 # ---------------------------------------------------------------------------
 
-_global_profiler: Optional[JAXMemoryProfiler] = None
+_global_profiler: Optional[MemoryProfiler] = None
 _profiler_lock = threading.Lock()
 
 
-def get_global_profiler() -> JAXMemoryProfiler:
-    """Get or create the global :class:`JAXMemoryProfiler` instance."""
+def get_global_profiler() -> MemoryProfiler:
+    """Get or create the global :class:`MemoryProfiler` instance."""
     global _global_profiler
     with _profiler_lock:
         if _global_profiler is None:
-            _global_profiler = JAXMemoryProfiler()
+            _global_profiler = MemoryProfiler()
         return _global_profiler
 
 
-def set_global_profiler(profiler: JAXMemoryProfiler) -> None:
+def set_global_profiler(profiler: MemoryProfiler) -> None:
     """Replace the global profiler instance."""
     global _global_profiler
     with _profiler_lock:
@@ -473,3 +485,7 @@ def get_profile_summaries(
     if limit is not None:
         summaries = summaries[:limit]
     return summaries
+
+
+# Aliases for backward compatibility
+JAXMemoryProfiler = MemoryProfiler

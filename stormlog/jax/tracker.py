@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class JAXTrackingResult:
+class TrackingResult:
     """Results from real-time JAX memory tracking."""
 
     start_time: float
@@ -92,6 +92,16 @@ class JAXTrackingResult:
     history_dropped_events: int = 0
     history_retained_alerts: int = 0
     history_dropped_alerts: int = 0
+
+    @property
+    def peak_memory_mb(self) -> float:
+        """Peak memory usage in MB."""
+        return self.peak_memory_bytes / (1024 * 1024)
+
+    @property
+    def average_memory_mb(self) -> float:
+        """Average memory usage in MB."""
+        return self.average_memory_bytes / (1024 * 1024)
 
     @property
     def duration(self) -> float:
@@ -219,7 +229,7 @@ class MemoryTracker:
         self._min_memory_bytes: Optional[int] = None
         self._sum_memory_bytes = 0
 
-        self._last_sink_diagnostics: Dict[str, int] = self._empty_sink_diagnostics()
+        self._last_sink_diagnostics: Dict[str, Any] = self._empty_sink_diagnostics()
         self._phase_state = PhaseRecorder()
 
         # Thread sync
@@ -242,7 +252,7 @@ class MemoryTracker:
             )
 
     @staticmethod
-    def _empty_sink_diagnostics() -> Dict[str, int]:
+    def _empty_sink_diagnostics() -> Dict[str, Any]:
         return {
             "rollover_count": 0,
             "pruned_segment_count": 0,
@@ -320,11 +330,15 @@ class MemoryTracker:
     def _get_current_device_memory(self) -> int:
         if self._device is None:
             return 0
-        # Flush XLA async dispatch
-        jax.numpy.zeros(1, device=self._device).block_until_ready()
-        stats = self._device.memory_stats()
-        if stats:
-            return int(stats.get("bytes_in_use", 0))
+        try:
+            # Flush XLA async dispatch if possible
+            if hasattr(jax.numpy, "zeros"):
+                jax.numpy.zeros(1, device=self._device).block_until_ready()
+            stats = self._device.memory_stats()
+            if stats:
+                return int(stats.get("bytes_in_use", 0))
+        except Exception:
+            pass
         return 0
 
     def _get_current_cpu_memory(self) -> int:
@@ -333,7 +347,7 @@ class MemoryTracker:
         return 0
 
     def _get_current_memory(self) -> int:
-        if self._device is not None:
+        if self._device is not None and self._device.platform != "cpu":
             return self._get_current_device_memory()
         return self._get_current_cpu_memory()
 
@@ -371,7 +385,6 @@ class MemoryTracker:
             "world_size": self.distributed_identity["world_size"],
         }
 
-        # Use cached device memory limit
         if self._device_bytes_limit is not None:
             legacy["device_total_bytes"] = self._device_bytes_limit
 
@@ -468,9 +481,9 @@ class MemoryTracker:
 
     def _transition_to_success(self, timestamp: float) -> None:
         previous_health = self._collector_health
-        previous_error = previous_health.last_error
-        previous_failures = previous_health.consecutive_failures
         if previous_health.status != COLLECTOR_HEALTH_HEALTHY:
+            previous_error = previous_health.last_error
+            previous_failures = previous_health.consecutive_failures
             self._set_collector_health(
                 status=COLLECTOR_HEALTH_HEALTHY,
                 telemetry_partial=False,
@@ -488,11 +501,11 @@ class MemoryTracker:
                     "collector_previous_failure_count": previous_failures,
                 },
             )
-            return
-        self._set_collector_health(
-            status=COLLECTOR_HEALTH_HEALTHY,
-            telemetry_partial=False,
-        )
+        else:
+            self._set_collector_health(
+                status=COLLECTOR_HEALTH_HEALTHY,
+                telemetry_partial=False,
+            )
 
     def _run_tracking_iteration(self) -> None:
         current_time = time.time()
@@ -625,7 +638,7 @@ class MemoryTracker:
                 "Started JAX memory tracking with %ss interval", self.sampling_interval
             )
 
-    def stop_tracking(self) -> JAXTrackingResult:
+    def stop_tracking(self) -> TrackingResult:
         if not self.tracking:
             if self.enable_logging:
                 logger.warning("Tracking not started")
@@ -669,80 +682,6 @@ class MemoryTracker:
             )
 
         return result
-
-    def _create_tracking_result(self) -> JAXTrackingResult:
-        with self._lock:
-            result_data = self._tracking_result_data()
-            if (
-                not result_data.retained_memory_usage
-                and not result_data.retained_events
-                and not result_data.retained_alerts
-            ):
-                return self._create_empty_result()
-
-            session_start = self._session_start_time
-            session_end = self._session_end_time
-            if session_start is None:
-                session_start = (
-                    result_data.retained_timestamps[0]
-                    if result_data.retained_timestamps
-                    else time.time()
-                )
-            if session_end is None:
-                session_end = (
-                    result_data.retained_timestamps[-1]
-                    if result_data.retained_timestamps
-                    else time.time()
-                )
-
-            return JAXTrackingResult(
-                start_time=session_start,
-                end_time=session_end,
-                samples_collected=result_data.total_samples_observed,
-                memory_usage=result_data.retained_memory_usage,
-                timestamps=result_data.retained_timestamps,
-                peak_memory_bytes=(
-                    result_data.peak_memory if result_data.total_samples_observed else 0
-                ),
-                average_memory_bytes=(
-                    int(result_data.sum_memory / result_data.total_samples_observed)
-                    if result_data.total_samples_observed
-                    else 0
-                ),
-                min_memory_bytes=(
-                    max(result_data.min_memory, 0)
-                    if result_data.total_samples_observed
-                    else 0
-                ),
-                alert_count=len(result_data.retained_alerts),
-                session_summary=self._session_summary,
-                telemetry_events=result_data.retained_events,
-                history_window_limit=self.max_history,
-                history_retained_samples=len(result_data.retained_memory_usage),
-                history_dropped_samples=result_data.dropped_samples,
-                history_retained_events=len(result_data.retained_events),
-                history_dropped_events=result_data.dropped_events,
-                history_retained_alerts=len(result_data.retained_alerts),
-                history_dropped_alerts=result_data.dropped_alerts,
-            )
-
-    def _create_empty_result(self) -> JAXTrackingResult:
-        current_time = time.time()
-        start_time = self._session_start_time or current_time
-        end_time = self._session_end_time or start_time
-        return JAXTrackingResult(
-            start_time=start_time,
-            end_time=end_time,
-            samples_collected=0,
-            memory_usage=[],
-            timestamps=[],
-            peak_memory_bytes=0,
-            average_memory_bytes=0,
-            min_memory_bytes=0,
-            alert_count=0,
-            session_summary=self._session_summary,
-            history_window_limit=self.max_history,
-        )
 
     def get_current_memory(self) -> float:
         """Get current memory usage in MB."""
@@ -816,9 +755,82 @@ class MemoryTracker:
             "last_oom_dump_path": self._last_oom_dump_path,
         }
 
-    def get_tracking_results(self) -> JAXTrackingResult:
+    def get_tracking_results(self) -> TrackingResult:
         """Get current tracking results without stopping."""
         return self._create_tracking_result()
+
+    def _create_tracking_result(self) -> TrackingResult:
+        with self._lock:
+            result_data = self._tracking_result_data()
+            if (
+                not result_data.retained_memory_usage
+                and not result_data.retained_events
+                and not result_data.retained_alerts
+            ):
+                return self._create_empty_result()
+
+            session_start = self._session_start_time
+            session_end = self._session_end_time
+            if session_start is None:
+                session_start = (
+                    result_data.retained_timestamps[0]
+                    if result_data.retained_timestamps
+                    else time.time()
+                )
+            if session_end is None:
+                session_end = (
+                    result_data.retained_timestamps[-1]
+                    if result_data.retained_timestamps
+                    else time.time()
+                )
+
+            return TrackingResult(
+                start_time=session_start,
+                end_time=session_end,
+                samples_collected=result_data.total_samples_observed,
+                memory_usage=result_data.retained_memory_usage,
+                timestamps=result_data.retained_timestamps,
+                peak_memory_bytes=(
+                    result_data.peak_memory if result_data.total_samples_observed else 0
+                ),
+                average_memory_bytes=(
+                    int(result_data.sum_memory / result_data.total_samples_observed)
+                    if result_data.total_samples_observed
+                    else 0
+                ),
+                min_memory_bytes=(
+                    result_data.min_memory if result_data.total_samples_observed else 0
+                ),
+                alert_count=len(result_data.retained_alerts)
+                + result_data.dropped_alerts,
+                telemetry_events=result_data.retained_events,
+                session_summary=self._session_summary,
+                history_window_limit=self.max_history,
+                history_retained_samples=len(result_data.retained_memory_usage),
+                history_dropped_samples=result_data.dropped_samples,
+                history_retained_events=len(result_data.retained_events),
+                history_dropped_events=result_data.dropped_events,
+                history_retained_alerts=len(result_data.retained_alerts),
+                history_dropped_alerts=result_data.dropped_alerts,
+            )
+
+    def _create_empty_result(self) -> TrackingResult:
+        current_time = time.time()
+        start_time = self._session_start_time or current_time
+        end_time = self._session_end_time or start_time
+        return TrackingResult(
+            start_time=start_time,
+            end_time=end_time,
+            samples_collected=0,
+            memory_usage=[],
+            timestamps=[],
+            peak_memory_bytes=0,
+            average_memory_bytes=0,
+            min_memory_bytes=0,
+            alert_count=0,
+            session_summary=self._session_summary,
+            history_window_limit=self.max_history,
+        )
 
     # -- Telemetry Sink Management -----------------------------------------
 
@@ -953,17 +965,7 @@ class MemoryTracker:
         context: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[str]:
-        """Capture OOM diagnostics for recognized OOM exceptions.
-
-        Args:
-            exc: The exception to classify and potentially dump.
-            context: Human-readable context (e.g. operation name).
-            metadata: Additional metadata for the dump bundle.
-
-        Returns:
-            Path to the dump bundle if an OOM was detected and recorded,
-            or ``None`` otherwise.
-        """
+        """Capture OOM diagnostics for recognized OOM exceptions."""
         classification = classify_oom_exception(exc)
         if not classification.is_oom or classification.reason is None:
             return None
@@ -1053,15 +1055,7 @@ class MemoryTracker:
         context: str = "runtime",
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Iterator[None]:
-        """Capture an OOM diagnostic bundle if the wrapped block raises an OOM.
-
-        Usage::
-
-            tracker = MemoryTracker(enable_oom_flight_recorder=True)
-            tracker.start_tracking()
-            with tracker.capture_oom("training_step"):
-                risky_jax_computation()
-        """
+        """Capture an OOM diagnostic bundle if the wrapped block raises an OOM."""
         try:
             yield
         except Exception as exc:
@@ -1070,13 +1064,19 @@ class MemoryTracker:
                 logger.error("OOM flight recorder dump saved to: %s", dump_path)
             raise
 
+    def trigger_oom_dump(
+        self,
+        exception: BaseException,
+        context: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Manually trigger an OOM diagnostic dump bundle."""
+        return self.handle_exception(exception, context=context, metadata=metadata)
+
     # -- Device Memory Profile Export --------------------------------------
 
     def save_device_memory_profile(self, output_path: str) -> bool:
-        """Save a JAX device memory profile to the given path.
-
-        Requires jax.profiler.save_device_memory_profile to be available.
-        """
+        """Save a JAX device memory profile to the given path."""
         if not JAX_AVAILABLE:
             return False
 
@@ -1090,7 +1090,7 @@ class MemoryTracker:
                 return True
             else:
                 logger.warning(
-                    "jax.profiler.save_device_memory_profile is not available in this JAX version."
+                    "jax.profiler.save_device_memory_profile is not available."
                 )
                 return False
         except Exception as exc:
@@ -1234,3 +1234,7 @@ class MemoryWatchdog:
     def force_cleanup(self) -> None:
         """Force immediate memory cleanup."""
         self._cleanup_memory()
+
+
+# Aliases for backward compatibility
+JAXMemoryTracker = MemoryTracker

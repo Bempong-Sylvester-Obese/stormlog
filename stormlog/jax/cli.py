@@ -489,6 +489,54 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def cmd_analyze(args: argparse.Namespace) -> int:
+    """Analyze a saved tracking result JSON file."""
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Error: Input file {args.input} not found", file=sys.stderr)
+        return 1
+
+    try:
+        with input_path.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as e:
+        print(f"Error: Failed to load results from {args.input}: {e}", file=sys.stderr)
+        return 1
+
+    print(f"Analyzing JAX tracking results: {args.input}")
+    print("=" * 50)
+    print(f"Peak Memory: {data.get('peak_memory', 0.0):.2f} MB")
+    print(f"Average Memory: {data.get('average_memory', 0.0):.2f} MB")
+    print(f"Duration: {data.get('duration', 0.0):.2f} seconds")
+    print(f"Alerts Triggered: {data.get('alerts', 0)}")
+
+    if args.plot:
+        from .visualizer import MemoryVisualizer
+
+        visualizer = MemoryVisualizer()
+
+        # Wrap data in a simple object for the visualizer
+        class ResultWrapper:
+            def __init__(self, d: Dict[str, Any]):
+                self.memory_usage = d.get("memory_usage", [])
+                self.timestamps = d.get("timestamps", [])
+
+        wrapper = ResultWrapper(data)
+        plot_name = args.plot if isinstance(args.plot, str) else "memory_timeline.png"
+
+        if args.output:
+            output_dir = Path(args.output)
+            output_dir.mkdir(parents=True, exist_ok=True)
+            plot_path = str(output_dir / plot_name)
+        else:
+            plot_path = plot_name
+
+        visualizer.plot_memory_timeline(wrapper, save_path=plot_path)
+        print(f"Memory timeline plot saved to {plot_path}")
+
+    return 0
+
+
 def main() -> int:
     """Main CLI entry point."""
     parser = argparse.ArgumentParser(
@@ -659,8 +707,7 @@ Cookbook:
 
     # Diagnose command
     diagnose_parser = subparsers.add_parser(
-        "diagnose",
-        help="Produce a portable diagnostic bundle for debugging memory failures",
+        "diagnose", help="Diagnose OOM dumps and memory issues"
     )
     diagnose_parser.add_argument(
         "--output",
@@ -688,6 +735,26 @@ Cookbook:
     )
     add_wandb_arguments(diagnose_parser)
 
+    # Analyze command
+    analyze_parser = subparsers.add_parser(
+        "analyze", help="Analyze saved tracking results"
+    )
+    analyze_parser.add_argument(
+        "--input", required=True, help="Input JSON file with tracking results"
+    )
+    analyze_parser.add_argument(
+        "--output",
+        type=str,
+        default=None,
+        help="Output directory for analysis results",
+    )
+    analyze_parser.add_argument(
+        "--plot",
+        nargs="?",
+        const="memory_timeline.png",
+        help="Generate a memory usage plot (default: memory_timeline.png)",
+    )
+
     args = parser.parse_args()
 
     setup_logging(args.verbose)
@@ -705,6 +772,8 @@ Cookbook:
         return cmd_track(args)
     elif args.command == "diagnose":
         return cmd_diagnose(args)
+    elif args.command == "analyze":
+        return cmd_analyze(args)
     else:
         print(f"Unknown command: {args.command}")
         return 1

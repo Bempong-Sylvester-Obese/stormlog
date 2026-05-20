@@ -27,6 +27,8 @@ _OOM_MESSAGE_PATTERNS = (
     "resource exhausted",
     "failed to allocate",
     "allocation failed",
+    "memoryerror",
+    "std::bad_alloc",
 )
 
 
