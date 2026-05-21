@@ -15,7 +15,7 @@ Use the guides below based on the job you are doing, not based on package intern
 **If you installed Stormlog via `pip install stormlog`** (from PyPI):
 
 - The `examples/` package is **not** included. Commands like `python -m examples.cli.quickstart` will fail with `ModuleNotFoundError`.
-- Use the CLI commands and Python snippets in this documentation instead. The `gpumemprof` and `tfmemprof` CLIs and the public Python APIs work with a pip install.
+- Use the CLI commands and Python snippets in this documentation instead. The `gpumemprof`, `tfmemprof`, and `jaxmemprof` CLIs and the public Python APIs work with a pip install.
 - Install `stormlog[tui,torch]` if you want the `stormlog` TUI entrypoint from a pip install.
 - The TUI **Capability Matrix** and **OOM scenario** buttons run example modules. If those fail, use the inline command runner in the TUI with the equivalent CLI commands from this guide.
 
@@ -35,6 +35,7 @@ cookbook/index
 cookbook/always_on
 cookbook/pytorch
 cookbook/tensorflow
+cookbook/jax
 cookbook/distributed
 cookbook/incidents
 cookbook/ci_release
@@ -49,6 +50,7 @@ telemetry_projection
 query_layer
 pytorch_testing_guide
 tensorflow_testing_guide
+jax_testing_guide
 article
 architecture
 api
@@ -83,6 +85,7 @@ examples/test_guides/README
 
 - [PyTorch guide](pytorch_testing_guide.md)
 - [TensorFlow guide](tensorflow_testing_guide.md)
+- [JAX guide](jax_testing_guide.md)
 - [Production Cookbook](cookbook/index.md)
 
 ## Notes
