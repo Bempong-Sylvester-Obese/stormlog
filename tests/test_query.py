@@ -439,9 +439,13 @@ def test_list_issues_includes_oom_bundles_and_telemetry_ooms(tmp_path: Path) -> 
 
     rows = query_api.open([tmp_path]).list_issues(query_api.IssueFilter(kind="oom"))
 
-    assert len(rows) == 2
-    assert {row.severity for row in rows} == {"critical"}
-    assert {row.hit_count for row in rows} == {1}
+    assert len(rows) == 1
+    assert rows[0].severity == "critical"
+    assert rows[0].hit_count == 2
+    assert rows[0].fingerprint.dimensions == {
+        "backend": "cuda",
+        "reason": "message_pattern:out of memory",
+    }
     assert {"session-oom-bundle", "session-oom-event"} == {
         session for row in rows for session in row.affected_sessions
     }

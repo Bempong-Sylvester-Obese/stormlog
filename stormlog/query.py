@@ -1287,10 +1287,6 @@ def _accumulate_oom_bundle_issue(
         dimensions={
             "backend": row.backend,
             "reason": row.reason,
-            "exception_module": row.exception_module,
-            "exception_type": row.exception_type,
-            "collector": "unknown",
-            "device_id": "unknown",
         },
     )
     seen_ns = _datetime_to_ns(_parse_datetime(row.created_at_utc))
@@ -1336,10 +1332,6 @@ def _accumulate_oom_event_issue(
         dimensions={
             "backend": _event_backend(event),
             "reason": reason,
-            "exception_module": metadata.get("exception_module"),
-            "exception_type": metadata.get("exception_type"),
-            "collector": event.collector,
-            "device_id": event.device_id,
         },
     )
     evidence = IssueEvidenceLink(

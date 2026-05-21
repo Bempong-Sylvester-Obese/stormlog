@@ -61,13 +61,12 @@ OOM fingerprints use:
 
 - `backend`
 - `reason`
-- `exception_module`
-- `exception_type`
-- `collector`
-- `device_id`
 
-OOM details keep volatile evidence such as bundle path, event count, session
-status, context, and exact timestamps.
+OOM details and evidence keep volatile or inconsistently available fields such
+as exception module/type, collector, device id, rank, bundle path, event count,
+session status, context, and exact timestamps. This lets the same OOM group
+together whether it is discovered from an OOM bundle manifest or from telemetry
+events.
 
 Collector degradation fingerprints use:
 
@@ -112,11 +111,7 @@ OOM bundle:
   "kind": "oom",
   "dimensions": {
     "backend": "cuda",
-    "reason": "message_pattern:out of memory",
-    "exception_module": "builtins",
-    "exception_type": "runtimeerror",
-    "collector": "unknown",
-    "device_id": "unknown"
+    "reason": "message_pattern:out of memory"
   }
 }
 ```

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import pytest
 
 from stormlog.issues import (
@@ -33,6 +35,32 @@ def test_fingerprint_id_is_deterministic_for_normalized_dimensions() -> None:
 
     assert first.fingerprint_id == second.fingerprint_id
     assert first.as_dict()["fingerprint_id"].startswith("issue:")
+
+
+def test_fingerprint_dimensions_are_recursively_immutable() -> None:
+    fingerprint = IssueFingerprint(
+        kind="collector_degradation",
+        dimensions={
+            "collector": "stormlog.cuda_tracker",
+            "partial_fields": ["device_total", "device_free"],
+            "nested": {"error": "RuntimeError: sample 42"},
+        },
+    )
+    original_id = fingerprint.fingerprint_id
+    dimensions: Any = fingerprint.dimensions
+
+    with pytest.raises(TypeError):
+        dimensions["collector"] = "stormlog.rocm_tracker"
+    with pytest.raises(AttributeError):
+        dimensions["partial_fields"].append("device_used")
+    with pytest.raises(TypeError):
+        dimensions["nested"]["error"] = "changed"
+
+    assert fingerprint.fingerprint_id == original_id
+    assert fingerprint.as_dict()["dimensions"]["partial_fields"] == [
+        "device_free",
+        "device_total",
+    ]
 
 
 def test_normalize_dimensions_removes_high_cardinality_numeric_text() -> None:

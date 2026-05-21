@@ -7,6 +7,7 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any, Literal
 
 IssueKind = Literal[
@@ -50,7 +51,7 @@ class IssueFingerprint:
         object.__setattr__(
             self,
             "dimensions",
-            normalize_dimensions(self.dimensions),
+            freeze_dimensions(normalize_dimensions(self.dimensions)),
         )
 
     @property
@@ -60,7 +61,7 @@ class IssueFingerprint:
         payload = {
             "schema_version": self.schema_version,
             "kind": self.kind,
-            "dimensions": dict(self.dimensions),
+            "dimensions": json_safe_dimensions(self.dimensions),
         }
         encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         return f"issue:{hashlib.sha256(encoded.encode('utf-8')).hexdigest()[:24]}"
@@ -72,7 +73,7 @@ class IssueFingerprint:
             "schema_version": self.schema_version,
             "fingerprint_id": self.fingerprint_id,
             "kind": self.kind,
-            "dimensions": dict(self.dimensions),
+            "dimensions": json_safe_dimensions(self.dimensions),
         }
 
 
@@ -187,6 +188,25 @@ def normalize_dimensions(dimensions: Mapping[str, Any]) -> dict[str, Any]:
     return dict(sorted(normalized.items()))
 
 
+def freeze_dimensions(dimensions: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Return a recursively immutable canonical dimension mapping."""
+
+    frozen = {
+        key: _freeze_dimension_value(value)
+        for key, value in sorted(dimensions.items(), key=lambda item: item[0])
+    }
+    return MappingProxyType(frozen)
+
+
+def json_safe_dimensions(dimensions: Mapping[str, Any]) -> dict[str, Any]:
+    """Return a mutable JSON-safe copy of canonical dimension material."""
+
+    return {
+        key: _json_safe_dimension_value(value)
+        for key, value in sorted(dimensions.items(), key=lambda item: item[0])
+    }
+
+
 def normalize_text_dimension(value: object, *, default: str = "unknown") -> str:
     """Return a low-cardinality text token for fingerprint dimensions."""
 
@@ -246,6 +266,22 @@ def _normalize_dimension_value(value: Any) -> Any:
     return normalize_text_dimension(value)
 
 
+def _freeze_dimension_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return freeze_dimensions(value)
+    if isinstance(value, list):
+        return tuple(_freeze_dimension_value(item) for item in value)
+    return value
+
+
+def _json_safe_dimension_value(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return json_safe_dimensions(value)
+    if isinstance(value, tuple):
+        return [_json_safe_dimension_value(item) for item in value]
+    return value
+
+
 __all__ = [
     "ISSUE_FINGERPRINT_SCHEMA_VERSION",
     "ISSUE_STATE_OPEN",
@@ -255,6 +291,8 @@ __all__ = [
     "IssueState",
     "StormlogIssue",
     "categorize_alert_context",
+    "freeze_dimensions",
+    "json_safe_dimensions",
     "normalize_dimensions",
     "normalize_issue_state",
     "normalize_text_dimension",
