@@ -3,9 +3,11 @@
 import logging
 from typing import Any, Dict, Optional, Tuple
 
+plt: Any
 try:
-    import matplotlib.pyplot as plt
+    import matplotlib.pyplot as _plt
 
+    plt = _plt
     MATPLOTLIB_AVAILABLE = True
     try:
         import seaborn as sns
@@ -15,9 +17,11 @@ except ImportError:
     plt = None
     MATPLOTLIB_AVAILABLE = False
 
+jax: Any
 try:
-    import jax  # noqa: F401
+    import jax as _jax  # noqa: F401
 
+    jax = _jax
     JAX_AVAILABLE = True
 except ImportError:
     JAX_AVAILABLE = False

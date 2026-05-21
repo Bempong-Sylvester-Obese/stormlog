@@ -39,7 +39,11 @@ def _create_artifact_dir(output: Optional[str], prefix: str) -> Path:
 
     if output:
         out_path = Path(output).resolve()
-        if out_path.exists() and out_path.is_dir():
+        if out_path.exists():
+            if not out_path.is_dir():
+                raise ValueError(
+                    f"Output path exists but is not a directory: {out_path}"
+                )
             base_dir = out_path
         else:
             out_path.mkdir(parents=True, exist_ok=False)
@@ -280,15 +284,15 @@ def run_diagnose(
             status=SESSION_STATUS_COMPLETED,
             ended_at_ns=now_ns(),
         )
-        files_written.append("manifest.json")
         _write_manifest(
             artifact_dir,
             command_line=command_line,
-            files_written=files_written,
+            files_written=files_written + ["manifest.json"],
             exit_code=exit_code,
             risk_detected=risk_detected,
             session_summary=session_summary,
         )
+        files_written.append("manifest.json")
     except OSError as e:
         print(f"Error: Failed to write diagnostic artifact: {e}", file=sys.stderr)
         exit_code = 1

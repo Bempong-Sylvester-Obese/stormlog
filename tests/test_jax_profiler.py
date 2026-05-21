@@ -9,7 +9,7 @@ import pytest
 pytest.importorskip("jax")
 
 from stormlog.jax.profiler import (
-    MemoryProfiler,
+    JAXMemoryProfiler,
     MemorySnapshot,
     ProfileResult,
     clear_global_profiler,
@@ -37,7 +37,7 @@ def profiler(mock_device: mock.Mock) -> Generator[Any, None, None]:
     ):
         with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
             mock_zeros.return_value.block_until_ready.return_value = None
-            p = MemoryProfiler(device_index=0)
+            p = JAXMemoryProfiler(device_index=0)
             yield p
             p.reset()
 
@@ -135,7 +135,7 @@ def test_continuous_profiling(profiler: Any) -> None:
 
 @jax_mark
 def test_context_manager_lifecycle(profiler: Any) -> None:
-    """Verify MemoryProfiler can be used as a context manager."""
+    """Verify JAXMemoryProfiler can be used as a context manager."""
     with profiler:
         time.sleep(0.05)
 
@@ -150,7 +150,7 @@ def test_global_profiler_lifecycle() -> None:
     clear_global_profiler()
 
     p = get_global_profiler()
-    assert isinstance(p, MemoryProfiler)
+    assert isinstance(p, JAXMemoryProfiler)
 
     p2 = get_global_profiler()
     assert p is p2

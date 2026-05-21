@@ -123,7 +123,7 @@ class ProfileResult:
 # ---------------------------------------------------------------------------
 
 
-class MemoryProfiler:
+class JAXMemoryProfiler:
     """JAX memory profiler with snapshot capture and function profiling.
 
     Provides:
@@ -136,7 +136,7 @@ class MemoryProfiler:
 
     Example::
 
-        profiler = MemoryProfiler()
+        profiler = JAXMemoryProfiler()
         with profiler:
             s = profiler.capture_snapshot("after_init")
         result = profiler.get_results()
@@ -187,7 +187,13 @@ class MemoryProfiler:
 
         if self._device is not None:
             try:
-                # Flush XLA async dispatch before reading memory.
+                # Flush XLA async dispatch before reading memory stats.
+                # JAX dispatches operations asynchronously to XLA — without
+                # this synchronisation barrier, memory_stats() may return
+                # stale values that exclude memory from operations still
+                # "in flight".  The trade-off is a small allocation
+                # (1-element array) and a forced sync; at high snapshot
+                # frequencies this can slightly perturb workload timing.
                 jax.numpy.zeros(1, device=self._device).block_until_ready()
                 raw = self._device.memory_stats()
                 if raw is not None:
@@ -409,7 +415,7 @@ class MemoryProfiler:
 
     # -- Context manager ---------------------------------------------------
 
-    def __enter__(self) -> "MemoryProfiler":
+    def __enter__(self) -> "JAXMemoryProfiler":
         self._start_time = time.time()
         self.capture_snapshot("session_start")
         return self
@@ -424,20 +430,20 @@ class MemoryProfiler:
 # Global profiler singleton
 # ---------------------------------------------------------------------------
 
-_global_profiler: Optional[MemoryProfiler] = None
+_global_profiler: Optional[JAXMemoryProfiler] = None
 _profiler_lock = threading.Lock()
 
 
-def get_global_profiler() -> MemoryProfiler:
-    """Get or create the global :class:`MemoryProfiler` instance."""
+def get_global_profiler() -> JAXMemoryProfiler:
+    """Get or create the global :class:`JAXMemoryProfiler` instance."""
     global _global_profiler
     with _profiler_lock:
         if _global_profiler is None:
-            _global_profiler = MemoryProfiler()
+            _global_profiler = JAXMemoryProfiler()
         return _global_profiler
 
 
-def set_global_profiler(profiler: MemoryProfiler) -> None:
+def set_global_profiler(profiler: JAXMemoryProfiler) -> None:
     """Replace the global profiler instance."""
     global _global_profiler
     with _profiler_lock:
@@ -485,7 +491,3 @@ def get_profile_summaries(
     if limit is not None:
         summaries = summaries[:limit]
     return summaries
-
-
-# Aliases for backward compatibility
-JAXMemoryProfiler = MemoryProfiler

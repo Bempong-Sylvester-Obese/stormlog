@@ -19,7 +19,7 @@ from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Union
 
 from .jax_env import configure_jax_logging
 from .profiler import (
-    MemoryProfiler,
+    JAXMemoryProfiler,
     ProfileResult,
 )
 from .profiler import clear_global_profiler as _clear_profiler
@@ -28,9 +28,11 @@ from .profiler import get_global_profiler as _get_profiler
 from .profiler import get_profile_summaries as _get_summaries
 from .profiler import set_global_profiler as _set_profiler
 
+jax: Any
 try:
-    import jax  # noqa: F401
+    import jax as _jax  # noqa: F401
 
+    jax = _jax
     JAX_AVAILABLE = True
 except ImportError:
     JAX_AVAILABLE = False
@@ -44,7 +46,7 @@ logger = logging.getLogger(__name__)
 # Module-level global profiler state
 # ---------------------------------------------------------------------------
 
-_global_profiler: Optional[MemoryProfiler] = None
+_global_profiler: Optional[JAXMemoryProfiler] = None
 _profiler_lock = threading.Lock()
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -54,19 +56,19 @@ F = TypeVar("F", bound=Callable[..., Any])
 # ---------------------------------------------------------------------------
 
 
-def get_global_profiler() -> MemoryProfiler:
-    """Get or create the global :class:`MemoryProfiler` instance.
+def get_global_profiler() -> JAXMemoryProfiler:
+    """Get or create the global :class:`JAXMemoryProfiler` instance.
 
     Delegates to the singleton managed in :mod:`stormlog.jax.profiler`.
 
     Returns:
-        The global :class:`MemoryProfiler`.
+        The global :class:`JAXMemoryProfiler`.
     """
     return _get_profiler()
 
 
-def set_global_profiler(profiler: MemoryProfiler) -> None:
-    """Replace the global :class:`MemoryProfiler` instance.
+def set_global_profiler(profiler: JAXMemoryProfiler) -> None:
+    """Replace the global :class:`JAXMemoryProfiler` instance.
 
     Args:
         profiler: New profiler instance to install as the global singleton.
@@ -110,7 +112,7 @@ def profile_function(
     func: Optional[F] = None,
     *,
     name: Optional[str] = None,
-    profiler: Optional[MemoryProfiler] = None,
+    profiler: Optional[JAXMemoryProfiler] = None,
 ) -> Union[Callable[[F], F], F]:
     """Decorator to profile a function's JAX device-memory usage.
 
@@ -121,7 +123,7 @@ def profile_function(
         func: Function to profile (when used as ``@profile_function``).
         name: Custom name for the profiled function.  Defaults to
             ``func.__name__``.
-        profiler: Explicit :class:`MemoryProfiler` to use.  Falls back to
+        profiler: Explicit :class:`JAXMemoryProfiler` to use.  Falls back to
             the global profiler when *None*.
 
     Returns:
@@ -154,8 +156,8 @@ def profile_function(
 @contextmanager
 def profile_context(
     name: str = "context",
-    profiler: Optional[MemoryProfiler] = None,
-) -> Iterator[MemoryProfiler]:
+    profiler: Optional[JAXMemoryProfiler] = None,
+) -> Iterator[JAXMemoryProfiler]:
     """Context manager for profiling a block of code.
 
     Args:
@@ -163,7 +165,7 @@ def profile_context(
         profiler: Explicit profiler.  Falls back to the global profiler.
 
     Yields:
-        The :class:`MemoryProfiler` being used.
+        The :class:`JAXMemoryProfiler` being used.
 
     Example::
 
@@ -189,7 +191,7 @@ class ProfiledFunction:
 
     Args:
         func: The callable to profile.
-        profiler: Explicit :class:`MemoryProfiler`.  Falls back to the
+        profiler: Explicit :class:`JAXMemoryProfiler`.  Falls back to the
             global profiler when *None*.
         name: Label used in profiling output.  Defaults to the callable's
             ``__name__`` or ``__class__.__name__``.
@@ -203,7 +205,7 @@ class ProfiledFunction:
     def __init__(
         self,
         func: Callable[..., Any],
-        profiler: Optional[MemoryProfiler] = None,
+        profiler: Optional[JAXMemoryProfiler] = None,
         name: Optional[str] = None,
     ) -> None:
         self.func = func
@@ -245,7 +247,7 @@ class JAXProfiler:
     """
 
     def __init__(self, device_index: int = 0) -> None:
-        self.profiler = MemoryProfiler(device_index=device_index)
+        self.profiler = JAXMemoryProfiler(device_index=device_index)
         set_global_profiler(self.profiler)
 
     # -- Training profiling ------------------------------------------------
@@ -267,13 +269,20 @@ class JAXProfiler:
         Args:
             train_step_fn: A callable ``(batch) -> Any`` that executes a
                 single training step.
-            dataset: An iterable of batches.  Each epoch iterates over the
-                full dataset (or up to *steps_per_epoch* batches).
+            dataset: An iterable of batches (must be re-iterable for
+                multi-epoch training; generators are exhausted after
+                epoch 0).  Each epoch iterates over the full dataset
+                (or up to steps_per_epoch batches).
             epochs: Number of epochs to profile.
             steps_per_epoch: Optional cap on the number of steps per epoch.
         """
         if not JAX_AVAILABLE:
             raise ImportError("JAX is required for JAXProfiler.profile_training")
+
+        # Convert single-use iterators (like generators) to a list once
+        # so subsequent epochs can reuse the same data.
+        if iter(dataset) is dataset:
+            dataset = list(dataset)
 
         with self.profiler.profile_context("training"):
             for epoch in range(epochs):

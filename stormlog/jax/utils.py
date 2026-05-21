@@ -15,9 +15,12 @@ from .jax_env import configure_jax_logging
 
 configure_jax_logging()
 
-try:
-    import jax  # noqa: E402
+jax: Any
 
+try:
+    import jax as _jax  # noqa: E402
+
+    jax = _jax
     JAX_AVAILABLE = True
 except ImportError:
     JAX_AVAILABLE = False
@@ -39,16 +42,27 @@ def jax_is_available() -> bool:
     return JAX_AVAILABLE
 
 
+_cpu_warning_logged = False
+
+
 def detect_jax_backend() -> str:
     """Return the active JAX backend name.
 
     Returns one of ``'gpu'``, ``'tpu'``, ``'cpu'``, or ``'cpu'``
     if JAX is not installed.
     """
+    global _cpu_warning_logged
     if not JAX_AVAILABLE:
         return "cpu"
     try:
-        return str(jax.default_backend())
+        backend = str(jax.default_backend())
+        if backend == "cpu" and not _cpu_warning_logged:
+            logger.info(
+                "JAX is running on CPU. Please download specific JAX types "
+                "for CUDA or TPU if you want to work with those hardware accelerators."
+            )
+            _cpu_warning_logged = True
+        return backend
     except Exception as exc:
         logger.debug("JAX backend detection failed: %s", exc)
         return "cpu"

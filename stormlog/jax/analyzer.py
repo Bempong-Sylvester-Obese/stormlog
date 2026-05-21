@@ -13,7 +13,13 @@ import statistics
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional, cast
 
-import numpy as np
+try:
+    import numpy as np
+except ImportError as _np_exc:
+    raise ImportError(
+        "numpy is required for the JAX memory analyzer. "
+        "Install it with: pip install numpy"
+    ) from _np_exc
 
 # ---------------------------------------------------------------------------
 # Graceful imports for optional stormlog sub-packages
@@ -26,7 +32,7 @@ try:
         attribute_collective_memory,
         resolve_collective_attribution_config,
     )
-except ImportError:  # pragma: no cover - may not be installed
+except ImportError:
     CollectiveAttributionConfig = Any  # type: ignore[assignment,misc]
     CollectiveAttributionResult = Any  # type: ignore[assignment,misc]
 
@@ -46,7 +52,7 @@ except ImportError:  # pragma: no cover - may not be installed
 
 try:
     from stormlog.gap_analysis import GapFinding, analyze_hidden_memory_gaps
-except ImportError:  # pragma: no cover
+except ImportError:
     GapFinding = Any  # type: ignore[assignment,misc]
 
     def analyze_hidden_memory_gaps(  # type: ignore[misc]
@@ -65,7 +71,7 @@ try:
         PhaseReplayIndex,
         phase_attribution_to_payload,
     )
-except ImportError:  # pragma: no cover - phase package may land in another slice
+except ImportError:  # phase package may land in another slice
     PhaseAttribution = Any  # type: ignore[assignment,misc]
     PhaseReplayIndex = Any  # type: ignore[assignment,misc]
 
@@ -77,7 +83,7 @@ except ImportError:  # pragma: no cover - phase package may land in another slic
 
 try:
     from stormlog.telemetry import TelemetryEventV2
-except ImportError:  # pragma: no cover
+except ImportError:
     TelemetryEventV2 = Any  # type: ignore[assignment,misc]
 
 from .utils import format_memory
@@ -178,13 +184,17 @@ class MemoryAnalyzer:
         # Scale threshold by sensitivity
         threshold = usage.max() * max(self.sensitivity * 0.02, 0.001)
         if slope > threshold:
+            if usage[0] != 0:
+                ratio_str = f"{usage[-1] / usage[0]:.1f}x"
+            else:
+                ratio_str = "∞x"
             leaks.append(
                 {
                     "type": "leak",
                     "severity": "medium" if slope < (usage.max() * 0.01) else "high",
                     "description": (
                         f"Significant drift detected: "
-                        f"{usage[-1] / usage[0]:.1f}x increase over session."
+                        f"{ratio_str} increase over session."
                     ),
                     "slope": float(slope),
                 }
@@ -212,15 +222,33 @@ class MemoryAnalyzer:
 
         usage = np.array(results.memory_usage, dtype=float)
 
-        # Detect periodic spikes (simplified correlation check)
-        autocorr = np.correlate(usage - usage.mean(), usage - usage.mean(), mode="full")
-        if autocorr.max() > 0:
-            patterns.append(
-                {
-                    "type": "periodic",
-                    "description": "Strong step-to-step memory correlation detected.",
-                }
+        # Detect periodic spikes via autocorrelation secondary peaks
+        centered = usage - usage.mean()
+        autocorr = np.correlate(centered, centered, mode="full")
+        center = len(autocorr) // 2
+        center_peak = autocorr[center]
+
+        if center_peak > 0:
+            # Exclude immediate neighbors (±5 lags) around the center peak
+            margin = min(5, center - 1)
+            left_half = autocorr[: center - margin] if center > margin else np.array([])
+            right_half = (
+                autocorr[center + margin + 1 :]
+                if center + margin + 1 < len(autocorr)
+                else np.array([])
             )
+            secondary_peak = max(
+                left_half.max() if left_half.size > 0 else 0,
+                right_half.max() if right_half.size > 0 else 0,
+            )
+
+            if secondary_peak > 0.5 * center_peak:
+                patterns.append(
+                    {
+                        "type": "periodic",
+                        "description": "Strong step-to-step memory correlation detected.",
+                    }
+                )
 
         return patterns
 
@@ -334,7 +362,7 @@ class MemoryAnalyzer:
                     self.memory_growth_rate = 0
 
             simple_result = _SimpleTrackingResult(
-                [s.device_memory_mb for s in profile_result.snapshots]
+                [s.device_memory_bytes for s in profile_result.snapshots]
             )
             leaks = self.detect_memory_leaks(simple_result)
 

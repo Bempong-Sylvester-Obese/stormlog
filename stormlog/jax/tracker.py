@@ -331,7 +331,13 @@ class MemoryTracker:
         if self._device is None:
             return 0
         try:
-            # Flush XLA async dispatch if possible
+            # Flush XLA async dispatch before reading memory stats.
+            # JAX dispatches operations asynchronously to XLA. Without this
+            # synchronisation barrier, memory_stats() may return stale values
+            # that exclude memory from operations still "in flight".  The
+            # trade-off is a small allocation (1-element array) and a forced
+            # sync that can slightly perturb workload timing at high sample
+            # rates.  At the default 1 s interval the overhead should be negligible.
             if hasattr(jax.numpy, "zeros"):
                 jax.numpy.zeros(1, device=self._device).block_until_ready()
             stats = self._device.memory_stats()
@@ -346,10 +352,11 @@ class MemoryTracker:
             return int(psutil.Process().memory_info().rss)
         return 0
 
-    def _get_current_memory(self) -> int:
+    def _get_current_memory(self) -> float:
+        """Return current memory usage in MB"""
         if self._device is not None and self._device.platform != "cpu":
-            return self._get_current_device_memory()
-        return self._get_current_cpu_memory()
+            return self._get_current_device_memory() / (1024 * 1024)
+        return self._get_current_cpu_memory() / (1024 * 1024)
 
     def _build_telemetry_event_record(
         self,
@@ -361,7 +368,13 @@ class MemoryTracker:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         sampling_interval_ms = int(round(self.sampling_interval * 1000))
-        # JAX reserved == allocated
+        # JAX's XLA runtime does not expose a separate "reserved but
+        # unallocated" memory counter like PyTorch's
+        # torch.cuda.memory_reserved().  We intentionally set
+        # allocator_reserved_bytes equal to allocator_allocated_bytes for
+        # schema compatibility across backends.  Downstream consumers MUST
+        # NOT interpret reserved_bytes from a JAX telemetry event as a real
+        # reservation signal; allocator_gap_bytes will always be 0.
         legacy = {
             "session_id": self._ensure_session_summary().session_id,
             "timestamp": timestamp,
@@ -513,11 +526,13 @@ class MemoryTracker:
             return
 
         try:
-            current_memory = self._get_current_memory()
+            current_memory_mb = self._get_current_memory()
         except Exception as exc:
             self._transition_to_failure(current_time, exc)
             return
 
+        # Internal bookkeeping uses bytes; convert back from MB.
+        current_memory = int(current_memory_mb * 1024 * 1024)
         self._last_successful_memory_bytes = current_memory
         self._transition_to_success(current_time)
 
@@ -542,9 +557,8 @@ class MemoryTracker:
         )
 
         if self.alert_threshold_mb:
-            current_mb = current_memory / (1024 * 1024)
-            if current_mb > self.alert_threshold_mb:
-                self._trigger_alert(current_mb, current_time)
+            if current_memory_mb > self.alert_threshold_mb:
+                self._trigger_alert(current_memory_mb, current_time)
 
     def _tracking_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -583,6 +597,13 @@ class MemoryTracker:
 
     def add_alert_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         self.alert_callbacks.append(callback)
+
+    def remove_alert_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
+        """Remove a previously registered alert callback."""
+        try:
+            self.alert_callbacks.remove(callback)
+        except ValueError:
+            pass
 
     def set_alert_threshold(self, threshold_mb: float) -> None:
         self.alert_threshold_mb = threshold_mb
@@ -686,7 +707,7 @@ class MemoryTracker:
     def get_current_memory(self) -> float:
         """Get current memory usage in MB."""
         try:
-            return self._get_current_memory() / (1024 * 1024)
+            return self._get_current_memory()
         except Exception:
             return float(self._last_successful_memory_bytes or 0) / (1024 * 1024)
 
@@ -948,6 +969,15 @@ class MemoryTracker:
             metadata=boundary.metadata,
         )
 
+    # -- Context manager protocol ------------------------------------------
+
+    def __enter__(self) -> "MemoryTracker":
+        self.start_tracking()
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        self.stop_tracking()
+
     # -- OOM Flight Recorder -----------------------------------------------
 
     @property
@@ -1076,7 +1106,16 @@ class MemoryTracker:
     # -- Device Memory Profile Export --------------------------------------
 
     def save_device_memory_profile(self, output_path: str) -> bool:
-        """Save a JAX device memory profile to the given path."""
+        """Save a JAX device memory profile to the given path.
+
+        .. note::
+
+            This method depends on ``jax.profiler.save_device_memory_profile``
+            which is only available on GPU/TPU backends with JAX >= 0.4.1.
+            On CPU-only installs or older JAX versions the call is a no-op
+            and returns ``False``.  The availability is checked at runtime
+            via ``hasattr`` guards so no import error is raised.
+        """
         if not JAX_AVAILABLE:
             return False
 
@@ -1231,8 +1270,25 @@ class MemoryWatchdog:
             self.watchdog_thread.join(timeout=5.0)
         logger.info("Stopped JAX memory watchdog")
 
-    def force_cleanup(self) -> None:
-        """Force immediate memory cleanup."""
+    def force_cleanup(self, aggressive: bool = False) -> None:
+        """Force immediate memory cleanup.
+
+        Args:
+            aggressive: When *True*, also delete all live JAX arrays
+                reachable via ``jax.live_arrays()`` (if available) before
+                running garbage collection.  Use with caution — this can
+                invalidate arrays still referenced by user code.
+        """
+        if aggressive:
+            try:
+                if hasattr(jax, "live_arrays"):
+                    for arr in jax.live_arrays():
+                        try:
+                            arr.delete()
+                        except Exception:
+                            pass
+            except Exception as e:
+                logger.debug("Aggressive cleanup of live arrays failed: %s", e)
         self._cleanup_memory()
 
 

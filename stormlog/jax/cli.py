@@ -39,9 +39,11 @@ from .utils import format_memory, get_system_info
 
 configure_jax_logging()
 
+jax: Any
 try:
-    import jax
+    import jax as _jax
 
+    jax = _jax
     JAX_AVAILABLE = True
 except ImportError:
     JAX_AVAILABLE = False

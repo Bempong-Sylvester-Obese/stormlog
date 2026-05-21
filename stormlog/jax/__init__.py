@@ -18,6 +18,11 @@ _SYMBOL_TO_MODULE = {
     "JAXMemoryProfiler": (".profiler", "JAXMemoryProfiler"),
     "MemoryTracker": (".tracker", "MemoryTracker"),
     "MemoryWatchdog": (".tracker", "MemoryWatchdog"),
+    "MemoryAnalyzer": (".analyzer", "MemoryAnalyzer"),
+    "JAXProfiler": (".context_profiler", "JAXProfiler"),
+    "ProfiledFunction": (".context_profiler", "ProfiledFunction"),
+    "profile_function": (".context_profiler", "profile_function"),
+    "profile_context": (".context_profiler", "profile_context"),
     "get_device_info": (".utils", "get_device_info"),
     "get_system_info": (".utils", "get_system_info"),
 }
@@ -66,6 +71,11 @@ __all__ = [
     "JAXMemoryProfiler",
     "MemoryTracker",
     "MemoryWatchdog",
+    "MemoryAnalyzer",
+    "JAXProfiler",
+    "ProfiledFunction",
+    "profile_function",
+    "profile_context",
     "get_device_info",
     "get_system_info",
 ]
