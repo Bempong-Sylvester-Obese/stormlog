@@ -15,7 +15,21 @@ import functools
 import logging
 import threading
 from contextlib import contextmanager
-from typing import Any, Callable, Dict, Iterator, List, Optional, TypeVar, Union, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    Iterator,
+    List,
+    Optional,
+    TypeVar,
+    Union,
+    cast,
+)
+
+if TYPE_CHECKING:
+    import stormlog.jax.profiler
 
 from .jax_env import configure_jax_logging
 from .profiler import (
@@ -57,18 +71,18 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def get_global_profiler() -> JAXMemoryProfiler:
-    """Get or create the global :class:`JAXMemoryProfiler` instance.
+    """Get or create the global :class:`~stormlog.jax.profiler.JAXMemoryProfiler` instance.
 
     Delegates to the singleton managed in :mod:`stormlog.jax.profiler`.
 
     Returns:
-        The global :class:`JAXMemoryProfiler`.
+        The global :class:`~stormlog.jax.profiler.JAXMemoryProfiler`.
     """
     return _get_profiler()
 
 
 def set_global_profiler(profiler: JAXMemoryProfiler) -> None:
-    """Replace the global :class:`JAXMemoryProfiler` instance.
+    """Replace the global :class:`~stormlog.jax.profiler.JAXMemoryProfiler` instance.
 
     Args:
         profiler: New profiler instance to install as the global singleton.
@@ -123,7 +137,7 @@ def profile_function(
         func: Function to profile (when used as ``@profile_function``).
         name: Custom name for the profiled function.  Defaults to
             ``func.__name__``.
-        profiler: Explicit :class:`JAXMemoryProfiler` to use.  Falls back to
+        profiler: Explicit :class:`~stormlog.jax.profiler.JAXMemoryProfiler` to use.  Falls back to
             the global profiler when *None*.
 
     Returns:
@@ -165,7 +179,7 @@ def profile_context(
         profiler: Explicit profiler.  Falls back to the global profiler.
 
     Yields:
-        The :class:`JAXMemoryProfiler` being used.
+        The :class:`~stormlog.jax.profiler.JAXMemoryProfiler` being used.
 
     Example::
 
@@ -191,7 +205,7 @@ class ProfiledFunction:
 
     Args:
         func: The callable to profile.
-        profiler: Explicit :class:`JAXMemoryProfiler`.  Falls back to the
+        profiler: Explicit :class:`~stormlog.jax.profiler.JAXMemoryProfiler`.  Falls back to the
             global profiler when *None*.
         name: Label used in profiling output.  Defaults to the callable's
             ``__name__`` or ``__class__.__name__``.
@@ -205,7 +219,7 @@ class ProfiledFunction:
     def __init__(
         self,
         func: Callable[..., Any],
-        profiler: Optional[JAXMemoryProfiler] = None,
+        profiler: Optional["stormlog.jax.profiler.JAXMemoryProfiler"] = None,
         name: Optional[str] = None,
     ) -> None:
         self.func = func
