@@ -1064,6 +1064,27 @@ class MemoryTracker:
                         profile_name = Path(profile_path).name
                         if profile_name not in files:
                             files.append(profile_name)
+
+                        # Automatically generate the HTML visualization
+                        try:
+                            from .attributed_viz import render_jax_attributed_html
+                            from .pprof_parser import parse_jax_memory_profile
+
+                            html_path = str(
+                                Path(dump_path) / "jax-device-memory-graph.html"
+                            )
+                            profile_data = parse_jax_memory_profile(profile_path)
+                            render_jax_attributed_html(profile_data, html_path)
+
+                            html_name = Path(html_path).name
+                            if html_name not in files:
+                                files.append(html_name)
+                            manifest["jax_device_profile_html"] = html_name
+                        except Exception as viz_exc:
+                            logger.debug(
+                                "Could not generate HTML memory graph: %s", viz_exc
+                            )
+
                         manifest["files"] = files
                         manifest["jax_device_profile"] = True
                         manifest_path.write_text(
