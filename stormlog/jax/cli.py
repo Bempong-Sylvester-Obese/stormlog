@@ -128,7 +128,8 @@ def cmd_info(args: argparse.Namespace) -> int:
 
     if "total_memory_gb" in system_info:
         print(f"Total System Memory: {system_info['total_memory_gb']:.2f} GB")
-        print(f"Available Memory: {system_info['available_memory_gb']:.2f} GB")
+        if "available_memory_gb" in system_info:
+            print(f"Available Memory: {system_info['available_memory_gb']:.2f} GB")
 
     backend_info = system_info.get("backend", {})
     device_count = backend_info.get("runtime_gpu_count", 0)
@@ -443,7 +444,8 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
             interval=args.interval,
             command_line=command_line,
         )
-    except OSError:
+    except OSError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
         return 1
 
     # Structured stdout summary
@@ -459,12 +461,12 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     try:
         manifest_path = artifact_dir / "manifest.json"
         if manifest_path.exists():
-            with open(manifest_path) as f:
+            with open(manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
             if manifest.get("risk_detected"):
                 summary_path = artifact_dir / "diagnostic_summary.json"
                 if summary_path.exists():
-                    with open(summary_path) as f:
+                    with open(summary_path, encoding="utf-8") as f:
                         summary = json.load(f)
                     flags = summary.get("risk_flags", {})
                     parts = [k for k, v in flags.items() if v]

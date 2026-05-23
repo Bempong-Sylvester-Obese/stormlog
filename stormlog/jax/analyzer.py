@@ -264,8 +264,8 @@ class MemoryAnalyzer:
 
         Args:
             profile_result: Profiling result with a ``snapshots`` attribute
-                where each snapshot exposes ``gpu_memory_mb`` and
-                ``gpu_memory_reserved_mb``.
+                where each snapshot exposes ``device_memory_mb`` and
+                ``device_memory_reserved_mb``.
 
         Returns:
             Dictionary with ``fragmentation_score``, ``trend``,
@@ -353,7 +353,9 @@ class MemoryAnalyzer:
                 score -= 0.10
 
         # Penalise memory leaks
-        if hasattr(profile_result, "memory_usage"):
+        if hasattr(profile_result, "memory_usage") or hasattr(
+            profile_result, "snapshots"
+        ):
 
             class _SimpleTrackingResult:
                 def __init__(self, memory_usage: List[float]) -> None:
@@ -361,9 +363,12 @@ class MemoryAnalyzer:
                     self.timestamps = list(range(len(memory_usage)))
                     self.memory_growth_rate = 0
 
-            simple_result = _SimpleTrackingResult(
-                [s.device_memory_bytes for s in profile_result.snapshots]
-            )
+            if hasattr(profile_result, "snapshots") and profile_result.snapshots:
+                mem_usage = [s.device_memory_bytes for s in profile_result.snapshots]
+            else:
+                mem_usage = getattr(profile_result, "memory_usage", [])
+
+            simple_result = _SimpleTrackingResult(mem_usage)
             leaks = self.detect_memory_leaks(simple_result)
 
             high_severity_leaks = [

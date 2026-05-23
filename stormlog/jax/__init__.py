@@ -8,10 +8,10 @@ from typing import Any
 from stormlog import __version__
 
 __author__ = "Stormlog Team"
-__email__ = "prince.agyei.tuffour@gmail.com"
+
 
 _JAX_INSTALL_GUIDANCE = (
-    "JAX is required for this feature. Install with " "`pip install 'stormlog[jax]'`."
+    "JAX is required for this feature. Install with: pip install 'stormlog[jax]'"
 )
 
 _SYMBOL_TO_MODULE = {

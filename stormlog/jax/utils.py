@@ -48,8 +48,8 @@ _cpu_warning_logged = False
 def detect_jax_backend() -> str:
     """Return the active JAX backend name.
 
-    Returns one of ``'gpu'``, ``'tpu'``, ``'cpu'``, or ``'cpu'``
-    if JAX is not installed.
+    Returns one of 'gpu', 'tpu', or 'cpu'. Returns 'cpu'
+    as a fallback if JAX is not installed or backend detection fails.
     """
     global _cpu_warning_logged
     if not JAX_AVAILABLE:
