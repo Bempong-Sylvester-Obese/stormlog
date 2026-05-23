@@ -180,6 +180,16 @@ print(f"Snapshots captured: {len(results.snapshots)}")
 
 For CPU-only JAX execution, the profiler will automatically adapt to the `cpu` backend.
 
+### JAX OOM Flight Recorder and Graph Visualization
+
+When tracking JAX execution over time, you can enable the OOM flight recorder to capture detailed XLA device memory profiles (`.prof` files) upon an Out-Of-Memory crash.
+
+Stormlog automatically parses this dump and generates a completely standalone, interactive WebAssembly graph viewer (`jax-device-memory-graph.html`) right next to the `.prof` file in the `oom_dumps` directory.
+
+You can view the resulting diagnostic graph in two ways:
+1. **Dependency-free HTML:** Simply open the `jax-device-memory-graph.html` file in your web browser to see an interactive Directed Graph of the call stack (no Go, `protoc`, or Graphviz installation required).
+2. **Official Go Tool:** If you prefer the standard Go toolchain, you can run `go tool pprof -http=:8080 <path_to_.prof>`.
+
 ## CPU-only workflow
 
 Use this when PyTorch CUDA profiling is unavailable but you still want a local validation path:
