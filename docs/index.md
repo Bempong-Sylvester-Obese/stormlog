@@ -47,6 +47,7 @@ benchmark_harness
 telemetry_schema
 telemetry_projection
 query_layer
+issue_fingerprinting
 pytorch_testing_guide
 tensorflow_testing_guide
 article

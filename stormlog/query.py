@@ -10,8 +10,26 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
+from .gap_analysis import analyze_hidden_memory_gaps
+from .issues import (
+    ISSUE_STATE_OPEN,
+    IssueEvidenceLink,
+    IssueFingerprint,
+    IssueKind,
+    IssueState,
+    StormlogIssue,
+    categorize_alert_context,
+    normalize_issue_state,
+    normalize_text_dimension,
+    normalized_error_stem,
+)
+from .phases import (
+    PhaseReplayIndex,
+    phase_attribution_to_payload,
+    summarize_phase_attribution,
+)
 from .session import (
     SESSION_STATUS_INTERRUPTED,
     SessionSummary,
@@ -23,6 +41,7 @@ from .session import (
 from .telemetry import (
     LoadedTelemetrySession,
     TelemetryEvent,
+    TelemetryEventV2,
     load_telemetry_sessions,
     telemetry_event_from_record,
     telemetry_event_to_dict,
@@ -34,6 +53,7 @@ from .telemetry_sink import (
     read_telemetry_sink_manifest,
     resolve_telemetry_sink_segment_paths,
 )
+from .utils import format_bytes
 
 SourceKind = Literal[
     "sink",
@@ -58,6 +78,15 @@ SummaryGroupBy = Literal["session", "session-rank", "rank", "status"]
 _ALERT_EVENT_TYPES = frozenset({"warning", "critical", "error"})
 _COLLECTOR_TRANSITION_TYPES = frozenset({"collector_degraded", "collector_recovered"})
 _TELEMETRY_FILE_NAME_PARTS = ("event", "events", "track", "telemetry")
+_COLLECTOR_DEGRADED_STATUSES = frozenset({"degraded", "unhealthy"})
+_GAP_ANALYSIS_THRESHOLDS = {
+    "gap_ratio_threshold": 0.05,
+    "gap_spike_zscore": 2.0,
+    "gap_drift_r_squared": 0.6,
+    "gap_fragmentation_ratio": 0.3,
+}
+_GAP_REMEDIATION_BY_CLASSIFICATION: Mapping[str, list[str]] = {}
+_SEVERITY_RANK = {"critical": 0, "error": 0, "warning": 1, "info": 2}
 
 
 @dataclass(frozen=True)
@@ -160,6 +189,17 @@ class OOMBundleFilter:
     reason: str | None = None
     created_after: str | None = None
     created_before: str | None = None
+
+
+@dataclass(frozen=True)
+class IssueFilter:
+    """Filters for grouped issue rows."""
+
+    fingerprint_id: str | None = None
+    kind: IssueKind | None = None
+    state: IssueState | None = None
+    severity: str | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -581,6 +621,49 @@ class QueryStore:
         rows = [row for row in rows if _oom_matches(row, filters)]
         rows.sort(key=lambda row: (row.created_at_utc or "", row.bundle_path))
         return rows
+
+    def list_issues(
+        self,
+        filters: IssueFilter | None = None,
+        *,
+        state_overrides: Mapping[str, str] | None = None,
+    ) -> list[StormlogIssue]:
+        """Return grouped issues derived from discovered artifacts."""
+        filters = filters or IssueFilter()
+        state_by_fingerprint = {
+            fingerprint_id: normalize_issue_state(state)
+            for fingerprint_id, state in (state_overrides or {}).items()
+        }
+        accumulator: dict[str, _IssueAccumulator] = {}
+
+        for oom_row in self.list_oom_bundles():
+            _accumulate_oom_bundle_issue(accumulator, oom_row)
+
+        event_rows = self.query_events(EventFilter())
+        for event_row in event_rows:
+            if _is_oom_event(event_row.event):
+                _accumulate_oom_event_issue(accumulator, event_row)
+            elif _is_collector_degradation_event(event_row.event):
+                _accumulate_collector_issue(accumulator, event_row)
+            elif _is_alert_event(event_row.event):
+                _accumulate_alert_issue(accumulator, event_row)
+
+        for source in self.catalog.sources:
+            for loaded in self._load_sessions_for_source(source):
+                _accumulate_hidden_memory_issues(accumulator, loaded, source)
+
+        issues = [
+            item.to_issue(
+                state=state_by_fingerprint.get(
+                    item.fingerprint.fingerprint_id,
+                    ISSUE_STATE_OPEN,
+                )
+            )
+            for item in accumulator.values()
+        ]
+        issues = [issue for issue in issues if _issue_matches(issue, filters)]
+        issues.sort(key=_issue_sort_key)
+        return issues
 
     def _manifest_session_status_by_id(self) -> dict[str, str]:
         statuses: dict[str, str] = {}
@@ -1050,11 +1133,48 @@ def _parse_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def _datetime_to_ns(value: datetime | None) -> int | None:
+    if value is None:
+        return None
+    return int(value.timestamp() * 1_000_000_000)
+
+
 def _is_alert_event(event: TelemetryEvent) -> bool:
     if event.event_type in _ALERT_EVENT_TYPES:
         return True
     severity = event.metadata.get("severity")
     return severity in {"warning", "critical", "error"}
+
+
+def _is_oom_event(event: TelemetryEvent) -> bool:
+    if event.event_type != "error":
+        return False
+    metadata = event.metadata
+    return any(key in metadata for key in ("oom_reason", "oom_dump_path"))
+
+
+def _is_collector_degradation_event(event: TelemetryEvent) -> bool:
+    metadata = event.metadata
+    health_status = normalize_text_dimension(metadata.get("collector_health_status"))
+    return (
+        event.event_type == "collector_degraded"
+        or health_status in _COLLECTOR_DEGRADED_STATUSES
+    )
+
+
+def _event_severity(event: TelemetryEvent) -> str:
+    metadata_severity = event.metadata.get("severity")
+    if isinstance(metadata_severity, str) and metadata_severity.strip():
+        return normalize_text_dimension(metadata_severity)
+    if event.event_type in {"critical", "error"}:
+        return "critical"
+    if event.event_type == "warning":
+        return "warning"
+    return "info"
+
+
+def _event_backend(event: TelemetryEvent) -> str:
+    return normalize_text_dimension(event.metadata.get("backend"))
 
 
 def _event_source_path(loaded: LoadedTelemetrySession, source: CatalogSource) -> str:
@@ -1074,6 +1194,392 @@ def _summary_group_key(
     if group_by == "status":
         return None, None, row.session_status
     return row.event.session_id, None, None
+
+
+@dataclass
+class _IssueAccumulator:
+    fingerprint: IssueFingerprint
+    title: str
+    severity: str
+    details: dict[str, Any] = field(default_factory=dict)
+    evidence: list[IssueEvidenceLink] = field(default_factory=list)
+    affected_sessions: set[str] = field(default_factory=set)
+    first_seen_ns: int | None = None
+    last_seen_ns: int | None = None
+
+    def add(
+        self,
+        *,
+        evidence: IssueEvidenceLink,
+        seen_ns: int | None,
+        session_id: str | None,
+        severity: str | None = None,
+        details: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Add one evidence hit to this accumulator."""
+        self.evidence.append(evidence)
+        if session_id is not None:
+            self.affected_sessions.add(session_id)
+        if seen_ns is not None:
+            if self.first_seen_ns is None or seen_ns < self.first_seen_ns:
+                self.first_seen_ns = seen_ns
+            if self.last_seen_ns is None or seen_ns > self.last_seen_ns:
+                self.last_seen_ns = seen_ns
+        if severity is not None:
+            self.severity = _max_severity(self.severity, severity)
+        if details:
+            self.details.update(details)
+
+    def to_issue(self, *, state: IssueState) -> StormlogIssue:
+        """Build an immutable issue row from accumulated hits."""
+        representative = self.evidence[0]
+        return StormlogIssue(
+            fingerprint=self.fingerprint,
+            title=self.title,
+            state=state,
+            severity=self.severity,
+            hit_count=len(self.evidence),
+            first_seen_ns=self.first_seen_ns,
+            last_seen_ns=self.last_seen_ns,
+            affected_sessions=tuple(self.affected_sessions),
+            representative_evidence=representative,
+            evidence=tuple(self.evidence),
+            details=dict(self.details),
+        )
+
+
+def _accumulate_issue(
+    accumulator: dict[str, _IssueAccumulator],
+    *,
+    fingerprint: IssueFingerprint,
+    title: str,
+    severity: str,
+    evidence: IssueEvidenceLink,
+    seen_ns: int | None,
+    session_id: str | None,
+    details: Mapping[str, Any] | None = None,
+) -> None:
+    fingerprint_id = fingerprint.fingerprint_id
+    issue = accumulator.get(fingerprint_id)
+    if issue is None:
+        issue = _IssueAccumulator(
+            fingerprint=fingerprint,
+            title=title,
+            severity=severity,
+            details=dict(details or {}),
+        )
+        accumulator[fingerprint_id] = issue
+    issue.add(
+        evidence=evidence,
+        seen_ns=seen_ns,
+        session_id=session_id,
+        severity=severity,
+        details=details,
+    )
+
+
+def _accumulate_oom_bundle_issue(
+    accumulator: dict[str, _IssueAccumulator],
+    row: OOMBundleRow,
+) -> None:
+    fingerprint = IssueFingerprint(
+        kind="oom",
+        dimensions={
+            "backend": row.backend,
+            "reason": row.reason,
+        },
+    )
+    seen_ns = _datetime_to_ns(_parse_datetime(row.created_at_utc))
+    evidence = IssueEvidenceLink(
+        session_id=row.session_id,
+        timestamp_ns=seen_ns,
+        source_path=row.bundle_path,
+        source_kind="oom_bundle",
+        bundle_path=row.bundle_path,
+        metadata={
+            "created_at_utc": row.created_at_utc,
+            "event_count": row.event_count,
+            "session_status": row.session_status,
+        },
+    )
+    _accumulate_issue(
+        accumulator,
+        fingerprint=fingerprint,
+        title="OOM captured by flight recorder",
+        severity="critical",
+        evidence=evidence,
+        seen_ns=seen_ns,
+        session_id=row.session_id,
+        details={
+            "backend": row.backend,
+            "reason": row.reason,
+            "exception_type": row.exception_type,
+            "exception_module": row.exception_module,
+        },
+    )
+
+
+def _accumulate_oom_event_issue(
+    accumulator: dict[str, _IssueAccumulator],
+    row: EventRow,
+) -> None:
+    event = row.event
+    metadata = event.metadata
+    reason = metadata.get("oom_reason")
+    bundle_path = _string_or_none(metadata.get("oom_dump_path"))
+    fingerprint = IssueFingerprint(
+        kind="oom",
+        dimensions={
+            "backend": _event_backend(event),
+            "reason": reason,
+        },
+    )
+    evidence = IssueEvidenceLink(
+        session_id=event.session_id,
+        timestamp_ns=event.timestamp_ns,
+        rank=event.rank,
+        source_path=row.source_path,
+        source_kind=row.source_kind,
+        event_type=event.event_type,
+        bundle_path=bundle_path,
+        metadata={"context": event.context, "session_status": row.session_status},
+    )
+    _accumulate_issue(
+        accumulator,
+        fingerprint=fingerprint,
+        title="OOM telemetry event",
+        severity="critical",
+        evidence=evidence,
+        seen_ns=event.timestamp_ns,
+        session_id=event.session_id,
+        details={
+            "backend": _event_backend(event),
+            "reason": reason,
+            "collector": event.collector,
+            "device_id": event.device_id,
+        },
+    )
+
+
+def _accumulate_collector_issue(
+    accumulator: dict[str, _IssueAccumulator],
+    row: EventRow,
+) -> None:
+    event = row.event
+    metadata = event.metadata
+    health_status = normalize_text_dimension(
+        metadata.get("collector_health_status"),
+        default="degraded",
+    )
+    partial_fields = metadata.get("collector_partial_fields")
+    if not isinstance(partial_fields, Sequence) or isinstance(partial_fields, str):
+        partial_fields = ()
+    last_error = metadata.get("collector_last_error")
+    fingerprint = IssueFingerprint(
+        kind="collector_degradation",
+        dimensions={
+            "collector": event.collector,
+            "backend": _event_backend(event),
+            "health_status": health_status,
+            "partial_fields": list(partial_fields),
+            "error_stem": normalized_error_stem(last_error),
+        },
+    )
+    evidence = IssueEvidenceLink(
+        session_id=event.session_id,
+        timestamp_ns=event.timestamp_ns,
+        rank=event.rank,
+        source_path=row.source_path,
+        source_kind=row.source_kind,
+        event_type=event.event_type,
+        metadata={
+            "collector_consecutive_failures": metadata.get(
+                "collector_consecutive_failures"
+            ),
+            "collector_next_retry_epoch_s": metadata.get(
+                "collector_next_retry_epoch_s"
+            ),
+            "session_status": row.session_status,
+        },
+    )
+    _accumulate_issue(
+        accumulator,
+        fingerprint=fingerprint,
+        title="Collector degradation",
+        severity="critical" if health_status == "unhealthy" else "warning",
+        evidence=evidence,
+        seen_ns=event.timestamp_ns,
+        session_id=event.session_id,
+        details={
+            "collector": event.collector,
+            "backend": _event_backend(event),
+            "health_status": health_status,
+            "partial_fields": list(partial_fields),
+            "error_stem": normalized_error_stem(last_error),
+        },
+    )
+
+
+def _accumulate_alert_issue(
+    accumulator: dict[str, _IssueAccumulator],
+    row: EventRow,
+) -> None:
+    event = row.event
+    severity = _event_severity(event)
+    category = categorize_alert_context(event.context)
+    fingerprint = IssueFingerprint(
+        kind="alert",
+        dimensions={
+            "event_type": event.event_type,
+            "severity": severity,
+            "collector": event.collector,
+            "backend": _event_backend(event),
+            "category": category,
+        },
+    )
+    evidence = IssueEvidenceLink(
+        session_id=event.session_id,
+        timestamp_ns=event.timestamp_ns,
+        rank=event.rank,
+        source_path=row.source_path,
+        source_kind=row.source_kind,
+        event_type=event.event_type,
+        metadata={"context": event.context, "session_status": row.session_status},
+    )
+    _accumulate_issue(
+        accumulator,
+        fingerprint=fingerprint,
+        title=f"Alert: {category.replace('_', ' ')}",
+        severity=severity,
+        evidence=evidence,
+        seen_ns=event.timestamp_ns,
+        session_id=event.session_id,
+        details={
+            "event_type": event.event_type,
+            "collector": event.collector,
+            "backend": _event_backend(event),
+            "category": category,
+        },
+    )
+
+
+def _accumulate_hidden_memory_issues(
+    accumulator: dict[str, _IssueAccumulator],
+    loaded: LoadedTelemetrySession,
+    source: CatalogSource,
+) -> None:
+    if len(loaded.events) < 3:
+        return
+    phase_resolver = PhaseReplayIndex.from_events(loaded.events)
+    findings = analyze_hidden_memory_gaps(
+        events=cast(Sequence[TelemetryEventV2], loaded.events),
+        thresholds=_GAP_ANALYSIS_THRESHOLDS,
+        format_memory=format_bytes,
+        remediation_by_classification=_GAP_REMEDIATION_BY_CLASSIFICATION,
+        phase_resolver=phase_resolver,
+    )
+    for finding in findings:
+        evidence_event = _event_at_timestamp(
+            loaded.events,
+            finding.evidence_timestamp_ns,
+        )
+        phase_label = summarize_phase_attribution(finding.phase_attribution)
+        fingerprint = IssueFingerprint(
+            kind="hidden_memory_anomaly",
+            dimensions={
+                "classification": finding.classification,
+                "severity": finding.severity,
+                "phase": phase_label,
+                "collector": (
+                    evidence_event.collector
+                    if evidence_event is not None
+                    else "unknown"
+                ),
+                "backend": (
+                    _event_backend(evidence_event)
+                    if evidence_event is not None
+                    else "unknown"
+                ),
+            },
+        )
+        evidence = IssueEvidenceLink(
+            session_id=loaded.summary.session_id,
+            timestamp_ns=finding.evidence_timestamp_ns,
+            rank=evidence_event.rank if evidence_event is not None else None,
+            source_path=_event_source_path(loaded, source),
+            source_kind=source.source_kind,
+            event_type=(
+                evidence_event.event_type if evidence_event is not None else "sample"
+            ),
+            metadata={
+                "classification": finding.classification,
+                "confidence": finding.confidence,
+                "phase_attribution": phase_attribution_to_payload(
+                    finding.phase_attribution
+                ),
+            },
+        )
+        _accumulate_issue(
+            accumulator,
+            fingerprint=fingerprint,
+            title=f"Hidden-memory anomaly: {finding.classification}",
+            severity=finding.severity,
+            evidence=evidence,
+            seen_ns=finding.evidence_timestamp_ns,
+            session_id=loaded.summary.session_id,
+            details={
+                "classification": finding.classification,
+                "description": finding.description,
+                "confidence": finding.confidence,
+                "evidence": dict(finding.evidence),
+                "phase": phase_label,
+            },
+        )
+
+
+def _event_at_timestamp(
+    events: Sequence[TelemetryEvent],
+    timestamp_ns: int | None,
+) -> TelemetryEvent | None:
+    if timestamp_ns is None:
+        return None
+    for event in events:
+        if event.timestamp_ns == timestamp_ns:
+            return event
+    return None
+
+
+def _max_severity(first: str, second: str) -> str:
+    first_rank = _SEVERITY_RANK.get(first, 9)
+    second_rank = _SEVERITY_RANK.get(second, 9)
+    return second if second_rank < first_rank else first
+
+
+def _issue_matches(issue: StormlogIssue, filters: IssueFilter) -> bool:
+    if filters.fingerprint_id is not None and (
+        issue.fingerprint_id != filters.fingerprint_id
+    ):
+        return False
+    if filters.kind is not None and issue.kind != filters.kind:
+        return False
+    if filters.state is not None and issue.state != filters.state:
+        return False
+    if filters.severity is not None and issue.severity != filters.severity:
+        return False
+    if filters.session_id is not None and (
+        filters.session_id not in issue.affected_sessions
+    ):
+        return False
+    return True
+
+
+def _issue_sort_key(issue: StormlogIssue) -> tuple[int, int, str]:
+    last_seen = issue.last_seen_ns if issue.last_seen_ns is not None else -1
+    return (
+        _SEVERITY_RANK.get(issue.severity, 9),
+        -last_seen,
+        issue.fingerprint_id,
+    )
 
 
 def _summarize_peak(
@@ -1193,6 +1699,7 @@ __all__ = [
     "CatalogWarning",
     "EventFilter",
     "EventRow",
+    "IssueFilter",
     "OOMBundleFilter",
     "OOMBundleRow",
     "QueryStore",

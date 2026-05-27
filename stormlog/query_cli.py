@@ -86,6 +86,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             ]
             _emit_rows(rows, output_mode, _OOM_COLUMNS)
+        elif args.command == "issues":
+            if output_mode.csv:
+                print(
+                    "Error: --csv is not supported for issue queries", file=sys.stderr
+                )
+                return 2
+            rows = [
+                row.as_dict()
+                for row in store.list_issues(
+                    query_api.IssueFilter(
+                        fingerprint_id=args.fingerprint_id,
+                        kind=args.kind,
+                        state=args.state,
+                        severity=args.severity,
+                        session_id=args.session_id,
+                    )
+                )
+            ]
+            _emit_rows(rows, output_mode, _ISSUE_COLUMNS)
         elif args.command == "summary":
             if output_mode.csv:
                 print(
@@ -156,6 +175,26 @@ def _build_parser() -> argparse.ArgumentParser:
     ooms.add_argument("--reason")
     ooms.add_argument("--created-after")
     ooms.add_argument("--created-before")
+
+    issues = subparsers.add_parser("issues", help="List grouped recurring issues")
+    _add_paths(issues)
+    _add_output_flags(issues, include_csv=True)
+    issues.add_argument("--fingerprint-id")
+    issues.add_argument(
+        "--kind",
+        choices=[
+            "oom",
+            "collector_degradation",
+            "alert",
+            "hidden_memory_anomaly",
+        ],
+    )
+    issues.add_argument(
+        "--state",
+        choices=["open", "resolved", "ignored", "regressed"],
+    )
+    issues.add_argument("--severity")
+    issues.add_argument("--session-id", "--session", dest="session_id")
 
     summary = subparsers.add_parser("summary", help="Run built-in summaries")
     _add_paths(summary)
@@ -315,6 +354,18 @@ _OOM_COLUMNS = (
     "session_status",
     "exception_type",
     "exception_module",
+)
+_ISSUE_COLUMNS = (
+    "fingerprint_id",
+    "kind",
+    "state",
+    "severity",
+    "title",
+    "hit_count",
+    "first_seen_ns",
+    "last_seen_ns",
+    "affected_sessions",
+    "representative_evidence",
 )
 _SUMMARY_COLUMNS = (
     "metric",
