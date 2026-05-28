@@ -38,21 +38,23 @@ def test_get_device_info_valid() -> None:
     device_mock.client = "client"
     device_mock.memory_stats.return_value = {"bytes_in_use": 100}
 
-    with mock.patch("stormlog.jax.utils.jax.local_devices", return_value=[device_mock]):
+    with mock.patch(
+        "stormlog.jax.utils._cached_local_devices", return_value=[device_mock]
+    ):
         info = get_device_info(0)
         assert info["kind"] == "gpu"
         assert info["memory_stats"] == {"bytes_in_use": 100}
 
 
 def test_get_device_info_out_of_range() -> None:
-    with mock.patch("stormlog.jax.utils.jax.local_devices", return_value=[]):
+    with mock.patch("stormlog.jax.utils._cached_local_devices", return_value=[]):
         info = get_device_info(0)
         assert info["kind"] == "unknown"
 
 
 def test_get_device_info_exception() -> None:
     with mock.patch(
-        "stormlog.jax.utils.jax.local_devices", side_effect=Exception("error")
+        "stormlog.jax.utils._cached_local_devices", side_effect=Exception("error")
     ):
         info = get_device_info(0)
         assert info["kind"] == "unknown"
@@ -63,7 +65,9 @@ def test_get_backend_info() -> None:
     device_mock.id = 0
     device_mock.device_kind = "gpu"
     device_mock.platform = "gpu"
-    with mock.patch("stormlog.jax.utils.jax.local_devices", return_value=[device_mock]):
+    with mock.patch(
+        "stormlog.jax.utils._cached_local_devices", return_value=[device_mock]
+    ):
         info = get_backend_info()
         assert info["device_count"] == 1
         assert info["devices"][0]["kind"] == "gpu"
@@ -71,7 +75,7 @@ def test_get_backend_info() -> None:
 
 def test_get_backend_info_exception() -> None:
     with mock.patch(
-        "stormlog.jax.utils.jax.local_devices", side_effect=Exception("error")
+        "stormlog.jax.utils._cached_local_devices", side_effect=Exception("error")
     ):
         info = get_backend_info()
         assert info["device_count"] == 0
@@ -98,7 +102,9 @@ def test_validate_jax_environment_gpu() -> None:
     with (
         mock.patch("stormlog.jax.utils.jax.__version__", "0.4.20"),
         mock.patch("stormlog.jax.utils.detect_jax_backend", return_value="gpu"),
-        mock.patch("stormlog.jax.utils.jax.local_devices", return_value=[mock.Mock()]),
+        mock.patch(
+            "stormlog.jax.utils._cached_local_devices", return_value=[mock.Mock()]
+        ),
     ):
         val = validate_jax_environment()
         assert val["gpu_available"] is True
@@ -109,7 +115,9 @@ def test_validate_jax_environment_cpu() -> None:
     with (
         mock.patch("stormlog.jax.utils.jax.__version__", "0.4.20"),
         mock.patch("stormlog.jax.utils.detect_jax_backend", return_value="cpu"),
-        mock.patch("stormlog.jax.utils.jax.local_devices", return_value=[mock.Mock()]),
+        mock.patch(
+            "stormlog.jax.utils._cached_local_devices", return_value=[mock.Mock()]
+        ),
     ):
         val = validate_jax_environment()
         assert val["gpu_available"] is False
@@ -132,7 +140,9 @@ def test_validate_jax_environment_tpu() -> None:
     with (
         mock.patch("stormlog.jax.utils.jax.__version__", "0.4.20"),
         mock.patch("stormlog.jax.utils.detect_jax_backend", return_value="tpu"),
-        mock.patch("stormlog.jax.utils.jax.local_devices", return_value=[mock.Mock()]),
+        mock.patch(
+            "stormlog.jax.utils._cached_local_devices", return_value=[mock.Mock()]
+        ),
     ):
         val = validate_jax_environment()
         assert val["tpu_available"] is True
