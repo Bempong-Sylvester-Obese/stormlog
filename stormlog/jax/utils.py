@@ -6,6 +6,7 @@ memory formatting, system information, and environment validation.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import platform
@@ -35,6 +36,21 @@ except ImportError:
     psutil = None
 
 logger = logging.getLogger(__name__)
+
+
+@functools.lru_cache(maxsize=1)
+def _cached_local_devices() -> tuple:
+    """Return ``jax.local_devices()`` cached for the process lifetime.
+
+    JAX device sets are fixed at initialisation, so caching avoids
+    repeated runtime calls in utility functions that enumerate devices.
+    """
+    if not JAX_AVAILABLE:
+        return ()
+    try:
+        return tuple(jax.local_devices())
+    except Exception:
+        return ()
 
 
 def jax_is_available() -> bool:
@@ -91,7 +107,7 @@ def get_device_info(device_index: int = 0) -> Dict[str, Any]:
         }
 
     try:
-        devices = jax.local_devices()
+        devices = _cached_local_devices()
         if device_index >= len(devices):
             return {
                 "kind": "unknown",
@@ -153,7 +169,7 @@ def get_backend_info() -> Dict[str, Any]:
         return info
 
     try:
-        devices = jax.local_devices()
+        devices = _cached_local_devices()
         info["device_count"] = len(devices)
         info["devices"] = [
             {
@@ -268,7 +284,7 @@ def validate_jax_environment() -> Dict[str, Any]:
     # Check device availability
     try:
         backend = detect_jax_backend()
-        devices = jax.local_devices()
+        devices = _cached_local_devices()
 
         if backend == "gpu":
             validation["gpu_available"] = True

@@ -193,6 +193,19 @@ class MemoryTracker:
         except Exception as exc:
             logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
 
+        # Cache a scalar sentinel for sync barriers — avoids re-allocating
+        # a device array on every sample.
+        self._sync_sentinel: Any = None
+        if self._device is not None:
+            try:
+                self._sync_sentinel = jax.numpy.zeros((), device=self._device)
+            except Exception:
+                pass
+
+        # Cache invariant per-process values used in every telemetry record.
+        self._cached_pid = os.getpid()
+        self._cached_hostname = socket.gethostname()
+
         self._telemetry_sink_config = telemetry_sink_config
         self._telemetry_sink = (
             AppendOnlyTelemetrySink(telemetry_sink_config)
@@ -338,8 +351,10 @@ class MemoryTracker:
             # trade-off is a small allocation (1-element array) and a forced
             # sync that can slightly perturb workload timing at high sample
             # rates.  At the default 1 s interval the overhead should be negligible.
-            if hasattr(jax.numpy, "zeros"):
-                jax.numpy.zeros(1, device=self._device).block_until_ready()
+            if self._sync_sentinel is not None:
+                self._sync_sentinel.block_until_ready()
+            elif hasattr(jax.numpy, "zeros"):
+                jax.numpy.zeros((), device=self._device).block_until_ready()
             stats = self._device.memory_stats()
             if stats:
                 return int(stats.get("bytes_in_use", 0))
@@ -352,11 +367,15 @@ class MemoryTracker:
             return int(psutil.Process().memory_info().rss)
         return 0
 
-    def _get_current_memory(self) -> float:
-        """Return current memory usage in MB"""
+    def _get_current_memory_bytes(self) -> int:
+        """Return current memory usage in bytes (no unit conversion)."""
         if self._device is not None and self._device.platform != "cpu":
-            return self._get_current_device_memory() / (1024 * 1024)
-        return self._get_current_cpu_memory() / (1024 * 1024)
+            return self._get_current_device_memory()
+        return self._get_current_cpu_memory()
+
+    def _get_current_memory(self) -> float:
+        """Return current memory usage in MB."""
+        return self._get_current_memory_bytes() / (1024 * 1024)
 
     def _build_telemetry_event_record(
         self,
@@ -375,8 +394,11 @@ class MemoryTracker:
         # schema compatibility across backends.  Downstream consumers MUST
         # NOT interpret reserved_bytes from a JAX telemetry event as a real
         # reservation signal; allocator_gap_bytes will always be 0.
+        session = self._ensure_session_summary()
+        health_dict = self._collector_health.to_dict()
+        meta = {**metadata, **health_dict} if metadata else health_dict
         legacy = {
-            "session_id": self._ensure_session_summary().session_id,
+            "session_id": session.session_id,
             "timestamp": timestamp,
             "type": event_type,
             "memory_mb": memory_bytes / (1024 * 1024),
@@ -384,14 +406,11 @@ class MemoryTracker:
             "allocator_reserved_bytes": memory_bytes,
             "device_id": self.device_index,
             "context": context,
-            "metadata": {
-                **dict(metadata or {}),
-                **self._collector_health.to_dict(),
-            },
+            "metadata": meta,
             "collector": "stormlog.jax.memory_tracker",
             "sampling_interval_ms": sampling_interval_ms,
-            "pid": os.getpid(),
-            "host": socket.gethostname(),
+            "pid": self._cached_pid,
+            "host": self._cached_hostname,
             "job_id": self.distributed_identity["job_id"],
             "rank": self.distributed_identity["rank"],
             "local_rank": self.distributed_identity["local_rank"],
@@ -405,7 +424,7 @@ class MemoryTracker:
             legacy,
             default_collector="stormlog.jax.memory_tracker",
             default_sampling_interval_ms=sampling_interval_ms,
-            default_session_id=self._ensure_session_summary().session_id,
+            default_session_id=session.session_id,
         )
         return telemetry_event_to_dict(event)
 
@@ -526,13 +545,10 @@ class MemoryTracker:
             return
 
         try:
-            current_memory_mb = self._get_current_memory()
+            current_memory = self._get_current_memory_bytes()
         except Exception as exc:
             self._transition_to_failure(current_time, exc)
             return
-
-        # Internal bookkeeping uses bytes; convert back from MB.
-        current_memory = int(current_memory_mb * 1024 * 1024)
         self._last_successful_memory_bytes = current_memory
         self._transition_to_success(current_time)
 
@@ -557,6 +573,7 @@ class MemoryTracker:
         )
 
         if self.alert_threshold_mb:
+            current_memory_mb = current_memory / (1024 * 1024)
             if current_memory_mb > self.alert_threshold_mb:
                 self._trigger_alert(current_memory_mb, current_time)
 

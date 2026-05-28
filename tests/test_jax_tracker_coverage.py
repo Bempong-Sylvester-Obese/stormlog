@@ -28,7 +28,7 @@ def test_transition_to_failure_and_success() -> None:
 def test_run_tracking_iteration_failure() -> None:
     tracker = MemoryTracker()
     with mock.patch.object(
-        tracker, "_get_current_memory", side_effect=Exception("error")
+        tracker, "_get_current_memory_bytes", side_effect=Exception("error")
     ):
         tracker._run_tracking_iteration()
         assert tracker._collector_health.status == COLLECTOR_HEALTH_UNHEALTHY

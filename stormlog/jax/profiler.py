@@ -164,6 +164,14 @@ class JAXMemoryProfiler:
             except Exception as exc:
                 logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
 
+        # Cache a scalar sentinel for sync barriers
+        self._sync_sentinel: Any = None
+        if self._device is not None:
+            try:
+                self._sync_sentinel = jax.numpy.zeros((), device=self._device)
+            except Exception:
+                pass
+
     # -- Snapshot capture --------------------------------------------------
 
     def capture_snapshot(
@@ -194,7 +202,10 @@ class JAXMemoryProfiler:
                 # "in flight".  The trade-off is a small allocation
                 # (1-element array) and a forced sync; at high snapshot
                 # frequencies this can slightly perturb workload timing.
-                jax.numpy.zeros(1, device=self._device).block_until_ready()
+                if self._sync_sentinel is not None:
+                    self._sync_sentinel.block_until_ready()
+                else:
+                    jax.numpy.zeros((), device=self._device).block_until_ready()
                 raw = self._device.memory_stats()
                 if raw is not None:
                     memory_stats = dict(raw)

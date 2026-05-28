@@ -9,7 +9,6 @@ recommendations and heuristics to JAX-specific idioms (XLA compilation,
 from __future__ import annotations
 
 import logging
-import statistics
 from dataclasses import asdict
 from typing import Any, Dict, List, Mapping, Optional, cast
 
@@ -224,23 +223,21 @@ class MemoryAnalyzer:
 
         # Detect periodic spikes via autocorrelation secondary peaks
         centered = usage - usage.mean()
-        autocorr = np.correlate(centered, centered, mode="full")
-        center = len(autocorr) // 2
-        center_peak = autocorr[center]
+        n = len(centered)
+        fft_len = 1
+        while fft_len < 2 * n:
+            fft_len <<= 1
+        f = np.fft.rfft(centered, n=fft_len)
+        autocorr = np.fft.irfft(f * np.conj(f), n=fft_len)[:n]
+        center_peak = float(autocorr[0])
 
         if center_peak > 0:
-            # Exclude immediate neighbors (±5 lags) around the center peak
-            margin = min(5, center - 1)
-            left_half = autocorr[: center - margin] if center > margin else np.array([])
-            right_half = (
-                autocorr[center + margin + 1 :]
-                if center + margin + 1 < len(autocorr)
-                else np.array([])
-            )
-            secondary_peak = max(
-                left_half.max() if left_half.size > 0 else 0,
-                right_half.max() if right_half.size > 0 else 0,
-            )
+            # Exclude immediate neighbors (±5 lags) around lag-0
+            margin = min(5, n - 1)
+            if margin + 1 < n:
+                secondary_peak = float(autocorr[margin + 1 :].max())
+            else:
+                secondary_peak = 0.0
 
             if secondary_peak > 0.5 * center_peak:
                 patterns.append(
@@ -290,12 +287,12 @@ class MemoryAnalyzer:
         if not fragmentation_scores:
             return {"fragmentation_score": 0.0, "trend": 0.0}
 
-        avg_fragmentation = statistics.mean(fragmentation_scores)
+        avg_fragmentation = sum(fragmentation_scores) / len(fragmentation_scores)
 
         # Calculate trend
         if len(fragmentation_scores) >= 10:
-            early = statistics.mean(fragmentation_scores[:5])
-            late = statistics.mean(fragmentation_scores[-5:])
+            early = sum(fragmentation_scores[:5]) / 5
+            late = sum(fragmentation_scores[-5:]) / len(fragmentation_scores[-5:])
             trend = late - early
         else:
             trend = 0.0
@@ -501,12 +498,11 @@ class MemoryAnalyzer:
         # Performance correlation
         perf_corr = self.correlate_with_performance(profile_result)
         if perf_corr["function_efficiency"]:
-            avg_efficiency = statistics.mean(
-                [
-                    func["efficiency_score"]
-                    for func in perf_corr["function_efficiency"].values()
-                ]
-            )
+            eff_scores = [
+                func["efficiency_score"]
+                for func in perf_corr["function_efficiency"].values()
+            ]
+            avg_efficiency = sum(eff_scores) / len(eff_scores)
             perf_score = avg_efficiency * 10.0
         else:
             perf_score = 5.0
@@ -514,9 +510,9 @@ class MemoryAnalyzer:
         categories["performance"] = perf_score
 
         # Overall score
-        optimization_score["overall_score"] = statistics.mean(
-            [efficiency_score, frag_score, perf_score]
-        )
+        optimization_score["overall_score"] = (
+            efficiency_score + frag_score + perf_score
+        ) / 3.0
 
         # Generate priority actions
         if efficiency_score < 6.0:
@@ -671,15 +667,7 @@ def _suggest_jax_optimizations(profile_result: Any) -> List[str]:
         ]
     )
 
-    # Deduplicate while preserving order
-    seen: set[str] = set()
-    unique: List[str] = []
-    for s in suggestions:
-        if s not in seen:
-            seen.add(s)
-            unique.append(s)
-
-    return unique[:10]
+    return list(dict.fromkeys(suggestions))[:10]
 
 
 def _serialize_gap_finding(finding: Any) -> dict[str, Any]:
