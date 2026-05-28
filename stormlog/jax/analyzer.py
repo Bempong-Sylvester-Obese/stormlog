@@ -291,8 +291,8 @@ class MemoryAnalyzer:
 
         # Calculate trend
         if len(fragmentation_scores) >= 10:
-            early = sum(fragmentation_scores[:5]) / 5
-            late = sum(fragmentation_scores[-5:]) / len(fragmentation_scores[-5:])
+            early = sum(fragmentation_scores[:5]) / 5.0
+            late = sum(fragmentation_scores[-5:]) / 5.0
             trend = late - early
         else:
             trend = 0.0
