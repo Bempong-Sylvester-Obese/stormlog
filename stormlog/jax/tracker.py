@@ -180,6 +180,7 @@ class MemoryTracker:
 
         self._device = None
         self._device_bytes_limit: Optional[int] = None
+        self._last_reserved_bytes: Optional[int] = None
         try:
             devices = jax.local_devices()
             if device_index < len(devices):
@@ -343,23 +344,29 @@ class MemoryTracker:
     def _get_current_device_memory(self) -> int:
         if self._device is None:
             return 0
-        try:
-            # Flush XLA async dispatch before reading memory stats.
-            # JAX dispatches operations asynchronously to XLA. Without this
-            # synchronisation barrier, memory_stats() may return stale values
-            # that exclude memory from operations still "in flight".  The
-            # trade-off is a small allocation (1-element array) and a forced
-            # sync that can slightly perturb workload timing at high sample
-            # rates.  At the default 1 s interval the overhead should be negligible.
-            if self._sync_sentinel is not None:
-                self._sync_sentinel.block_until_ready()
-            elif hasattr(jax.numpy, "zeros"):
-                jax.numpy.zeros((), device=self._device).block_until_ready()
-            stats = self._device.memory_stats()
-            if stats:
-                return int(stats.get("bytes_in_use", 0))
-        except Exception:
-            pass
+        # Flush XLA async dispatch before reading memory stats.
+        # JAX dispatches operations asynchronously to XLA. Without this
+        # synchronisation barrier, memory_stats() may return stale values
+        # that exclude memory from operations still "in flight".  The
+        # trade-off is a small allocation (1-element array) and a forced
+        # sync that can slightly perturb workload timing at high sample
+        # rates.  At the default 1 s interval the overhead should be negligible.
+        #
+        # Exceptions are intentionally NOT caught here — they propagate to
+        # _run_tracking_iteration which routes them through the
+        # collector-health degradation path instead of recording a
+        # synthetic zero-memory sample.
+        if self._sync_sentinel is not None:
+            self._sync_sentinel.block_until_ready()
+        elif hasattr(jax.numpy, "zeros"):
+            jax.numpy.zeros((), device=self._device).block_until_ready()
+        stats = self._device.memory_stats()
+        if stats:
+            if "bytes_reserved" in stats:
+                self._last_reserved_bytes = int(stats["bytes_reserved"])
+            else:
+                self._last_reserved_bytes = None
+            return int(stats.get("bytes_in_use", 0))
         return 0
 
     def _get_current_cpu_memory(self) -> int:
@@ -387,23 +394,29 @@ class MemoryTracker:
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         sampling_interval_ms = int(round(self.sampling_interval * 1000))
-        # JAX's XLA runtime does not expose a separate "reserved but
-        # unallocated" memory counter like PyTorch's
-        # torch.cuda.memory_reserved().  We intentionally set
-        # allocator_reserved_bytes equal to allocator_allocated_bytes for
-        # schema compatibility across backends.  Downstream consumers MUST
-        # NOT interpret reserved_bytes from a JAX telemetry event as a real
-        # reservation signal; allocator_gap_bytes will always be 0.
+        # Use the real bytes_reserved value from JAX memory_stats() when
+        # available, so downstream consumers can see actual XLA
+        # preallocation overhead.  When the value is unavailable we fall
+        # back to aliasing allocated_bytes and flag it as approximate.
+        reserved_bytes = self._last_reserved_bytes
+        if reserved_bytes is None:
+            reserved_bytes = memory_bytes
+            is_approximate = True
+        else:
+            is_approximate = False
+
         session = self._ensure_session_summary()
         health_dict = self._collector_health.to_dict()
         meta = {**metadata, **health_dict} if metadata else health_dict
+        if is_approximate:
+            meta["allocator_reserved_approximate"] = True
         legacy = {
             "session_id": session.session_id,
             "timestamp": timestamp,
             "type": event_type,
             "memory_mb": memory_bytes / (1024 * 1024),
             "allocator_allocated_bytes": memory_bytes,
-            "allocator_reserved_bytes": memory_bytes,
+            "allocator_reserved_bytes": reserved_bytes,
             "device_id": self.device_index,
             "context": context,
             "metadata": meta,

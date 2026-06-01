@@ -52,6 +52,12 @@ def test_cmd_diagnose_bad_args(capsys: Any) -> None:
     assert cli.cmd_diagnose(args) == 1
 
 
+def test_cmd_diagnose_jax_not_available(capsys: Any) -> None:
+    args = argparse.Namespace()
+    with mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False):
+        assert cli.cmd_diagnose(args) == 1
+
+
 def test_cmd_diagnose_wandb_none(capsys: Any) -> None:
     args = argparse.Namespace(duration=5, interval=0.5)
     with mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=None):
@@ -229,13 +235,13 @@ def test_main_info_command() -> None:
                     "cpu_count": 4,
                     "total_memory_gb": 16.0,
                     "available_memory_gb": 8.0,
-                    "backend": {"runtime_backend": "gpu", "runtime_gpu_count": 1},
+                    "backend": {"runtime_backend": "gpu", "device_count": 1},
                 },
             ),
             mock.patch(
                 "stormlog.jax.utils.get_device_info",
                 return_value={
-                    "device_kind": "gpu",
+                    "kind": "gpu",
                     "memory_stats": {
                         "bytes_in_use": 1024,
                         "peak_bytes_in_use": 2048,

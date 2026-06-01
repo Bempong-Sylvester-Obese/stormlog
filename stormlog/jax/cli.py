@@ -132,7 +132,7 @@ def cmd_info(args: argparse.Namespace) -> int:
             print(f"Available Memory: {system_info['available_memory_gb']:.2f} GB")
 
     backend_info = system_info.get("backend", {})
-    device_count = backend_info.get("runtime_gpu_count", 0)
+    device_count = backend_info.get("device_count", 0)
 
     print("\nJAX Backend Information:")
     print("-" * 30)
@@ -150,7 +150,7 @@ def cmd_info(args: argparse.Namespace) -> int:
         for i in range(device_count):
             device_info = get_device_info(i)
             print(f"\nDevice {i}:")
-            print(f"  Name: {device_info.get('device_kind', 'Unknown')}")
+            print(f"  Name: {device_info.get('kind', 'Unknown')}")
             stats = device_info.get("memory_stats", {})
 
             allocated_bytes = stats.get("bytes_in_use", 0)
@@ -424,6 +424,9 @@ def cmd_track(args: argparse.Namespace) -> int:
 
 def cmd_diagnose(args: argparse.Namespace) -> int:
     """Produce a portable diagnostic bundle. Returns 0 (OK), 1 (failure), or 2 (memory risk)."""
+    if not JAX_AVAILABLE:
+        print("Error: JAX not available")
+        return 1
     if args.duration < 0:
         print("Error: --duration must be >= 0", file=sys.stderr)
         return 1
