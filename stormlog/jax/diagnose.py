@@ -126,10 +126,21 @@ def run_timeline_capture(
         finally:
             result = tracker.stop_tracking()
 
-        # JAX treats reserved == allocated (no separate pool)
-        timestamps = list(result.timestamps)
-        allocated = [float(m) for m in result.memory_usage]
-        reserved = allocated.copy()
+        # Try to reconstruct timeline with actual reserved bytes from telemetry events
+        timestamps = []
+        allocated = []
+        reserved = []
+        for event in getattr(result, "telemetry_events", []):
+            if event.get("event_type") == "sample":
+                timestamps.append(event.get("timestamp_ns", 0) / 1e9)
+                allocated.append(float(event.get("allocator_allocated_bytes", 0)))
+                reserved.append(float(event.get("allocator_reserved_bytes", 0)))
+
+        if not timestamps:
+            timestamps = list(result.timestamps)
+            allocated = [float(m) for m in result.memory_usage]
+            reserved = allocated.copy()
+
         return {
             "timestamps": timestamps,
             "allocated": allocated,
@@ -182,11 +193,19 @@ def build_diagnostic_summary(
     peak = int(stats.get("peak_bytes_in_use", 0) or 0)
     limit_bytes = int(stats.get("bytes_limit", 0) or 0)
 
-    # JAX has no separate reserved pool; alias to allocated (like TF)
+    # Use actual reserved bytes from memory stats when available
+    reserved_val = stats.get("bytes_reserved")
+    is_approximate = False
+    if reserved_val is not None:
+        reserved = int(reserved_val)
+    else:
+        reserved = allocated
+        is_approximate = True
+
     # compute_event_fields expects a mapping with allocator counter keys
     _synthetic_event = {
         "allocator_allocated_bytes": allocated,
-        "allocator_reserved_bytes": allocated,
+        "allocator_reserved_bytes": reserved,
         "device_total_bytes": limit_bytes if limit_bytes else None,
         "collector": None,
     }
@@ -209,7 +228,7 @@ def build_diagnostic_summary(
     summary: Dict[str, Any] = {
         "backend": backend,
         "allocated_bytes": allocated,
-        "reserved_bytes": allocated,
+        "reserved_bytes": reserved,
         "peak_bytes": peak,
         "total_bytes": limit_bytes,
         "allocator_gap_bytes": allocator_gap_bytes,
@@ -223,6 +242,8 @@ def build_diagnostic_summary(
         },
         "suggestions": suggestions,
     }
+    if is_approximate:
+        summary["allocator_reserved_approximate"] = True
     return summary, risk_detected
 
 

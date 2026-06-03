@@ -154,10 +154,13 @@ def cmd_info(args: argparse.Namespace) -> int:
             stats = device_info.get("memory_stats", {})
 
             allocated_bytes = stats.get("bytes_in_use", 0)
+            reserved_bytes = stats.get("bytes_reserved")
             peak_bytes = stats.get("peak_bytes_in_use", 0)
             limit_bytes = stats.get("bytes_limit", 0)
 
             print(f"  Allocated Memory: {format_memory(allocated_bytes)}")
+            if reserved_bytes is not None:
+                print(f"  Reserved Memory: {format_memory(reserved_bytes)}")
             print(f"  Peak Memory: {format_memory(peak_bytes)}")
             if limit_bytes:
                 print(f"  Device Limit: {format_memory(limit_bytes)}")

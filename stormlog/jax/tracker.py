@@ -1045,14 +1045,22 @@ class MemoryTracker:
             dump_metadata.update(metadata)
 
         current_memory = self._status_memory_value()
+        reserved_bytes = self._last_reserved_bytes
+        is_approximate = False
+        if reserved_bytes is None:
+            reserved_bytes = current_memory
+            is_approximate = True
+
         dump_metadata.update(
             {
                 "sample_allocated_bytes": current_memory,
-                "sample_reserved_bytes": current_memory,
+                "sample_reserved_bytes": reserved_bytes,
                 "sample_device_id": self.device_index,
                 "sample_total_bytes": self._device_bytes_limit,
             }
         )
+        if is_approximate:
+            dump_metadata["allocator_reserved_approximate"] = True
         self._append_event(
             timestamp=time.time(),
             memory_bytes=current_memory,
