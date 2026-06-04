@@ -16,8 +16,8 @@ the [Production Cookbook](cookbook/index.md), especially
 [TensorFlow Production Recipes](cookbook/tensorflow.md).
 
 Install the distribution as `stormlog`, then import the Python APIs from
-`stormlog` or `stormlog.tensorflow`. The CLI automation commands remain
-`gpumemprof` and `tfmemprof`.
+`stormlog`, `stormlog.tensorflow`, or `stormlog.jax`. The CLI automation commands are
+`gpumemprof`, `tfmemprof`, and `jaxmemprof`.
 
 ## Choose the right tool
 
@@ -35,6 +35,14 @@ Use when:
 
 - you are profiling TensorFlow code directly
 - you want snapshots plus aggregated TensorFlow profiling results
+
+### `JAXMemoryProfiler`
+
+Use when:
+
+- you are profiling JAX code directly
+- you want memory usage insights taking XLA compilation into account
+- you need snapshots of JAX device allocations over time
 
 ### `MemoryTracker`
 
@@ -63,6 +71,11 @@ gpumemprof diagnose --duration 0 --output /tmp/gpumemprof_diag
 
 tfmemprof info
 tfmemprof diagnose --duration 0 --output /tmp/tf_diag
+
+jaxmemprof info
+jaxmemprof track --duration 2 --interval 0.5 --output /tmp/jaxmemprof_track.json --format json
+jaxmemprof analyze /tmp/jaxmemprof_track.json --format txt --output /tmp/jaxmemprof_analysis.txt
+jaxmemprof diagnose --duration 0 --output /tmp/jax_diag
 ```
 
 This gives you:
@@ -146,6 +159,37 @@ print(f"Snapshots captured: {len(results.snapshots)}")
 For CPU-only TensorFlow or when the GPU backend is unavailable, initialize the
 profiler with `TFMemoryProfiler(device="/CPU:0")`.
 
+## JAX profiling
+
+```python
+import jax.numpy as jnp
+from stormlog.jax import JAXMemoryProfiler
+
+profiler = JAXMemoryProfiler()
+
+with profiler.profile_context("training"):
+    x = jnp.ones((1000, 1000))
+    y = jnp.dot(x, x)
+    # Block to ensure accurate profile boundaries due to async dispatch
+    y.block_until_ready()
+
+results = profiler.get_results()
+print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+print(f"Snapshots captured: {len(results.snapshots)}")
+```
+
+For CPU-only JAX execution, the profiler will automatically adapt to the `cpu` backend.
+
+### JAX OOM Flight Recorder and Graph Visualization
+
+When tracking JAX execution over time, you can enable the OOM flight recorder to capture detailed XLA device memory profiles (`.prof` files) upon an Out-Of-Memory crash.
+
+Stormlog automatically parses this dump and generates a completely standalone, interactive WebAssembly graph viewer (`jax-device-memory-graph.html`) right next to the `.prof` file in the `oom_dumps` directory.
+
+You can view the resulting diagnostic graph in two ways:
+1. **Dependency-free HTML:** Simply open the `jax-device-memory-graph.html` file in your web browser to see an interactive Directed Graph of the call stack (no Go, `protoc`, or Graphviz installation required).
+2. **Official Go Tool:** If you prefer the standard Go toolchain, you can run `go tool pprof -http=:8080 <path_to_.prof>`.
+
 ## CPU-only workflow
 
 Use this when PyTorch CUDA profiling is unavailable but you still want a local validation path:
@@ -209,7 +253,7 @@ tracker.stop_tracking()
 
 This writes `phase_enter` and `phase_exit` telemetry records with structured
 `metadata["phase_scope"]` payloads. The same API shape is available on
-`MemoryTracker`, `CPUMemoryTracker`, and `stormlog.tensorflow.MemoryTracker`.
+`MemoryTracker`, `CPUMemoryTracker`, `stormlog.tensorflow.MemoryTracker`, and `stormlog.jax.MemoryTracker`.
 
 When those phase boundaries are present, `gpumemprof analyze` and the TUI
 Diagnostics tab can attach hidden-memory gaps, collective spikes, and

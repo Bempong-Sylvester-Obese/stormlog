@@ -17,7 +17,8 @@ Install the distribution as `stormlog`, then import the Python APIs from
 | Launch the TUI | `stormlog` |
 | Import PyTorch APIs | `from stormlog import GPUMemoryProfiler, MemoryTracker` |
 | Import TensorFlow APIs | `from stormlog.tensorflow import TFMemoryProfiler` |
-| Run CLI automation | `gpumemprof` or `tfmemprof` |
+| Import JAX APIs | `from stormlog.jax import JAXMemoryProfiler` |
+| Run CLI automation | `gpumemprof`, `tfmemprof`, or `jaxmemprof` |
 
 ### Core package
 
@@ -29,6 +30,7 @@ Includes:
 
 - `stormlog`
 - `stormlog.tensorflow`
+- `stormlog.jax`
 - core telemetry and analysis utilities
 - CPU-compatible monitoring and tracking
 
@@ -57,10 +59,11 @@ Installs the Textual stack plus the current PyTorch runtime dependency required 
 ```bash
 pip install "stormlog[torch]"
 pip install "stormlog[tf]"
+pip install "stormlog[jax]"
 pip install "stormlog[all]"
 ```
 
-`stormlog[all]` installs every runtime extra: `viz`, `tui`, `torch`, and `tf`.
+`stormlog[all]` installs every runtime extra: `viz`, `tui`, `torch`, `tf`, and `jax`.
 
 ## Source checkout
 
@@ -100,6 +103,15 @@ If you installed the TensorFlow extra:
 ```bash
 tfmemprof --help
 tfmemprof info
+```
+
+### JAX verification
+
+If you installed the JAX extra:
+
+```bash
+jaxmemprof --help
+jaxmemprof info
 ```
 
 ### TUI verification
@@ -158,6 +170,7 @@ Install the matching extra instead of trying to work around import errors manual
 ```bash
 pip install "stormlog[torch]"
 pip install "stormlog[tf]"
+pip install "stormlog[jax]"
 ```
 
 ## Next steps

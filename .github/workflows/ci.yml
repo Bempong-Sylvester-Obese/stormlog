@@ -20,7 +20,7 @@ jobs:
             fail-fast: false
             matrix:
                 python-version: ["3.10", "3.11", "3.12"]
-                framework: [pytorch, tensorflow]
+                framework: [pytorch, tensorflow, jax]
                 exclude:
                     - python-version: "3.12"
                       framework: tensorflow
@@ -45,16 +45,20 @@ jobs:
               run: |
                   if [ "${{ matrix.framework }}" = "pytorch" ]; then
                       pip install torch==2.2.2 --index-url https://download.pytorch.org/whl/cpu
-                  else
+                  elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
                       pip install tensorflow-cpu==2.15.0
+                  elif [ "${{ matrix.framework }}" = "jax" ]; then
+                      pip install jax==0.4.20 jaxlib==0.4.20 'numpy<2.0.0'
                   fi
 
             - name: Run tests
               run: |
                   if [ "${{ matrix.framework }}" = "pytorch" ]; then
-                      python3 -m pytest tests/ --ignore-glob="tests/test_tf*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
-                  else
+                      python3 -m pytest tests/ --ignore-glob="tests/test_tf*.py" --ignore-glob="tests/test_jax*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
+                  elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
                       python3 -m pytest tests/ -o "python_files=test_tf*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
+                  elif [ "${{ matrix.framework }}" = "jax" ]; then
+                      python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
                   fi
 
             - name: Upload coverage to Codecov

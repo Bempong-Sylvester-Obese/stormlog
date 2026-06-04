@@ -6,6 +6,7 @@ Stormlog currently exposes three console scripts:
 
 - `gpumemprof`
 - `tfmemprof`
+- `jaxmemprof`
 - `stormlog`
 
 Use `gpumemprof` and `tfmemprof` for automation. Use `stormlog` when you want the Textual TUI.
@@ -21,6 +22,7 @@ guidance, use the [Production Cookbook](cookbook/index.md), especially
 ```bash
 gpumemprof --help
 tfmemprof --help
+jaxmemprof --help
 ```
 
 If you are working from a repository checkout, `pip install -e .` also exposes
@@ -381,6 +383,62 @@ tfmemprof diagnose --duration 5 --interval 0.5 --output ./tf_diag
 tfmemprof diagnose --duration 0 --output ./tf_diag_quick
 ```
 
+## `jaxmemprof`
+
+The current command groups are:
+
+- `info`
+- `monitor`
+- `track`
+- `analyze`
+- `diagnose`
+
+### Inspect environment
+
+```bash
+jaxmemprof info
+```
+
+### Monitor JAX memory usage
+
+```bash
+jaxmemprof monitor --interval 0.5 --duration 30 --output jax_monitor.json
+jaxmemprof monitor --interval 0.5 --duration 30 --device gpu --output jax_monitor_gpu.json
+```
+
+For CPU-only JAX execution or when accelerators are unavailable, use `--device cpu`:
+
+```bash
+jaxmemprof monitor --interval 0.5 --duration 30 --device cpu --output jax_monitor.json
+jaxmemprof track --interval 0.5 --device cpu --output jax_track.json
+```
+
+### Track JAX memory usage
+
+```bash
+jaxmemprof track --interval 0.5 --output jax_track.json
+jaxmemprof track --interval 0.5 --job-id train-42 --rank 2 --local-rank 0 --world-size 8 --output jax_rank2.json
+jaxmemprof track --interval 0.5 --output jax_track.json --telemetry-sink-dir ./jax_live_sink
+```
+
+`jaxmemprof track` shares the same robust, degraded-mode semantics as the PyTorch and TensorFlow trackers, allowing it to gracefully handle long-running runs, collector interruptions, and append-only sink persistence.
+
+JAX tracking also logs structured phase boundaries when using `jaxmemprof.MemoryTracker` instrumentation and emits telemetry streams that are compatible with `gpumemprof analyze` and the Textual TUI.
+
+### Analyze JAX results
+
+```bash
+jaxmemprof analyze --input jax_monitor.json --detect-leaks --optimize
+jaxmemprof analyze --input jax_monitor.json --detect-leaks --optimize --visualize --report jax_report.txt
+```
+
+### Produce a diagnose bundle
+
+```bash
+jaxmemprof diagnose --duration 5 --interval 0.5 --output ./jax_diag
+jaxmemprof diagnose --duration 0 --output ./jax_diag_quick
+```
+
 ## TUI launch
 
 ```bash
@@ -393,6 +451,7 @@ Inside the TUI, the `CLI & Actions` tab exposes quick actions for:
 - `gpumemprof info`
 - `gpumemprof monitor`
 - `tfmemprof monitor`
+- `jaxmemprof monitor`
 - `gpumemprof diagnose`
 - sample workloads
 - OOM scenario runner
@@ -418,6 +477,9 @@ gpumemprof diagnose --duration 0 --output ./diag
 
 tfmemprof info
 tfmemprof diagnose --duration 0 --output ./tf_diag
+
+jaxmemprof info
+jaxmemprof diagnose --duration 0 --output ./jax_diag
 ```
 
 ## Choosing the right command

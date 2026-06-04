@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -281,7 +282,7 @@ def test_capture_cuda_snapshot_artifacts_collects_heap_once_before_snapshot(
 def test_write_cuda_snapshot_artifacts_writes_annotated_html_when_trace_plot_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    snapshot = {
+    snapshot: dict[str, Any] = {
         "segments": [],
         "device_traces": [[]],
     }
