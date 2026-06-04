@@ -121,7 +121,7 @@ def test_query_summary_rejects_csv(
     path = tmp_path / "track.json"
     _write_json_events(path, [_event_record()])
 
-    assert (
+    with pytest.raises(SystemExit) as excinfo:
         query_main(
             [
                 "summary",
@@ -131,9 +131,8 @@ def test_query_summary_rejects_csv(
                 "--csv",
             ]
         )
-        == 2
-    )
 
+    assert excinfo.value.code == 2
     assert "unrecognized arguments: --csv" in capsys.readouterr().err
 
 
@@ -198,8 +197,10 @@ def test_query_issues_rejects_csv(
     path = tmp_path / "track.json"
     _write_json_events(path, [_event_record(event_type="warning")])
 
-    assert query_main(["issues", str(path), "--csv"]) == 2
+    with pytest.raises(SystemExit) as excinfo:
+        query_main(["issues", str(path), "--csv"])
 
+    assert excinfo.value.code == 2
     assert "unrecognized arguments: --csv" in capsys.readouterr().err
 
 
