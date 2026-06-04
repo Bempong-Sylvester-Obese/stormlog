@@ -433,7 +433,7 @@ class ArtifactCatalog:
                 )
                 return
             if _is_sink_manifest(payload):
-                segment_paths = tuple(resolve_telemetry_sink_segment_paths(path))
+                segment_paths = tuple(resolve_telemetry_sink_segment_paths(path.parent))
                 self._covered_event_paths.update(segment_paths)
                 self._add_source(
                     CatalogSource(
@@ -1039,7 +1039,11 @@ def _normalize_csv_record(row: Mapping[str, str]) -> dict[str, Any]:
                 parsed = {}
             normalized[key] = parsed if isinstance(parsed, dict) else {}
         elif key in int_fields:
-            normalized[key] = int(float(value))
+            text_value = str(value).strip()
+            try:
+                normalized[key] = int(text_value)
+            except ValueError:
+                normalized[key] = int(float(text_value))
         elif key in float_fields:
             normalized[key] = float(value)
         else:

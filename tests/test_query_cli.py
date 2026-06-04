@@ -134,7 +134,7 @@ def test_query_summary_rejects_csv(
         == 2
     )
 
-    assert "--csv is not supported" in capsys.readouterr().err
+    assert "unrecognized arguments: --csv" in capsys.readouterr().err
 
 
 def test_query_issues_json_output(
@@ -200,7 +200,7 @@ def test_query_issues_rejects_csv(
 
     assert query_main(["issues", str(path), "--csv"]) == 2
 
-    assert "--csv is not supported" in capsys.readouterr().err
+    assert "unrecognized arguments: --csv" in capsys.readouterr().err
 
 
 def test_stormlog_dispatcher_preserves_no_arg_tui(

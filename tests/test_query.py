@@ -117,6 +117,24 @@ def test_list_sessions_uses_sink_manifest_without_loading_events(
     assert rows[0].event_count == 1
 
 
+def test_list_sessions_discovers_sink_manifest_file(tmp_path: Path) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append(_event_record(session_id="session-a", timestamp_ns=1))
+    sink.close()
+
+    rows = query_api.open([tmp_path / "manifest.json"]).list_sessions()
+
+    assert len(rows) == 1
+    assert rows[0].session_id == "session-a"
+    assert rows[0].source_kind == "sink"
+
+
 def test_query_events_filters_and_adds_provenance(tmp_path: Path) -> None:
     path = tmp_path / "track.json"
     _write_json_events(
@@ -348,6 +366,29 @@ def test_catalog_discovers_csv_telemetry(tmp_path: Path) -> None:
 
     assert len(rows) == 1
     assert rows[0].session_id == "session-csv"
+    assert rows[0].source_kind == "telemetry_csv"
+
+
+def test_csv_telemetry_preserves_large_integer_fields(tmp_path: Path) -> None:
+    path = tmp_path / "track.csv"
+    record = _event_record(
+        session_id="session-csv",
+        timestamp_ns=1_700_000_000_000_000_123,
+    )
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(record))
+        writer.writeheader()
+        writer.writerow(
+            {
+                key: json.dumps(value) if key == "metadata" else value
+                for key, value in record.items()
+            }
+        )
+
+    rows = query_api.open([path]).query_events()
+
+    assert len(rows) == 1
+    assert rows[0].event.timestamp_ns == record["timestamp_ns"]
     assert rows[0].source_kind == "telemetry_csv"
 
 

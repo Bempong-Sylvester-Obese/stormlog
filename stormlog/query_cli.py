@@ -178,7 +178,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     issues = subparsers.add_parser("issues", help="List grouped recurring issues")
     _add_paths(issues)
-    _add_output_flags(issues, include_csv=True)
+    _add_output_flags(issues, include_csv=False)
     issues.add_argument("--fingerprint-id")
     issues.add_argument(
         "--kind",
@@ -198,7 +198,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     summary = subparsers.add_parser("summary", help="Run built-in summaries")
     _add_paths(summary)
-    _add_output_flags(summary, include_csv=True)
+    _add_output_flags(summary, include_csv=False)
     summary.add_argument(
         "--metric",
         required=True,
