@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -46,8 +47,38 @@ def test_run_timeline_capture_positive_duration() -> None:
     assert len(timeline["timestamps"]) > 0
     assert len(timeline["allocated"]) > 0
     assert len(timeline["reserved"]) > 0
-    # For JAX, allocated == reserved
-    assert timeline["allocated"] == timeline["reserved"]
+    assert len(timeline["allocated"]) == len(timeline["reserved"])
+
+
+@jax_mark
+@mock.patch("stormlog.jax.diagnose.time.sleep")
+@mock.patch("stormlog.jax.diagnose.MemoryTracker")
+def test_run_timeline_capture_preserves_reserved_telemetry(
+    mock_tracker_cls: Any, mock_sleep: Any
+) -> None:
+    """Verify timeline capture preserves JAX reserved bytes when available."""
+    tracker = mock_tracker_cls.return_value
+    tracker.stop_tracking.return_value = SimpleNamespace(
+        timestamps=[1.0],
+        memory_usage=[1000],
+        telemetry_events=[
+            {
+                "event_type": "sample",
+                "timestamp_ns": 2_000_000_000,
+                "allocator_allocated_bytes": 1000,
+                "allocator_reserved_bytes": 1500,
+            }
+        ],
+    )
+
+    timeline = run_timeline_capture(0, 0.2, 0.05)
+
+    tracker.start_tracking.assert_called_once()
+    tracker.stop_tracking.assert_called_once()
+    mock_sleep.assert_called_once_with(0.2)
+    assert timeline["timestamps"] == [2.0]
+    assert timeline["allocated"] == [1000.0]
+    assert timeline["reserved"] == [1500.0]
 
 
 @jax_mark
@@ -72,8 +103,35 @@ def test_build_diagnostic_summary(mock_backend: Any, mock_device: Any) -> None:
     assert summary["peak_bytes"] == 2000
     assert summary["total_bytes"] == 10000
     assert summary["allocator_gap_bytes"] == 0
+    assert summary["allocator_reserved_approximate"] is True
     assert summary["utilization_ratio"] == 0.1
     assert summary["num_ooms"] == 0
+    assert not risk_detected
+
+
+@jax_mark
+@mock.patch("stormlog.jax.diagnose.get_device_info")
+@mock.patch("stormlog.jax.diagnose.get_backend_info")
+def test_build_diagnostic_summary_uses_reserved_bytes(
+    mock_backend: Any, mock_device: Any
+) -> None:
+    """Verify diagnostics keep reserved bytes distinct from allocated bytes."""
+    mock_backend.return_value = {"runtime_backend": "gpu"}
+    mock_device.return_value = {
+        "memory_stats": {
+            "bytes_in_use": 1000,
+            "bytes_reserved": 1500,
+            "peak_bytes_in_use": 2000,
+            "bytes_limit": 10000,
+        }
+    }
+
+    summary, risk_detected = build_diagnostic_summary(0)
+
+    assert summary["allocated_bytes"] == 1000
+    assert summary["reserved_bytes"] == 1500
+    assert summary["allocator_gap_bytes"] == 500
+    assert "allocator_reserved_approximate" not in summary
     assert not risk_detected
 
 

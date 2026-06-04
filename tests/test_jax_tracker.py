@@ -195,6 +195,8 @@ def test_handle_exception_oom_dumps_bundle(
         enable_oom_flight_recorder=True,
         oom_dump_dir=str(tmp_path),
     )
+    tracker._last_successful_memory_bytes = 1024
+    tracker._last_reserved_bytes = 1536
 
     with mock.patch.object(
         tracker._oom_flight_recorder,
@@ -228,6 +230,9 @@ def test_handle_exception_oom_dumps_bundle(
     assert dump_kwargs["reason"] == "message_pattern:out of memory"
     assert dump_kwargs["backend"] == "jax"
     assert dump_kwargs["context"] == "test_op"
+    assert dump_kwargs["metadata"]["sample_allocated_bytes"] == 1024
+    assert dump_kwargs["metadata"]["sample_reserved_bytes"] == 1536
+    assert "allocator_reserved_approximate" not in dump_kwargs["metadata"]
 
 
 @jax_mark
