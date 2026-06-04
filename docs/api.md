@@ -71,6 +71,31 @@ Primary exported symbols:
 - `TensorFlowAnalyzer`
 - `TensorFlowGapFinding`
 
+### `stormlog.jax` (JAX workflows)
+
+Use this package for:
+
+- JAX memory profiling, XLA compilation tracking, and context instrumentation
+- Tracking, analysis, and diagnose flows for JAX workloads on CUDA, TPU, and CPU
+
+Core modules documented in generated pages:
+
+- `stormlog.jax`
+- `stormlog.jax.profiler`
+- `stormlog.jax.tracker`
+- `stormlog.jax.context_profiler`
+- `stormlog.jax.analyzer`
+
+Primary exported symbols:
+
+- `JAXMemoryProfiler`
+- `JAXProfiler`
+- `MemoryTracker`
+- `MemoryAnalyzer`
+- `MemoryVisualizer`
+- `profile_function`
+- `profile_context`
+
 ## Usage Paths
 
 For task-oriented guidance:

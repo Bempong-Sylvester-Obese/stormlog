@@ -16,3 +16,8 @@ Generated API Modules
    stormlog.tensorflow.profiler
    stormlog.tensorflow.tracker
    stormlog.tensorflow.context_profiler
+   stormlog.jax
+   stormlog.jax.profiler
+   stormlog.jax.tracker
+   stormlog.jax.context_profiler
+   stormlog.jax.diagnose

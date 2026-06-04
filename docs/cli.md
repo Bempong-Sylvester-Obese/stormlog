@@ -6,6 +6,7 @@ Stormlog currently exposes three console scripts:
 
 - `gpumemprof`
 - `tfmemprof`
+- `jaxmemprof`
 - `stormlog`
 
 Use `gpumemprof` and `tfmemprof` for automation. Use `stormlog` when you want the Textual TUI.
@@ -21,6 +22,7 @@ guidance, use the [Production Cookbook](cookbook/index.md), especially
 ```bash
 gpumemprof --help
 tfmemprof --help
+jaxmemprof --help
 ```
 
 If you are working from a repository checkout, `pip install -e .` also exposes
@@ -32,6 +34,10 @@ Install and launch the TUI with the current dependency set:
 pip install "stormlog[tui,torch]"
 stormlog
 ```
+
+The `stormlog` command is also a small dispatcher. Running it without
+arguments still launches the TUI, while `stormlog query ...` runs the local
+artifact query CLI without importing Textual.
 
 ## `gpumemprof`
 
@@ -225,6 +231,82 @@ artifact, continue with [PyTorch Production Recipes](cookbook/pytorch.md). On
 MPS, ROCm, or CPU-only runtimes, the command fails explicitly instead of
 pretending support.
 
+## `stormlog query`
+
+`stormlog query` asks structured questions over local artifact directories. It
+uses the same canonical telemetry loaders as `gpumemprof analyze`, but exposes
+rows that are easier to filter, export, and reuse from automation.
+
+The query surface is local-first and file-backed. It reads sink manifests and
+bundle manifests before loading raw events, so listing sessions or OOM bundles
+does not require parsing every JSONL segment in a large sink directory.
+
+List sessions:
+
+```bash
+stormlog query sessions ./live_sink --status interrupted --json
+stormlog query sessions ./artifacts --has-oom-bundle --table
+```
+
+Query events:
+
+```bash
+stormlog query events ./live_sink \
+  --session-id 2b30f4a4-7d2d-48f7-a9f6-7d40c14eb95e \
+  --rank 0 \
+  --event-type collector_degraded \
+  --limit 50
+```
+
+List OOM bundles:
+
+```bash
+stormlog query ooms ./artifacts --backend cuda --table
+stormlog query ooms ./artifacts --created-after 2026-05-12T00:00:00Z --json
+```
+
+List grouped recurring issues:
+
+```bash
+stormlog query issues ./live_sink ./oom_dumps --kind oom --json
+stormlog query issues ./artifacts --severity warning --session-id session-123
+```
+
+Run built-in summaries:
+
+```bash
+stormlog query summary ./live_sink \
+  --metric peak_allocator_reserved_bytes \
+  --group-by session
+
+stormlog query summary ./live_sink \
+  --metric hidden_memory_gap_growth \
+  --group-by session-rank
+```
+
+Supported output formats:
+
+- `--table`: readable table output, used by default
+- `--json`: machine-readable rows
+- `--csv`: row-query exports for `sessions`, `events`, and `ooms`
+
+The Python API behind the CLI is available as:
+
+```python
+import stormlog.query
+
+store = stormlog.query.open(["./live_sink", "./oom_dumps"])
+sessions = store.list_sessions()
+events = store.query_events()
+ooms = store.list_oom_bundles()
+issues = store.list_issues()
+```
+
+For engine-choice details and follow-on work, see
+[Local Query Layer](query_layer.md).
+For issue grouping rules and schema details, see
+[Durable Issue Fingerprinting](issue_fingerprinting.md).
+
 ## `tfmemprof`
 
 The current command groups are:
@@ -301,6 +383,62 @@ tfmemprof diagnose --duration 5 --interval 0.5 --output ./tf_diag
 tfmemprof diagnose --duration 0 --output ./tf_diag_quick
 ```
 
+## `jaxmemprof`
+
+The current command groups are:
+
+- `info`
+- `monitor`
+- `track`
+- `analyze`
+- `diagnose`
+
+### Inspect environment
+
+```bash
+jaxmemprof info
+```
+
+### Monitor JAX memory usage
+
+```bash
+jaxmemprof monitor --interval 0.5 --duration 30 --output jax_monitor.json
+jaxmemprof monitor --interval 0.5 --duration 30 --device gpu --output jax_monitor_gpu.json
+```
+
+For CPU-only JAX execution or when accelerators are unavailable, use `--device cpu`:
+
+```bash
+jaxmemprof monitor --interval 0.5 --duration 30 --device cpu --output jax_monitor.json
+jaxmemprof track --interval 0.5 --device cpu --output jax_track.json
+```
+
+### Track JAX memory usage
+
+```bash
+jaxmemprof track --interval 0.5 --output jax_track.json
+jaxmemprof track --interval 0.5 --job-id train-42 --rank 2 --local-rank 0 --world-size 8 --output jax_rank2.json
+jaxmemprof track --interval 0.5 --output jax_track.json --telemetry-sink-dir ./jax_live_sink
+```
+
+`jaxmemprof track` shares the same robust, degraded-mode semantics as the PyTorch and TensorFlow trackers, allowing it to gracefully handle long-running runs, collector interruptions, and append-only sink persistence.
+
+JAX tracking also logs structured phase boundaries when using `jaxmemprof.MemoryTracker` instrumentation and emits telemetry streams that are compatible with `gpumemprof analyze` and the Textual TUI.
+
+### Analyze JAX results
+
+```bash
+jaxmemprof analyze --input jax_monitor.json --detect-leaks --optimize
+jaxmemprof analyze --input jax_monitor.json --detect-leaks --optimize --visualize --report jax_report.txt
+```
+
+### Produce a diagnose bundle
+
+```bash
+jaxmemprof diagnose --duration 5 --interval 0.5 --output ./jax_diag
+jaxmemprof diagnose --duration 0 --output ./jax_diag_quick
+```
+
 ## TUI launch
 
 ```bash
@@ -313,6 +451,7 @@ Inside the TUI, the `CLI & Actions` tab exposes quick actions for:
 - `gpumemprof info`
 - `gpumemprof monitor`
 - `tfmemprof monitor`
+- `jaxmemprof monitor`
 - `gpumemprof diagnose`
 - sample workloads
 - OOM scenario runner
@@ -338,6 +477,9 @@ gpumemprof diagnose --duration 0 --output ./diag
 
 tfmemprof info
 tfmemprof diagnose --duration 0 --output ./tf_diag
+
+jaxmemprof info
+jaxmemprof diagnose --duration 0 --output ./jax_diag
 ```
 
 ## Choosing the right command

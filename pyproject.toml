@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "stormlog"
 dynamic = ["version"]
-description = "A comprehensive GPU memory profiler for PyTorch and TensorFlow with CLI, visualization, and analytics"
+description = "A comprehensive GPU memory profiler for JAX, PyTorch and TensorFlow with CLI, visualization, and analytics"
 readme = "README.md"
 license = {file = "LICENSE"}
 authors = [
@@ -17,7 +17,7 @@ maintainers = [
     {name = "Prince Agyei Tuffour", email = "prince.agyei.tuffour@gmail.com"},
     {name = "Derrick Dwamena", email = "derrickasante07@gmail.com"}
 ]
-keywords = ["gpu", "memory", "profiler", "pytorch", "tensorflow", "deep-learning", "monitoring"]
+keywords = ["gpu", "memory", "profiler", "jax", "pytorch", "tensorflow", "deep-learning", "monitoring"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -57,6 +57,10 @@ tf = [
 wandb = [
     "wandb>=0.19.0",
 ]
+jax = [
+    "jax>=0.4.20",
+    "protobuf>=6.31.1",
+]
 all = [
     "matplotlib>=3.3.0",
     "seaborn>=0.11.0",
@@ -69,6 +73,8 @@ all = [
     "textual>=0.57.0",
     "pyfiglet>=1.0.2",
     "wandb>=0.19.0",
+    "jax>=0.4.20",
+    "protobuf>=6.31.1",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -129,6 +135,7 @@ Repository = "https://github.com/Silas-Asamoah/stormlog.git"
 [project.scripts]
 gpumemprof = "stormlog.cli:main"
 tfmemprof = "stormlog.tensorflow.cli:main"
+jaxmemprof = "stormlog.jax.cli:main"
 stormlog = "stormlog.tui:run_app"
 
 [tool.setuptools_scm]
@@ -143,6 +150,7 @@ exclude = ["tests*", "examples*", "docs*"]
 [tool.setuptools.package-data]
 stormlog = ["*.txt", "*.md"]
 "stormlog.tensorflow" = ["*.txt", "*.md"]
+"stormlog.jax" = ["*.txt", "*.md"]
 
 # Code formatting and linting
 [tool.black]
@@ -209,6 +217,8 @@ module = [
     "torch.*",
     "tensorflow",
     "tensorflow.*",
+    "jax",
+    "jax.*",
     "psutil",
     "scipy",
     "numpy",
@@ -228,6 +238,10 @@ module = [
     "dash.*",
     "rich",
     "rich.*",
+    "wandb",
+    "wandb.*",
+    "torchvision",
+    "torchvision.*",
 ]
 ignore_missing_imports = true
 

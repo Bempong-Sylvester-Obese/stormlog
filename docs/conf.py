@@ -47,6 +47,7 @@ autodoc_mock_imports = [
     "rich",
     "torch",
     "tensorflow",
+    "jax",
     "numpy",
     "pandas",
     "scipy",

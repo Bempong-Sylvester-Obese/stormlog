@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import dataclasses
 from collections.abc import Mapping as MappingABC
-from typing import Any, Dict, Sequence, TypedDict
+from typing import Any, Dict, Sequence, TypedDict, cast
 
 from .collector_health import COLLECTOR_HEALTH_DEGRADED
 
@@ -230,7 +230,7 @@ def enrich_event(event: Any) -> Dict[str, Any]:
     if isinstance(event, MappingABC):
         raw: Dict[str, Any] = dict(event)
     elif dataclasses.is_dataclass(event):
-        raw = dataclasses.asdict(event)
+        raw = dataclasses.asdict(cast(Any, event))
     else:
         raw = dict(vars(event))
 
