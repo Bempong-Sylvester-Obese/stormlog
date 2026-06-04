@@ -59,7 +59,9 @@ class MemoryVisualizer:
             memory_usage = [s.device_memory_mb for s in results.snapshots]
         elif hasattr(results, "memory_usage") and results.memory_usage:
             # Fallback for simple track results
-            memory_usage = results.memory_usage
+            memory_usage = [
+                float(value) / (1024.0 * 1024.0) for value in results.memory_usage
+            ]
             timestamps = getattr(results, "timestamps", list(range(len(memory_usage))))
         else:
             logging.warning("No memory data available for plotting")

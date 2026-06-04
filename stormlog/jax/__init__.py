@@ -33,7 +33,10 @@ def _is_jax_missing(exc: BaseException) -> bool:
     visited: set[int] = set()
     while current is not None and id(current) not in visited:
         visited.add(id(current))
-        if isinstance(current, ModuleNotFoundError) and current.name == "jax":
+        if (
+            isinstance(current, ModuleNotFoundError)
+            and getattr(current, "name", None) == "jax"
+        ):
             return True
         next_exc = current.__cause__
         if next_exc is None and not current.__suppress_context__:

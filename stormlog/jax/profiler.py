@@ -392,6 +392,7 @@ class JAXMemoryProfiler:
         with self._lock:
             snapshots = list(self._snapshots)
             profiles = {k: dict(v) for k, v in self._function_profiles.items()}
+        snapshots.sort(key=lambda snapshot: snapshot.timestamp)
 
         if not snapshots:
             now = time.time()
@@ -458,6 +459,8 @@ def set_global_profiler(profiler: JAXMemoryProfiler) -> None:
     """Replace the global profiler instance."""
     global _global_profiler
     with _profiler_lock:
+        if _global_profiler is not None:
+            _global_profiler.stop_continuous_profiling()
         _global_profiler = profiler
 
 
@@ -466,6 +469,7 @@ def clear_global_profiler() -> None:
     global _global_profiler
     with _profiler_lock:
         if _global_profiler is not None:
+            _global_profiler.stop_continuous_profiling()
             _global_profiler.reset()
         _global_profiler = None
 

@@ -585,7 +585,7 @@ class MemoryTracker:
             event_type="sample",
         )
 
-        if self.alert_threshold_mb:
+        if self.alert_threshold_mb is not None:
             current_memory_mb = current_memory / (1024 * 1024)
             if current_memory_mb > self.alert_threshold_mb:
                 self._trigger_alert(current_memory_mb, current_time)

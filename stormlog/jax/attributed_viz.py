@@ -225,9 +225,9 @@ def render_jax_attributed_html(
     <div class="header">
         <div class="title">Stormlog JAX Memory Diagnostics</div>
         <div class="tabs">
-            <div class="tab active" onclick="switchTab('graph')">Graph View</div>
-            <div class="tab" onclick="switchTab('top')">Top Allocations</div>
-            <div class="tab" onclick="switchTab('summary')">Summary</div>
+            <div class="tab active" onclick="switchTab('graph', event)">Graph View</div>
+            <div class="tab" onclick="switchTab('top', event)">Top Allocations</div>
+            <div class="tab" onclick="switchTab('summary', event)">Summary</div>
         </div>
     </div>
 
@@ -282,7 +282,7 @@ def render_jax_attributed_html(
     </div>
 
     <script>
-        function switchTab(tabId) {{
+        function switchTab(tabId, event) {{
             // Hide all content
             document.querySelectorAll('.content').forEach(el => el.classList.remove('active'));
             // Remove active class from all tabs
@@ -291,7 +291,9 @@ def render_jax_attributed_html(
             // Show selected content
             document.getElementById(tabId).classList.add('active');
             // Highlight selected tab
-            event.target.classList.add('active');
+            if (event && event.target) {{
+                event.target.classList.add('active');
+            }}
         }}
     </script>
 </body>

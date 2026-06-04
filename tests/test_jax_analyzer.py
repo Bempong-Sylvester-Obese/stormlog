@@ -109,8 +109,12 @@ def test_correlate_with_performance() -> None:
     analyzer = MemoryAnalyzer()
     res = mock.Mock()
     res.function_profiles = {
-        "func1": {"calls": 10, "total_memory_used": 20000, "total_duration": 15.0},
-        "func2": {"calls": 101, "total_duration": 20.0, "total_memory_used": 100},
+        "func1": {
+            "calls": 10,
+            "total_memory_delta": 30 * 1024**3,
+            "total_duration": 15.0,
+        },
+        "func2": {"calls": 101, "total_duration": 20.0, "total_memory_delta": 100},
     }
     corr = analyzer.correlate_with_performance(res)
     assert "func1" in corr["function_efficiency"]
@@ -139,7 +143,11 @@ def test_score_optimization() -> None:
     res.memory_usage = [100, 100, 100, 100, 100]
     res.memory_growth_rate = 0
     res.function_profiles = {
-        "func1": {"calls": 10, "total_memory_used": 20000, "total_duration": 15.0},
+        "func1": {
+            "calls": 10,
+            "total_memory_delta": 30 * 1024**3,
+            "total_duration": 15.0,
+        },
     }
 
     with (

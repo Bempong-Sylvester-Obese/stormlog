@@ -59,7 +59,7 @@ wandb = [
 ]
 jax = [
     "jax>=0.4.20",
-    "protobuf>=4.21.0",
+    "protobuf>=6.31.1",
 ]
 all = [
     "matplotlib>=3.3.0",
@@ -74,7 +74,7 @@ all = [
     "pyfiglet>=1.0.2",
     "wandb>=0.19.0",
     "jax>=0.4.20",
-    "protobuf>=4.21.0",
+    "protobuf>=6.31.1",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -259,7 +259,6 @@ markers = [
     "tui_pilot: marks Textual Pilot interaction tests",
     "tui_pty: marks PTY end-to-end smoke tests",
     "tui_snapshot: marks Textual visual snapshot tests",
-    "jax: marks tests requiring JAX installation",
 ]
 
 [tool.coverage.run]

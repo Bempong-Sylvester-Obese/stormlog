@@ -391,7 +391,7 @@ class MemoryAnalyzer:
         Args:
             profile_result: Profiling result with ``function_profiles``
                 mapping function names to dicts containing ``calls``,
-                ``total_memory_used``, and ``total_duration``.
+                ``total_memory_delta``, and ``total_duration``.
 
         Returns:
             Dictionary with ``memory_duration_correlation``,
@@ -413,7 +413,7 @@ class MemoryAnalyzer:
         for func_name, profile in profile_result.function_profiles.items():
             if profile.get("calls", 0) > 0:
                 avg_memory_per_call = (
-                    profile.get("total_memory_used", 0) / profile["calls"]
+                    profile.get("total_memory_delta", 0) / profile["calls"]
                 )
                 avg_duration_per_call = (
                     profile.get("total_duration", 0) / profile["calls"]
@@ -421,7 +421,7 @@ class MemoryAnalyzer:
 
                 # Calculate efficiency score
                 efficiency = 1.0
-                if avg_memory_per_call > 1000:  # > 1 GB per call
+                if avg_memory_per_call > 1024**3:  # > 1 GiB per call
                     efficiency *= 0.5
                 if avg_duration_per_call > 1.0:  # > 1 second per call
                     efficiency *= 0.7
@@ -434,7 +434,7 @@ class MemoryAnalyzer:
                 }
 
                 # Generate recommendations
-                if avg_memory_per_call > 2000:  # > 2 GB per call
+                if avg_memory_per_call > 2 * 1024**3:  # > 2 GiB per call
                     recommendations.append(
                         f"Function '{func_name}' uses high memory per call "
                         f"— consider using jax.checkpoint or reducing "

@@ -155,8 +155,8 @@ def profile_function(
                 return f(*args, **kwargs)
 
         # Attach profiling metadata for introspection.
-        setattr(wrapper, "_is_profiled", True)
-        setattr(wrapper, "_profile_name", profiled_name)
+        wrapper._is_profiled = True  # type: ignore[attr-defined]
+        wrapper._profile_name = profiled_name  # type: ignore[attr-defined]
 
         return cast(F, wrapper)
 

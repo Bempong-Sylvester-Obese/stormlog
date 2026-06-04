@@ -2,6 +2,10 @@
 
 from unittest import mock
 
+import pytest
+
+pytest.importorskip("jax")
+
 from stormlog.jax.utils import (
     detect_jax_backend,
     format_memory,

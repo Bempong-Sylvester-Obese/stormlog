@@ -30,6 +30,17 @@ def mock_device() -> mock.Mock:
     return device
 
 
+def _wait_for_snapshots(
+    profiler: JAXMemoryProfiler, expected_count: int, timeout: float = 1.0
+) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if len(profiler.get_results().snapshots) >= expected_count:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"Expected at least {expected_count} snapshots")
+
+
 @jax_fixture
 def profiler(mock_device: mock.Mock) -> Generator[Any, None, None]:
     with mock.patch(
@@ -126,7 +137,7 @@ def test_get_results_empty(profiler: Any) -> None:
 def test_continuous_profiling(profiler: Any) -> None:
     """Verify continuous background profiling."""
     profiler.start_continuous_profiling(interval=0.05)
-    time.sleep(0.15)
+    _wait_for_snapshots(profiler, expected_count=2)
     profiler.stop_continuous_profiling()
 
     res = profiler.get_results()
@@ -140,8 +151,7 @@ def test_context_manager_lifecycle(profiler: Any) -> None:
         time.sleep(0.05)
 
     res = profiler.get_results()
-    # Enter and exit should capture something or background thread captures
-    assert len(res.snapshots) >= 0
+    assert len(res.snapshots) >= 2
 
 
 @jax_mark

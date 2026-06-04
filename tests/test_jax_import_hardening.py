@@ -4,6 +4,8 @@ import subprocess
 import sys
 import textwrap
 
+import pytest
+
 
 def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
     code = textwrap.dedent(
@@ -42,12 +44,16 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
         """
     )
 
-    completed = subprocess.run(
-        [sys.executable, "-c", code],
-        check=False,
-        capture_output=True,
-        text=True,
-    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", code],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"JAX import hardening subprocess timed out: {exc}")
 
     assert completed.returncode == 0, completed.stderr
     assert "ok" in completed.stdout

@@ -1,4 +1,5 @@
 import gzip
+from pathlib import Path
 from typing import Any, Dict, List
 
 try:
@@ -8,13 +9,19 @@ except ImportError:
         "Could not import profile_pb2. Please run: \n"
         "curl -sO https://raw.githubusercontent.com/google/pprof/master/proto/profile.proto && "
         "python -m grpc_tools.protoc -I. --python_out=. profile.proto"
-    )
+    ) from None
 
 
 def parse_jax_memory_profile(file_path: str) -> Dict[str, Any]:
     """Parse a JAX .prof (gzipped pprof protobuf) using the official protobuf schema."""
-    with gzip.open(file_path, "rb") as f:
-        data = f.read()
+    path = Path(file_path)
+    try:
+        with gzip.open(path, "rb") as f:
+            data = f.read()
+    except FileNotFoundError as exc:
+        raise FileNotFoundError(f"JAX memory profile not found: {path}") from exc
+    except PermissionError as exc:
+        raise PermissionError(f"JAX memory profile is not readable: {path}") from exc
 
     profile = profile_pb2.Profile()  # type: ignore
     profile.ParseFromString(data)

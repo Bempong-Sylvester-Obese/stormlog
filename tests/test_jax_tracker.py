@@ -33,6 +33,22 @@ def mock_jax_devices(mock_device: Any) -> Generator[None, None, None]:
             yield
 
 
+def _wait_for_condition(predicate: Any, message: str, timeout: float = 1.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError(message)
+
+
+def _wait_for_retained_samples(tracker: JAXMemoryTracker) -> None:
+    _wait_for_condition(
+        lambda: tracker.get_statistics().get("history_retained_samples", 0) > 0,
+        "tracker did not collect a sample",
+    )
+
+
 @jax_mark
 def test_tracker_init(mock_jax_devices: Any) -> None:
     """Verify tracker initialization and validation."""
@@ -53,8 +69,10 @@ def test_tracker_lifecycle(mock_jax_devices: Any) -> None:
     tracker = JAXMemoryTracker(sampling_interval=0.01)
 
     tracker.start_tracking()
-    time.sleep(0.05)
-    result = tracker.stop_tracking()
+    try:
+        _wait_for_retained_samples(tracker)
+    finally:
+        result = tracker.stop_tracking()
 
     assert result.duration > 0
     assert result.samples_collected > 0
@@ -73,8 +91,10 @@ def test_tracker_idempotent_start(mock_jax_devices: Any) -> None:
     tracker = JAXMemoryTracker(sampling_interval=0.01)
     tracker.start_tracking()
     tracker.start_tracking()  # Should not raise or spawn second thread
-    time.sleep(0.05)
-    result = tracker.stop_tracking()
+    try:
+        _wait_for_retained_samples(tracker)
+    finally:
+        result = tracker.stop_tracking()
     assert result.samples_collected > 0
 
 
@@ -92,8 +112,10 @@ def test_telemetry_event_structure(mock_jax_devices: Any) -> None:
     """Verify built telemetry events have expected fields."""
     tracker = JAXMemoryTracker(sampling_interval=0.01)
     tracker.start_tracking()
-    time.sleep(0.05)
-    result = tracker.stop_tracking()
+    try:
+        _wait_for_retained_samples(tracker)
+    finally:
+        result = tracker.stop_tracking()
 
     assert len(result.telemetry_events) > 0
     event = result.telemetry_events[0]
@@ -119,8 +141,10 @@ def test_alerts(mock_jax_devices: Any) -> None:
     tracker.add_alert_callback(on_alert)
 
     tracker.start_tracking()
-    time.sleep(0.05)
-    result = tracker.stop_tracking()
+    try:
+        _wait_for_condition(lambda: alert_triggered, "tracker did not trigger alert")
+    finally:
+        result = tracker.stop_tracking()
 
     assert alert_triggered
     assert result.alert_count > 0

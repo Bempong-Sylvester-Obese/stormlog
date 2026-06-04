@@ -53,11 +53,11 @@ def test_plot_memory_timeline_no_data() -> None:
 
 
 @mock.patch("stormlog.jax.visualizer.plt")
-def test_plot_memory_timeline_save_path(mock_plt: Any) -> None:
+def test_plot_memory_timeline_save_path(mock_plt: Any, tmp_path: Any) -> None:
     viz = MemoryVisualizer()
     snapshots = [MemorySnapshot(1, "s1", 100, 100, 0, 0, {})]
     res = ProfileResult(0, 5, 200, 150, 100, snapshots, {})
-    viz.plot_memory_timeline(res, save_path="/tmp/test.png")
+    viz.plot_memory_timeline(res, save_path=str(tmp_path / "test.png"))
     mock_plt.savefig.assert_called_once()
 
 
@@ -73,13 +73,13 @@ def test_plot_memory_timeline_fallback(mock_plt: Any) -> None:
 
 
 @mock.patch("stormlog.jax.visualizer.plt")
-def test_plot_function_comparison(mock_plt: Any) -> None:
+def test_plot_function_comparison(mock_plt: Any, tmp_path: Any) -> None:
     viz = MemoryVisualizer()
     profiles = {
         "func1": {"peak_memory_bytes": 1024 * 1024},
         "func2": {"peak_memory_bytes": 2048 * 1024},
     }
-    viz.plot_function_comparison(profiles, save_path="/tmp/test.png")
+    viz.plot_function_comparison(profiles, save_path=str(tmp_path / "test.png"))
     mock_plt.bar.assert_called_once()
     mock_plt.savefig.assert_called_once()
 

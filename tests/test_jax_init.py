@@ -38,6 +38,9 @@ def test_is_jax_missing() -> None:
     exc2 = ModuleNotFoundError("No module named 'numpy'", name="numpy")
     assert _is_jax_missing(exc2) is False
 
+    exc_without_name = ModuleNotFoundError("manually constructed")
+    assert _is_jax_missing(exc_without_name) is False
+
     exc3 = DummyExc("test")
     exc3.__cause__ = exc
     assert _is_jax_missing(exc3) is True

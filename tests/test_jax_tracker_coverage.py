@@ -60,17 +60,21 @@ def test_append_event_drop() -> None:
 
 def test_trigger_alert() -> None:
     tracker = MemoryTracker(alert_threshold_mb=100)
+    callback_calls = 0
 
     def callback(a: Any) -> None:
-        pass
+        nonlocal callback_calls
+        callback_calls += 1
 
     tracker.add_alert_callback(callback)
     tracker._trigger_alert(200, time.time())
     assert len(tracker._alerts) == 1
+    assert callback_calls == 1
 
     tracker.remove_alert_callback(callback)
     tracker._trigger_alert(300, time.time())
     assert len(tracker._alerts) == 2
+    assert callback_calls == 1
 
 
 def test_get_statistics_when_unhealthy() -> None:
