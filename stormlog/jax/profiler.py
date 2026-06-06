@@ -43,6 +43,14 @@ logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
+
+def _device_zero(device: Any) -> Any:
+    """Create a scalar zero on a device using JAX's runtime-supported keyword."""
+
+    zeros = cast(Callable[..., Any], jax.numpy.zeros)
+    return zeros((), device=device)
+
+
 # ---------------------------------------------------------------------------
 # Data classes
 # ---------------------------------------------------------------------------
@@ -168,7 +176,7 @@ class JAXMemoryProfiler:
         self._sync_sentinel: Any = None
         if self._device is not None:
             try:
-                self._sync_sentinel = jax.numpy.zeros((), device=self._device)
+                self._sync_sentinel = _device_zero(self._device)
             except Exception:
                 pass
 
@@ -205,7 +213,7 @@ class JAXMemoryProfiler:
                 if self._sync_sentinel is not None:
                     self._sync_sentinel.block_until_ready()
                 else:
-                    jax.numpy.zeros((), device=self._device).block_until_ready()
+                    _device_zero(self._device).block_until_ready()
                 raw = self._device.memory_stats()
                 if raw is not None:
                     memory_stats = dict(raw)
