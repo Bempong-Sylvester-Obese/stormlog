@@ -175,7 +175,7 @@ def test_project_telemetry_events_preserves_order() -> None:
     assert [record.event_type for record in records] == ["phase_enter", "phase_exit"]
 
 
-@pytest.mark.parametrize("observed_timestamp_ns", ["1700000000", -1, True])  # type: ignore[misc]
+@pytest.mark.parametrize("observed_timestamp_ns", ["1700000000", -1, True])  # type: ignore[misc, unused-ignore]
 def test_projected_record_rejects_invalid_observed_timestamp(
     observed_timestamp_ns: object,
 ) -> None:
