@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -26,6 +27,7 @@ MANIFEST_FILENAME = "manifest.json"
 SEGMENT_PREFIX = "segment-"
 SEGMENT_SUFFIX = ".jsonl"
 SINK_SCHEMA_VERSION = 2
+_LOGGER = logging.getLogger(__name__)
 
 
 @dataclass
@@ -39,6 +41,8 @@ class TelemetrySinkConfig:
     rollover_max_events: int = 10000
     retention_max_files: int = 8
     retention_max_total_bytes: int = 512 * 1024 * 1024
+    write_rollups: bool = True
+    rollup_window_seconds: int = 60
 
     def __post_init__(self) -> None:
         self.root_dir = Path(self.root_dir)
@@ -56,6 +60,8 @@ class TelemetrySinkConfig:
             raise ValueError("retention_max_total_bytes must be >= 1")
         if self.retention_max_total_bytes < self.rollover_max_bytes:
             raise ValueError("retention_max_total_bytes must be >= rollover_max_bytes")
+        if self.rollup_window_seconds <= 0:
+            raise ValueError("rollup_window_seconds must be >= 1")
 
 
 @dataclass
@@ -169,6 +175,7 @@ class AppendOnlyTelemetrySink:
                         )
                 self._active_session_id = None
                 self._write_manifest_locked()
+                self._write_rollups_locked()
                 self._closed = True
         finally:
             self._stop_flush_thread()
@@ -354,6 +361,7 @@ class AppendOnlyTelemetrySink:
                 manifest_needs_rewrite = True
             if manifest_needs_rewrite:
                 self._write_manifest_locked()
+                self._write_rollups_locked()
             return
 
         if not discovered:
@@ -371,6 +379,7 @@ class AppendOnlyTelemetrySink:
             )
         self._next_segment_index = self._compute_next_segment_index()
         self._write_manifest_locked()
+        self._write_rollups_locked()
 
     def _compute_next_segment_index(self) -> int:
         max_index = 0
@@ -409,6 +418,46 @@ class AppendOnlyTelemetrySink:
             "final_retained_files": len(self._segments),
             "final_retained_bytes": retained_bytes,
         }
+
+    def _write_rollups_locked(self) -> None:
+        if not self.config.write_rollups:
+            return
+        try:
+            from .telemetry import load_telemetry_sessions
+            from .telemetry_rollups import (
+                RollupCoverage,
+                build_telemetry_rollups,
+                write_telemetry_rollups,
+            )
+
+            sessions = load_telemetry_sessions(self.root_dir)
+            manifest = TelemetrySinkManifest(
+                schema_version=SINK_SCHEMA_VERSION,
+                format="stormlog.append_only_telemetry_sink",
+                sessions=list(self._sessions.values()),
+                segments=list(self._segments),
+            )
+            coverage = RollupCoverage(
+                retained_segment_filenames=[
+                    segment.filename for segment in self._segments
+                ],
+                retained_segment_count=len(self._segments),
+                retained_event_count=sum(
+                    segment.event_count for segment in self._segments
+                ),
+                retained_bytes=sum(segment.size_bytes for segment in self._segments),
+                pruned_segment_count=self._pruned_segment_count,
+                pruned_bytes=self._pruned_bytes,
+            )
+            rollups = build_telemetry_rollups(
+                sessions,
+                manifest,
+                window_duration_ns=(self.config.rollup_window_seconds * 1_000_000_000),
+                coverage=coverage,
+            )
+            write_telemetry_rollups(self.root_dir, rollups)
+        except Exception as exc:
+            _LOGGER.warning("telemetry rollup write failed: %s", exc)
 
     @staticmethod
     def _count_records(path: Path) -> int:
