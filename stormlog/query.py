@@ -6,7 +6,7 @@ import builtins
 import csv
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +45,12 @@ from .telemetry import (
     load_telemetry_sessions,
     telemetry_event_from_record,
     telemetry_event_to_dict,
+)
+from .telemetry_rollups import (
+    RankRollup,
+    SessionRollup,
+    TelemetryRollupFile,
+    read_telemetry_rollups,
 )
 from .telemetry_sink import (
     MANIFEST_FILENAME,
@@ -696,6 +702,10 @@ class QueryStore:
             return self._summarize_interrupted_sessions_with_oom_bundles()
 
         resolved_group_by: SummaryGroupBy = group_by or "session"
+        rollup_rows = self._summarize_from_rollups(metric, resolved_group_by)
+        if rollup_rows is not None:
+            return rollup_rows
+
         events = self.query_events(EventFilter())
         if metric in {
             "peak_allocator_allocated_bytes",
@@ -768,6 +778,57 @@ class QueryStore:
                 )
             )
         return rows
+
+    def _summarize_from_rollups(
+        self,
+        metric: SummaryMetric,
+        group_by: SummaryGroupBy,
+    ) -> list[SummaryRow] | None:
+        rollups = self._fresh_sink_rollups()
+        if rollups is None:
+            return None
+        if metric in {
+            "peak_allocator_allocated_bytes",
+            "peak_allocator_reserved_bytes",
+            "peak_device_used_bytes",
+        }:
+            return _summarize_rollup_peaks(rollups, metric, group_by)
+        if metric == "alert_count" and group_by in {"session", "status"}:
+            return _summarize_rollup_session_counts(
+                rollups,
+                metric,
+                group_by,
+                lambda session: session.alerts.total_count,
+            )
+        if metric == "collector_degradation_transitions" and group_by in {
+            "session",
+            "status",
+        }:
+            return _summarize_rollup_session_counts(
+                rollups,
+                metric,
+                group_by,
+                lambda session: session.collector_health.transition_count,
+            )
+        if metric == "hidden_memory_gap_growth" and group_by in {
+            "rank",
+            "session-rank",
+        }:
+            return _summarize_rollup_hidden_gap_growth(rollups, group_by)
+        return None
+
+    def _fresh_sink_rollups(self) -> list[TelemetryRollupFile] | None:
+        if not self.catalog.sources:
+            return None
+        rollups: list[TelemetryRollupFile] = []
+        for source in self.catalog.sources:
+            if source.source_kind != "sink":
+                return None
+            rollup = read_telemetry_rollups(source.path)
+            if rollup is None:
+                return None
+            rollups.append(rollup)
+        return rollups
 
     def _load_sessions_for_source(
         self,
@@ -1198,6 +1259,149 @@ def _summary_group_key(
     if group_by == "status":
         return None, None, row.session_status
     return row.event.session_id, None, None
+
+
+def _summarize_rollup_peaks(
+    rollups: Sequence[TelemetryRollupFile],
+    metric: str,
+    group_by: SummaryGroupBy,
+) -> list[SummaryRow]:
+    field_name = {
+        "peak_allocator_allocated_bytes": "allocator_allocated_bytes",
+        "peak_allocator_reserved_bytes": "allocator_reserved_bytes",
+        "peak_device_used_bytes": "device_used_bytes",
+    }[metric]
+    best: dict[tuple[str | None, int | None, str | None], tuple[int, int | None]] = {}
+
+    for session in _rollup_sessions(rollups):
+        if group_by in {"rank", "session-rank"}:
+            for rank_rollup in session.ranks:
+                peak = getattr(rank_rollup.counters, field_name)
+                key = _rollup_rank_group_key(session, rank_rollup, group_by)
+                _observe_rollup_peak(best, key, peak.value, peak.timestamp_ns)
+            continue
+
+        peak = getattr(session.counters, field_name)
+        key = _rollup_session_group_key(session, group_by)
+        _observe_rollup_peak(best, key, peak.value, peak.timestamp_ns)
+
+    output: list[SummaryRow] = []
+    for key, (value, timestamp_ns) in sorted(
+        best.items(), key=lambda item: str(item[0])
+    ):
+        session_id, row_rank, status = key
+        output.append(
+            SummaryRow(
+                metric=metric,
+                group_by=group_by,
+                session_id=session_id,
+                rank=row_rank,
+                status=status,
+                value=value,
+                details={"timestamp_ns": timestamp_ns},
+            )
+        )
+    return output
+
+
+def _summarize_rollup_session_counts(
+    rollups: Sequence[TelemetryRollupFile],
+    metric: str,
+    group_by: SummaryGroupBy,
+    value_for_session: Callable[[SessionRollup], int],
+) -> list[SummaryRow]:
+    counts: dict[tuple[str | None, int | None, str | None], int] = defaultdict(int)
+    for session in _rollup_sessions(rollups):
+        value = value_for_session(session)
+        if value <= 0:
+            continue
+        counts[_rollup_session_group_key(session, group_by)] += value
+
+    output: list[SummaryRow] = []
+    for session_id, rank, status in sorted(counts, key=str):
+        output.append(
+            SummaryRow(
+                metric=metric,
+                group_by=group_by,
+                session_id=session_id,
+                rank=rank,
+                status=status,
+                value=counts[(session_id, rank, status)],
+            )
+        )
+    return output
+
+
+def _summarize_rollup_hidden_gap_growth(
+    rollups: Sequence[TelemetryRollupFile],
+    group_by: SummaryGroupBy,
+) -> list[SummaryRow] | None:
+    sessions = _rollup_sessions(rollups)
+    if group_by == "rank" and len(sessions) != 1:
+        return None
+
+    output: list[SummaryRow] = []
+    for session in sessions:
+        for rank in session.ranks:
+            if rank.hidden_gap_delta_bytes is None:
+                continue
+            session_id = (
+                session.session.session_id if group_by == "session-rank" else None
+            )
+            output.append(
+                SummaryRow(
+                    metric="hidden_memory_gap_growth",
+                    group_by=group_by,
+                    session_id=session_id,
+                    rank=rank.rank,
+                    value=rank.hidden_gap_delta_bytes,
+                    details={
+                        "first_gap_bytes": rank.hidden_gap_first_bytes,
+                        "latest_gap_bytes": rank.hidden_gap_latest_bytes,
+                        "peak_gap_bytes": rank.hidden_gap_peak_bytes,
+                        "sample_count": rank.sample_count,
+                    },
+                )
+            )
+    return sorted(output, key=lambda row: str(row.as_dict()))
+
+
+def _rollup_sessions(
+    rollups: Sequence[TelemetryRollupFile],
+) -> list[SessionRollup]:
+    return [session for rollup in rollups for session in rollup.sessions]
+
+
+def _rollup_session_group_key(
+    session: SessionRollup,
+    group_by: SummaryGroupBy,
+) -> tuple[str | None, int | None, str | None]:
+    if group_by == "status":
+        return None, None, session.session.status
+    return session.session.session_id, None, None
+
+
+def _rollup_rank_group_key(
+    session: SessionRollup,
+    rank: RankRollup,
+    group_by: SummaryGroupBy,
+) -> tuple[str | None, int | None, str | None]:
+    if group_by == "rank":
+        return None, rank.rank, None
+    return session.session.session_id, rank.rank, None
+
+
+def _observe_rollup_peak(
+    best: dict[tuple[str | None, int | None, str | None], tuple[int, int | None]],
+    key: tuple[str | None, int | None, str | None],
+    value: int | None,
+    timestamp_ns: int | None,
+) -> None:
+    if value is None:
+        return
+    existing = best.get(key)
+    if existing is None or value > existing[0]:
+        best[key] = (value, timestamp_ns)
 
 
 @dataclass

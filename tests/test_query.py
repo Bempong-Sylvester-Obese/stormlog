@@ -347,6 +347,114 @@ def test_query_summaries_cover_sessions_peaks_alerts_and_gap_growth(
     assert gap_rows[0].details["peak_gap_bytes"] == 110
 
 
+def test_query_summary_uses_fresh_sink_rollup_without_loading_events(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id="session-rollup",
+            timestamp_ns=1,
+            allocated=100,
+            reserved=150,
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id="session-rollup",
+            timestamp_ns=2,
+            allocated=200,
+            reserved=275,
+        )
+    )
+    sink.close()
+
+    def _fail_load(*args: Any, **kwargs: Any) -> list[Any]:
+        raise AssertionError("fresh rollup summary should not materialize events")
+
+    monkeypatch.setattr(query_api, "load_telemetry_sessions", _fail_load)
+
+    rows = query_api.open([tmp_path]).summarize(
+        "peak_allocator_reserved_bytes",
+        group_by="session",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].session_id == "session-rollup"
+    assert rows[0].value == 275
+    assert rows[0].details["timestamp_ns"] == 2
+
+
+def test_query_summary_falls_back_when_sink_rollup_is_stale(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id="session-stale",
+            timestamp_ns=1,
+            reserved=150,
+        )
+    )
+    sink.close()
+    manifest_path = tmp_path / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["segments"][0]["event_count"] = 99
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    rows = query_api.open([tmp_path]).summarize(
+        "peak_allocator_reserved_bytes",
+        group_by="session",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].session_id == "session-stale"
+    assert rows[0].value == 150
+
+
+def test_query_summary_falls_back_when_sink_rollup_is_malformed(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id="session-malformed",
+            timestamp_ns=1,
+            reserved=160,
+        )
+    )
+    sink.close()
+    (tmp_path / "rollups.json").write_text("{bad", encoding="utf-8")
+
+    rows = query_api.open([tmp_path]).summarize(
+        "peak_allocator_reserved_bytes",
+        group_by="session",
+    )
+
+    assert len(rows) == 1
+    assert rows[0].session_id == "session-malformed"
+    assert rows[0].value == 160
+
+
 def test_catalog_discovers_csv_telemetry(tmp_path: Path) -> None:
     path = tmp_path / "track.csv"
     record = _event_record(session_id="session-csv", timestamp_ns=1)
