@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+import jsonschema  # type: ignore[import-untyped, unused-ignore]
+
 from stormlog.session import create_session_summary
 from stormlog.telemetry import LoadedTelemetrySession, telemetry_event_from_record
 from stormlog.telemetry_rollups import (
@@ -95,6 +97,17 @@ def _manifest() -> TelemetrySinkManifest:
     )
 
 
+def _schema() -> dict[str, object]:
+    schema_path = (
+        Path(__file__).resolve().parents[1]
+        / "docs"
+        / "schemas"
+        / "telemetry_rollup_v1.schema.json"
+    )
+    result: dict[str, object] = json.loads(schema_path.read_text(encoding="utf-8"))
+    return result
+
+
 def test_build_telemetry_rollups_summarizes_sessions_ranks_and_windows() -> None:
     one_second = 1_000_000_000
     loaded = _loaded_session(
@@ -138,6 +151,10 @@ def test_build_telemetry_rollups_summarizes_sessions_ranks_and_windows() -> None
 
     rollups = build_telemetry_rollups([loaded], _manifest())
     session = rollups.sessions[0]
+    jsonschema.validate(
+        instance=telemetry_rollup_file_to_dict(rollups),
+        schema=_schema(),
+    )
 
     assert rollups.coverage.retained_segment_filenames == ["segment-000001.jsonl"]
     assert session.event_count == 7

@@ -1,0 +1,470 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Silas-Asamoah/stormlog/docs/schemas/telemetry_rollup_v1.schema.json",
+  "title": "Telemetry Rollup v1",
+  "description": "Compact derived rollup sidecar for append-only telemetry sinks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "format",
+    "generated_at_ns",
+    "source_manifest",
+    "source_manifest_schema_version",
+    "window_duration_ns",
+    "coverage",
+    "sessions"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "format": {
+      "type": "string",
+      "const": "stormlog.telemetry_rollups"
+    },
+    "generated_at_ns": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "source_manifest": {
+      "type": ["string", "null"]
+    },
+    "source_manifest_schema_version": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "window_duration_ns": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "coverage": {
+      "$ref": "#/$defs/coverage"
+    },
+    "sessions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/session_rollup"
+      }
+    }
+  },
+  "$defs": {
+    "coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "retained_segment_filenames",
+        "retained_segment_count",
+        "retained_event_count",
+        "retained_bytes",
+        "pruned_segment_count",
+        "pruned_bytes"
+      ],
+      "properties": {
+        "retained_segment_filenames": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "retained_segment_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retained_event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "retained_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pruned_segment_count": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "pruned_bytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "session_summary": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": [
+        "session_id",
+        "status",
+        "started_at_ns",
+        "ended_at_ns",
+        "host",
+        "pid",
+        "rank",
+        "local_rank",
+        "world_size",
+        "source"
+      ],
+      "properties": {
+        "session_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string",
+          "enum": ["running", "completed", "interrupted", "incomplete"]
+        },
+        "started_at_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ended_at_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "host": {
+          "type": "string"
+        },
+        "pid": {
+          "type": "integer"
+        },
+        "rank": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_rank": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "world_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "source": {
+          "type": "string"
+        }
+      }
+    },
+    "peak_value": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "timestamp_ns", "rank", "device_id"],
+      "properties": {
+        "value": {
+          "type": ["integer", "null"]
+        },
+        "timestamp_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "rank": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "device_id": {
+          "type": ["integer", "null"]
+        }
+      }
+    },
+    "counter_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "allocator_allocated_bytes",
+        "allocator_reserved_bytes",
+        "device_used_bytes"
+      ],
+      "properties": {
+        "allocator_allocated_bytes": {
+          "$ref": "#/$defs/peak_value"
+        },
+        "allocator_reserved_bytes": {
+          "$ref": "#/$defs/peak_value"
+        },
+        "device_used_bytes": {
+          "$ref": "#/$defs/peak_value"
+        }
+      }
+    },
+    "count_map": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "integer",
+        "minimum": 0
+      }
+    },
+    "alert_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total_count", "severity_counts", "event_type_counts"],
+      "properties": {
+        "total_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "severity_counts": {
+          "$ref": "#/$defs/count_map"
+        },
+        "event_type_counts": {
+          "$ref": "#/$defs/count_map"
+        }
+      }
+    },
+    "collector_health_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "transition_count",
+        "degraded_count",
+        "recovered_count",
+        "degraded_time_ns",
+        "last_status"
+      ],
+      "properties": {
+        "transition_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degraded_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "recovered_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "degraded_time_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_status": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "oom_summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["marker_count", "event_count", "bundle_path_count"],
+      "properties": {
+        "marker_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "bundle_path_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "rank_rollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rank",
+        "local_rank",
+        "world_size",
+        "event_count",
+        "sample_count",
+        "first_timestamp_ns",
+        "last_timestamp_ns",
+        "counters",
+        "hidden_gap_first_bytes",
+        "hidden_gap_latest_bytes",
+        "hidden_gap_peak_bytes",
+        "hidden_gap_delta_bytes",
+        "hidden_gap_drift_bytes_per_second"
+      ],
+      "properties": {
+        "rank": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "local_rank": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "world_size": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_timestamp_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "last_timestamp_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "counters": {
+          "$ref": "#/$defs/counter_summary"
+        },
+        "hidden_gap_first_bytes": {
+          "type": ["integer", "null"]
+        },
+        "hidden_gap_latest_bytes": {
+          "type": ["integer", "null"]
+        },
+        "hidden_gap_peak_bytes": {
+          "type": ["integer", "null"]
+        },
+        "hidden_gap_delta_bytes": {
+          "type": ["integer", "null"]
+        },
+        "hidden_gap_drift_bytes_per_second": {
+          "type": ["number", "null"]
+        }
+      }
+    },
+    "window_rollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "start_ns",
+        "end_ns",
+        "event_count",
+        "sample_count",
+        "rank_count",
+        "counters",
+        "alert_count",
+        "collector_transition_count",
+        "oom_count"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "start_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "end_ns": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rank_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "counters": {
+          "$ref": "#/$defs/counter_summary"
+        },
+        "alert_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "collector_transition_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "oom_count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "session_rollup": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "session",
+        "event_count",
+        "sample_count",
+        "first_timestamp_ns",
+        "last_timestamp_ns",
+        "source_count",
+        "sources_loaded",
+        "warnings",
+        "counters",
+        "alerts",
+        "collector_health",
+        "oom",
+        "ranks",
+        "windows"
+      ],
+      "properties": {
+        "session": {
+          "$ref": "#/$defs/session_summary"
+        },
+        "event_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sample_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "first_timestamp_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "last_timestamp_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "source_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sources_loaded": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "counters": {
+          "$ref": "#/$defs/counter_summary"
+        },
+        "alerts": {
+          "$ref": "#/$defs/alert_summary"
+        },
+        "collector_health": {
+          "$ref": "#/$defs/collector_health_summary"
+        },
+        "oom": {
+          "$ref": "#/$defs/oom_summary"
+        },
+        "ranks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/rank_rollup"
+          }
+        },
+        "windows": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/window_rollup"
+          }
+        }
+      }
+    }
+  }
+}
