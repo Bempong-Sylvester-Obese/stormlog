@@ -18,7 +18,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, cast
 
 from stormlog.collector_health import (
     COLLECTOR_HEALTH_HEALTHY,
@@ -66,6 +66,13 @@ except ImportError:
     psutil = None
 
 logger = logging.getLogger(__name__)
+
+
+def _device_zero(device: Any) -> Any:
+    """Create a scalar zero on a device using JAX's runtime-supported keyword."""
+
+    zeros = cast(Callable[..., Any], jax.numpy.zeros)
+    return zeros((), device=device)
 
 
 @dataclass
@@ -199,7 +206,7 @@ class MemoryTracker:
         self._sync_sentinel: Any = None
         if self._device is not None:
             try:
-                self._sync_sentinel = jax.numpy.zeros((), device=self._device)
+                self._sync_sentinel = _device_zero(self._device)
             except Exception:
                 pass
 
@@ -359,7 +366,7 @@ class MemoryTracker:
         if self._sync_sentinel is not None:
             self._sync_sentinel.block_until_ready()
         elif hasattr(jax.numpy, "zeros"):
-            jax.numpy.zeros((), device=self._device).block_until_ready()
+            _device_zero(self._device).block_until_ready()
         stats = self._device.memory_stats()
         if stats:
             if "bytes_reserved" in stats:

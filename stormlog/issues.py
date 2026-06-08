@@ -20,6 +20,9 @@ IssueState = Literal["open", "resolved", "ignored", "regressed"]
 
 ISSUE_FINGERPRINT_SCHEMA_VERSION = 1
 ISSUE_STATE_OPEN: IssueState = "open"
+ISSUE_STATE_RESOLVED: IssueState = "resolved"
+ISSUE_STATE_IGNORED: IssueState = "ignored"
+ISSUE_STATE_REGRESSED: IssueState = "regressed"
 
 _ISSUE_KINDS = frozenset(
     {
@@ -284,7 +287,10 @@ def _json_safe_dimension_value(value: Any) -> Any:
 
 __all__ = [
     "ISSUE_FINGERPRINT_SCHEMA_VERSION",
+    "ISSUE_STATE_IGNORED",
     "ISSUE_STATE_OPEN",
+    "ISSUE_STATE_REGRESSED",
+    "ISSUE_STATE_RESOLVED",
     "IssueEvidenceLink",
     "IssueFingerprint",
     "IssueKind",

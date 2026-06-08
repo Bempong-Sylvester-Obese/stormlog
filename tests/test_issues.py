@@ -5,6 +5,10 @@ from typing import Any
 import pytest
 
 from stormlog.issues import (
+    ISSUE_STATE_IGNORED,
+    ISSUE_STATE_OPEN,
+    ISSUE_STATE_REGRESSED,
+    ISSUE_STATE_RESOLVED,
     IssueEvidenceLink,
     IssueFingerprint,
     StormlogIssue,
@@ -76,6 +80,10 @@ def test_normalize_dimensions_removes_high_cardinality_numeric_text() -> None:
 
 
 def test_issue_state_validation() -> None:
+    assert ISSUE_STATE_OPEN == "open"
+    assert ISSUE_STATE_RESOLVED == "resolved"
+    assert ISSUE_STATE_IGNORED == "ignored"
+    assert ISSUE_STATE_REGRESSED == "regressed"
     assert normalize_issue_state(" RESOLVED ") == "resolved"
 
     with pytest.raises(ValueError, match="unsupported issue state"):
