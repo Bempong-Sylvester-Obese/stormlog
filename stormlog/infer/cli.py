@@ -229,6 +229,13 @@ def cmd_profile(args: argparse.Namespace) -> int:
     report = run_profile(config)
     print(format_analysis_text(report))
     print(f"Artifact saved to: {Path(args.output)}")
+    summary = report.get("summary", {})
+    if (
+        int(summary.get("total_requests", 0)) > 0
+        and int(summary.get("successful_requests", 0)) == 0
+    ):
+        print("Error: no measured inference requests succeeded", file=sys.stderr)
+        return 1
     return 0
 
 

@@ -32,6 +32,10 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
             return
         length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(length).decode("utf-8"))
+        if "always-fail" in str(payload.get("model")):
+            body = json.dumps({"error": {"message": "forced failure"}}).encode("utf-8")
+            self._send_json(body, status=503)
+            return
         if "no-usage" in str(payload.get("model")):
             body = json.dumps(
                 {
@@ -71,8 +75,8 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *_args: object) -> None:
         return None
 
-    def _send_json(self, body: bytes) -> None:
-        self.send_response(200)
+    def _send_json(self, body: bytes, *, status: int = 200) -> None:
+        self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
@@ -346,6 +350,53 @@ class InferenceProfileTests(unittest.TestCase):
                 self.assertIsNone(request["ttft_ms"])
                 self.assertEqual(request["output_token_source"], "estimated")
                 self.assertFalse(request["output_token_exact"])
+
+    def test_profile_returns_error_when_all_measured_requests_fail(self) -> None:
+        with _fake_server() as endpoint:
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "infer.jsonl"
+                stderr = io.StringIO()
+                with contextlib.redirect_stdout(io.StringIO()):
+                    with contextlib.redirect_stderr(stderr):
+                        exit_code = infer_main(
+                            [
+                                "profile",
+                                "--endpoint",
+                                str(endpoint),
+                                "--model",
+                                "always-fail-model",
+                                "--input-tokens",
+                                "8",
+                                "--output-tokens",
+                                "4",
+                                "--requests",
+                                "2",
+                                "--system-sampler",
+                                "none",
+                                "--tokenizer",
+                                "none",
+                                "--output",
+                                str(output),
+                            ]
+                        )
+
+                self.assertEqual(exit_code, 1)
+                self.assertIn(
+                    "no measured inference requests succeeded",
+                    stderr.getvalue(),
+                )
+                records = [
+                    json.loads(line)
+                    for line in output.read_text(encoding="utf-8").splitlines()
+                ]
+                measured = [
+                    record
+                    for record in records
+                    if record.get("event_type") == "infer.request"
+                    and record.get("phase") == "measured"
+                ]
+                self.assertEqual(len(measured), 2)
+                self.assertTrue(all(record["status"] == "error" for record in measured))
 
     def test_requested_concurrency_sets_request_executor_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
