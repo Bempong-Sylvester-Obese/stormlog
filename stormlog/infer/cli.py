@@ -115,6 +115,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Use non-streaming chat completions",
     )
     profile_parser.add_argument(
+        "--stream-usage",
+        dest="stream_usage",
+        action="store_true",
+        default=True,
+        help="Request streaming usage metadata with stream_options.include_usage",
+    )
+    profile_parser.add_argument(
+        "--no-stream-usage",
+        dest="stream_usage",
+        action="store_false",
+        help="Do not send stream_options.include_usage for streaming requests",
+    )
+    profile_parser.add_argument(
         "--api-key",
         default=None,
         help="Bearer token. Defaults to OPENAI_API_KEY when set.",
@@ -213,6 +226,7 @@ def cmd_profile(args: argparse.Namespace) -> int:
         duration_seconds=args.duration,
         request_count=None if args.duration is not None else args.requests,
         stream=bool(args.stream),
+        stream_include_usage=bool(args.stream_usage),
         timeout_seconds=float(args.timeout),
         warmup_requests=int(args.warmup_requests),
         output_path=args.output,

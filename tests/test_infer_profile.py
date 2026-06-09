@@ -8,6 +8,7 @@ import unittest
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import Any
 
 from stormlog.infer.analysis import analyze_inference_events
 from stormlog.infer.cli import main as infer_main
@@ -53,7 +54,9 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
             self._send_json(body)
             return
         if payload.get("stream"):
-            self._send_stream()
+            self._send_stream(
+                include_usage=payload.get("stream_options") == {"include_usage": True}
+            )
             return
         body = json.dumps(
             {
@@ -82,27 +85,29 @@ class _FakeOpenAIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _send_stream(self) -> None:
+    def _send_stream(self, *, include_usage: bool) -> None:
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Connection", "close")
         self.end_headers()
+        final_chunk: dict[str, Any] = {
+            "choices": [
+                {
+                    "delta": {"content": " world"},
+                    "finish_reason": "stop",
+                }
+            ],
+        }
+        if include_usage:
+            final_chunk["usage"] = {
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+            }
         chunks = [
             {"choices": [{"delta": {"role": "assistant"}}]},
             {"choices": [{"delta": {"content": "hello"}}]},
-            {
-                "choices": [
-                    {
-                        "delta": {"content": " world"},
-                        "finish_reason": "stop",
-                    }
-                ],
-                "usage": {
-                    "prompt_tokens": 5,
-                    "completion_tokens": 2,
-                    "total_tokens": 7,
-                },
-            },
+            final_chunk,
         ]
         for chunk in chunks:
             time.sleep(0.01)
@@ -197,6 +202,46 @@ class InferenceProfileTests(unittest.TestCase):
                         for record in records
                     )
                 )
+
+    def test_stream_usage_can_be_disabled_for_compatibility(self) -> None:
+        with _fake_server() as endpoint:
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "infer.jsonl"
+                with contextlib.redirect_stdout(io.StringIO()):
+                    exit_code = infer_main(
+                        [
+                            "profile",
+                            "--endpoint",
+                            str(endpoint),
+                            "--model",
+                            "fake-model",
+                            "--input-tokens",
+                            "8",
+                            "--output-tokens",
+                            "4",
+                            "--requests",
+                            "1",
+                            "--no-stream-usage",
+                            "--system-sampler",
+                            "none",
+                            "--tokenizer",
+                            "none",
+                            "--output",
+                            str(output),
+                        ]
+                    )
+
+                self.assertEqual(exit_code, 0)
+                request = next(
+                    record
+                    for record in (
+                        json.loads(line)
+                        for line in output.read_text(encoding="utf-8").splitlines()
+                    )
+                    if record.get("event_type") == "infer.request"
+                    and record.get("phase") == "measured"
+                )
+                self.assertEqual(request["output_token_source"], "estimated")
 
     def test_analyze_reports_latency_and_throughput(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -481,6 +526,7 @@ class _BlockingClient:
         prompt: str,
         output_tokens: int,
         stream: bool,
+        stream_include_usage: bool,
     ) -> ChatCompletionResult:
         started_at_ns = time.time_ns()
         started_perf = time.perf_counter()

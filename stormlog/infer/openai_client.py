@@ -49,6 +49,7 @@ class OpenAIChatCompletionsClient:
         prompt: str,
         output_tokens: int,
         stream: bool,
+        stream_include_usage: bool,
     ) -> ChatCompletionResult:
         payload = {
             "model": self.model,
@@ -56,6 +57,8 @@ class OpenAIChatCompletionsClient:
             "stream": stream,
             self.max_tokens_field: output_tokens,
         }
+        if stream and stream_include_usage:
+            payload["stream_options"] = {"include_usage": True}
         body = json.dumps(payload).encode("utf-8")
         headers = {
             "Content-Type": "application/json",

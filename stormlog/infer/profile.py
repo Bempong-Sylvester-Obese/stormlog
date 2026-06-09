@@ -75,6 +75,7 @@ class InferenceProfiler:
                         "duration_seconds": self.config.duration_seconds,
                         "request_count": self.config.request_count,
                         "stream": self.config.stream,
+                        "stream_include_usage": self.config.stream_include_usage,
                         "tokenizer": self.config.tokenizer,
                         "system_sampler": self.sampler.name,
                     },
@@ -263,6 +264,7 @@ class InferenceProfiler:
                     prompt=prompt,
                     output_tokens=case.output_tokens,
                     stream=self.config.stream,
+                    stream_include_usage=self.config.stream_include_usage,
                 ),
             )
             output_count = _resolve_output_count(

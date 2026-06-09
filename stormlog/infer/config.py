@@ -61,6 +61,7 @@ class ProfileConfig:
     duration_seconds: float | None = None
     request_count: int | None = 1
     stream: bool = True
+    stream_include_usage: bool = True
     timeout_seconds: float = 60.0
     warmup_requests: int = 0
     seed: int = 0

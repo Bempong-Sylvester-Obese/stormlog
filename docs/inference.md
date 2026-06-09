@@ -85,6 +85,12 @@ on every request event:
 - `estimated`
 - `unknown`
 
+When streaming is enabled, Stormlog requests OpenAI-style streaming usage
+metadata with `stream_options.include_usage` by default. Use
+`--no-stream-usage` for endpoints that reject that request field. If streaming
+usage is unavailable, output token counts fall back to the configured tokenizer
+or estimate and the request event records that provenance.
+
 Core endpoint profiling does not require tokenizer packages. Install tokenizer
 extras when you want better prompt sizing and fallback counts:
 
