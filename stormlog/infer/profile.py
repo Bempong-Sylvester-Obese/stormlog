@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -42,10 +44,17 @@ class InferenceProfiler:
             api_key=config.api_key,
             max_tokens_field=config.max_tokens_field,
         )
+        self.request_executor = ThreadPoolExecutor(
+            max_workers=max(config.concurrency),
+            thread_name_prefix="stormlog-infer",
+        )
 
     def run(self) -> dict[str, Any]:
         """Run profiling and return an aggregate report."""
-        return asyncio.run(self._run_async())
+        try:
+            return asyncio.run(self._run_async())
+        finally:
+            self.request_executor.shutdown(wait=True, cancel_futures=True)
 
     async def _run_async(self) -> dict[str, Any]:
         output_path = Path(self.config.output_path)
@@ -246,11 +255,15 @@ class InferenceProfiler:
         started_at_ns = time.time_ns()
         started_perf = time.perf_counter()
         try:
-            result = await asyncio.to_thread(
-                self.client.complete,
-                prompt=prompt,
-                output_tokens=case.output_tokens,
-                stream=self.config.stream,
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                self.request_executor,
+                partial(
+                    self.client.complete,
+                    prompt=prompt,
+                    output_tokens=case.output_tokens,
+                    stream=self.config.stream,
+                ),
             )
             output_count = _resolve_output_count(
                 result.usage,

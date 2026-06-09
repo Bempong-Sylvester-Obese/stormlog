@@ -11,6 +11,9 @@ from pathlib import Path
 
 from stormlog.infer.analysis import analyze_inference_events
 from stormlog.infer.cli import main as infer_main
+from stormlog.infer.config import ProfileConfig
+from stormlog.infer.openai_client import ChatCompletionResult
+from stormlog.infer.profile import InferenceProfiler
 
 
 class _FakeOpenAIHandler(BaseHTTPRequestHandler):
@@ -344,6 +347,30 @@ class InferenceProfileTests(unittest.TestCase):
                 self.assertEqual(request["output_token_source"], "estimated")
                 self.assertFalse(request["output_token_exact"])
 
+    def test_requested_concurrency_sets_request_executor_capacity(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "infer.jsonl"
+            profiler = InferenceProfiler(
+                ProfileConfig(
+                    endpoint="http://127.0.0.1:1/v1/chat/completions",
+                    model="fake-model",
+                    concurrency=(34,),
+                    input_tokens=(8,),
+                    output_tokens=(4,),
+                    request_count=34,
+                    output_path=str(output),
+                    stream=False,
+                    system_sampler="none",
+                    tokenizer="none",
+                )
+            )
+            client = _BlockingClient(target_active=34)
+            profiler.client = client  # type: ignore[assignment]
+
+            profiler.run()
+
+            self.assertEqual(client.max_active, 34)
+
     def test_analyze_writes_json_report(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             artifact = Path(directory) / "infer.jsonl"
@@ -387,6 +414,48 @@ class InferenceProfileTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["summary"]["total_requests"], 1)
+
+
+class _BlockingClient:
+    def __init__(self, *, target_active: int) -> None:
+        self.target_active = target_active
+        self.active = 0
+        self.max_active = 0
+        self.lock = threading.Lock()
+        self.release = threading.Event()
+
+    def complete(
+        self,
+        *,
+        prompt: str,
+        output_tokens: int,
+        stream: bool,
+    ) -> ChatCompletionResult:
+        started_at_ns = time.time_ns()
+        started_perf = time.perf_counter()
+        with self.lock:
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            if self.active >= self.target_active:
+                self.release.set()
+        self.release.wait(timeout=2)
+        with self.lock:
+            self.active -= 1
+        ended_at_ns = time.time_ns()
+        return ChatCompletionResult(
+            text="hello world",
+            started_at_ns=started_at_ns,
+            ended_at_ns=ended_at_ns,
+            e2e_latency_ms=(time.perf_counter() - started_perf) * 1000.0,
+            ttft_ms=None,
+            first_chunk_latency_ms=None,
+            usage={
+                "prompt_tokens": 5,
+                "completion_tokens": 2,
+                "total_tokens": 7,
+            },
+            finish_reason="stop",
+        )
 
 
 if __name__ == "__main__":
