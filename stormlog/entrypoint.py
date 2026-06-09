@@ -32,6 +32,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         from .infer.cli import main as infer_main
 
         return infer_main(resolved_argv[1:])
+    if command == "query":
+        from .query_cli import main as query_main
+
+        return query_main(resolved_argv[1:])
     if command in {"-h", "--help"}:
         _build_parser().print_help()
         return 0
@@ -51,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "command",
         nargs="?",
-        choices=["tui", "infer"],
+        choices=["tui", "query", "infer"],
         help="Command group. Omit to launch the TUI.",
     )
     return parser

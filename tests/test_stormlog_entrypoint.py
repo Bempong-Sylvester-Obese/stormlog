@@ -1,4 +1,5 @@
 import contextlib
+import importlib
 import io
 import unittest
 from unittest import mock
@@ -48,13 +49,25 @@ class StormlogEntrypointTests(unittest.TestCase):
         self.assertEqual(exit_code, 7)
         infer_main.assert_called_once_with(["analyze", "artifact.jsonl"])
 
+    def test_query_command_dispatches_to_query_cli(self) -> None:
+        importlib.import_module("stormlog.query_cli")
+
+        with mock.patch("stormlog.query_cli.main", return_value=8) as query_main:
+            exit_code = entrypoint.main(["query", "sessions", "artifacts"])
+
+        self.assertEqual(exit_code, 8)
+        query_main.assert_called_once_with(["sessions", "artifacts"])
+
     def test_help_mentions_no_arg_tui_behavior(self) -> None:
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             exit_code = entrypoint.main(["--help"])
 
         self.assertEqual(exit_code, 0)
-        self.assertIn("Textual TUI", output.getvalue())
+        help_text = output.getvalue()
+        self.assertIn("Textual TUI", help_text)
+        self.assertIn("query", help_text)
+        self.assertIn("infer", help_text)
 
     def test_unknown_command_exits_with_parser_error(self) -> None:
         with contextlib.redirect_stderr(io.StringIO()):
