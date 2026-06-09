@@ -229,6 +229,78 @@ class InferenceProfileTests(unittest.TestCase):
             self.assertEqual(case["latency_ms"]["e2e_p50"], 1000.0)
             self.assertEqual(case["throughput"]["output_tokens_per_second"], 4.0)
 
+    def test_analyze_filters_system_samples_to_case_window(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "infer.jsonl"
+            records = [
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.system_sample",
+                    "session_id": "s1",
+                    "timestamp_ns": 500_000_000,
+                    "device_used_bytes": 700,
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.request",
+                    "session_id": "s1",
+                    "request_id": "low",
+                    "case_id": "c1_in8_out4",
+                    "phase": "measured",
+                    "started_at_ns": 1_000_000_000,
+                    "ended_at_ns": 2_000_000_000,
+                    "status": "ok",
+                    "e2e_latency_ms": 1000.0,
+                    "output_tokens": 4,
+                    "total_tokens": 12,
+                    "output_token_source": "server_usage",
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.system_sample",
+                    "session_id": "s1",
+                    "timestamp_ns": 1_500_000_000,
+                    "device_used_bytes": 100,
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.request",
+                    "session_id": "s1",
+                    "request_id": "high",
+                    "case_id": "c2_in8_out4",
+                    "phase": "measured",
+                    "started_at_ns": 4_000_000_000,
+                    "ended_at_ns": 5_000_000_000,
+                    "status": "ok",
+                    "e2e_latency_ms": 1000.0,
+                    "output_tokens": 4,
+                    "total_tokens": 12,
+                    "output_token_source": "server_usage",
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.system_sample",
+                    "session_id": "s1",
+                    "timestamp_ns": 4_500_000_000,
+                    "device_used_bytes": 900,
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            report = analyze_inference_events(path)
+
+            self.assertEqual(
+                report["cases"]["c1_in8_out4"]["memory"]["peak_device_used_bytes"],
+                100,
+            )
+            self.assertEqual(
+                report["cases"]["c2_in8_out4"]["memory"]["peak_device_used_bytes"],
+                900,
+            )
+
     def test_profile_non_streaming_without_usage_records_estimated_tokens(
         self,
     ) -> None:

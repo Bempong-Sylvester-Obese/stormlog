@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, TypeGuard
 
 
 def analyze_inference_events(path: str | Path) -> dict[str, Any]:
@@ -28,10 +28,12 @@ def analyze_inference_events(path: str | Path) -> dict[str, Any]:
         case_id = str(record.get("case_id", "unknown"))
         grouped.setdefault(case_id, []).append(record)
 
-    cases = {
-        case_id: _summarize_requests(case_requests, samples=samples)
-        for case_id, case_requests in sorted(grouped.items())
-    }
+    cases = {}
+    for case_id, case_requests in sorted(grouped.items()):
+        cases[case_id] = _summarize_requests(
+            case_requests,
+            samples=_samples_for_request_window(samples, case_requests),
+        )
     failed = [record for record in requests if record.get("status") != "ok"]
     return {
         "summary": {
@@ -149,11 +151,38 @@ def _summarize_requests(
     }
 
 
+def _samples_for_request_window(
+    samples: list[dict[str, Any]],
+    requests: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    started = [
+        _int_value(record.get("started_at_ns"))
+        for record in requests
+        if _is_number(record.get("started_at_ns"))
+    ]
+    ended = [
+        _int_value(record.get("ended_at_ns"))
+        for record in requests
+        if _is_number(record.get("ended_at_ns"))
+    ]
+    if not started or not ended:
+        return []
+
+    start_ns = min(started)
+    end_ns = max(ended)
+    return [
+        sample
+        for sample in samples
+        if _is_number(sample.get("timestamp_ns"))
+        and start_ns <= _int_value(sample.get("timestamp_ns")) <= end_ns
+    ]
+
+
 def _number_values(records: Iterable[dict[str, Any]], field: str) -> list[float]:
     values: list[float] = []
     for record in records:
         value = record.get(field)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if _is_number(value):
             values.append(float(value))
     return values
 
@@ -177,6 +206,10 @@ def _int_value(value: Any) -> int:
     if isinstance(value, float):
         return int(value)
     return 0
+
+
+def _is_number(value: Any) -> TypeGuard[int | float]:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
 def _fmt(value: Any) -> str:
