@@ -5,6 +5,7 @@
 This guide focuses on the workflows that are stable in the current codebase:
 
 - profile a bounded section of code
+- profile an OpenAI-compatible inference endpoint
 - track memory over time
 - export telemetry and plots
 - move from runtime data to a diagnose bundle or TUI session
@@ -16,8 +17,10 @@ the [Production Cookbook](cookbook/index.md), especially
 [TensorFlow Production Recipes](cookbook/tensorflow.md).
 
 Install the distribution as `stormlog`, then import the Python APIs from
-`stormlog`, `stormlog.tensorflow`, or `stormlog.jax`. The CLI automation commands are
-`gpumemprof`, `tfmemprof`, and `jaxmemprof`.
+`stormlog`, `stormlog.tensorflow`, or `stormlog.jax`. The framework memory CLI
+automation commands are `gpumemprof`, `tfmemprof`, and `jaxmemprof`; local
+artifact queries live under `stormlog query`, and endpoint inference profiling
+lives under `stormlog infer`.
 
 ## Choose the right tool
 
@@ -51,6 +54,16 @@ Use when:
 - you need telemetry over time rather than one profiled call
 - you want backend-aware tracking on CUDA, ROCm, MPS, or CPU fallback paths
 - you want alerts, exported event streams, or diagnose bundles
+
+### `stormlog infer`
+
+Use when:
+
+- you want to profile an OpenAI-compatible Chat Completions endpoint
+- the backend may be vLLM, SGLang, TensorRT-LLM, MLX-LM, a hosted gateway, or
+  another OpenAI-compatible server
+- you care about client-observed TTFT, latency, throughput, token rates,
+  failures, and optional host/GPU telemetry
 
 ### `CPUMemoryProfiler` / `CPUMemoryTracker`
 
@@ -99,6 +112,38 @@ python -m examples.cli.capability_matrix --mode smoke --target both --oom-mode s
 ```
 
 The `examples/` package is not included in the PyPI distribution.
+
+## OpenAI-compatible inference profiling
+
+Use `stormlog infer profile` to send controlled traffic to a Chat Completions
+endpoint and write a JSONL artifact:
+
+```bash
+stormlog infer profile \
+  --base-url http://localhost:8000/v1 \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --concurrency 1,4,8 \
+  --input-tokens 512,2048 \
+  --output-tokens 128,512 \
+  --requests 20 \
+  --output /tmp/stormlog_infer.jsonl
+```
+
+Analyze the artifact later:
+
+```bash
+stormlog infer analyze /tmp/stormlog_infer.jsonl
+```
+
+Install optional tokenizer dependencies when server usage metadata is missing
+and you need stronger fallback token counts:
+
+```bash
+pip install "stormlog[infer-tokenizers]"
+```
+
+See the [Inference Profiling Guide](inference.md) for metric boundaries,
+token count provenance, streaming behavior, and system telemetry options.
 
 ## PyTorch profiling
 

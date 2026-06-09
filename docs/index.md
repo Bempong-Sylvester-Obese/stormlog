@@ -2,10 +2,11 @@
 
 # Stormlog Documentation
 
-Stormlog ships three surfaces that should be treated as one workflow:
+Stormlog ships four surfaces that should be treated as one workflow:
 
 - Python APIs for profiling or tracking inside code
 - CLI commands for telemetry capture and artifact generation
+- OpenAI-compatible inference endpoint profiling
 - a Textual TUI for live monitoring, visualization export, and diagnostics
 
 Use the guides below based on the job you are doing, not based on package internals.
@@ -15,8 +16,8 @@ Use the guides below based on the job you are doing, not based on package intern
 **If you installed Stormlog via `pip install stormlog`** (from PyPI):
 
 - The `examples/` package is **not** included. Commands like `python -m examples.cli.quickstart` will fail with `ModuleNotFoundError`.
-- Use the CLI commands and Python snippets in this documentation instead. The `gpumemprof`, `tfmemprof`, and `jaxmemprof` CLIs and the public Python APIs work with a pip install.
-- Install `stormlog[tui,torch]` if you want the `stormlog` TUI entrypoint from a pip install.
+- Use the CLI commands and Python snippets in this documentation instead. The `gpumemprof`, `tfmemprof`, and `jaxmemprof` CLIs, `stormlog query`, `stormlog infer`, and the public Python APIs work with a pip install.
+- Install `stormlog[tui,torch]` if you want `stormlog` or `stormlog tui` to launch the TUI from a pip install.
 - The TUI **Capability Matrix** and **OOM scenario** buttons run example modules. If those fail, use the inline command runner in the TUI with the equivalent CLI commands from this guide.
 
 **If you cloned the repository** and installed with `pip install -e .`:
@@ -30,6 +31,7 @@ Use the guides below based on the job you are doing, not based on package intern
 installation
 usage
 cli
+inference
 tui
 cookbook/index
 cookbook/always_on
@@ -71,9 +73,10 @@ examples/test_guides/README
 ### Debugging a real run
 
 1. [CLI](cli.md)
-2. [TUI](tui.md)
-3. [Production Cookbook](cookbook/index.md)
-4. [Troubleshooting](troubleshooting.md)
+2. [Inference Profiling](inference.md)
+3. [TUI](tui.md)
+4. [Production Cookbook](cookbook/index.md)
+5. [Troubleshooting](troubleshooting.md)
 
 ### Release or CI validation
 

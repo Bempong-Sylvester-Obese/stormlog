@@ -9,6 +9,10 @@ pip install "stormlog[tui,torch]"
 stormlog
 ```
 
+Running `stormlog` with no arguments still launches the TUI. The explicit
+`stormlog tui` form is also available when you want to distinguish the TUI from
+other top-level command groups such as `stormlog infer`.
+
 If you are working from a source checkout, reinstall with the TUI dependencies so the current app startup requirements are present:
 
 ```bash

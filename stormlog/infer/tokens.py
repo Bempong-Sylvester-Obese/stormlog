@@ -1,0 +1,146 @@
+"""Token counting helpers for inference profiling."""
+
+from __future__ import annotations
+
+import importlib
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass(frozen=True)
+class TokenCount:
+    """A token count plus provenance."""
+
+    value: int
+    source: str
+    exact: bool
+
+
+class TokenCounter(Protocol):
+    """Counter interface used by workload generation and fallback accounting."""
+
+    source: str
+    exact: bool
+
+    def count_text(self, text: str) -> TokenCount:
+        """Count tokens in a text payload."""
+
+
+class EstimatedTokenCounter:
+    """A deterministic fallback counter based on whitespace-like chunks."""
+
+    source = "estimated"
+    exact = False
+
+    def count_text(self, text: str) -> TokenCount:
+        chunks = [chunk for chunk in text.replace("\n", " ").split(" ") if chunk]
+        return TokenCount(value=max(1, len(chunks)), source=self.source, exact=False)
+
+
+class TiktokenCounter:
+    """Token counter backed by tiktoken."""
+
+    source = "tiktoken"
+    exact = True
+
+    def __init__(self, *, model: str | None, encoding_name: str | None) -> None:
+        tiktoken = importlib.import_module("tiktoken")
+        if encoding_name:
+            self._encoding = tiktoken.get_encoding(encoding_name)
+        elif model:
+            self._encoding = tiktoken.encoding_for_model(model)
+        else:
+            self._encoding = tiktoken.get_encoding("cl100k_base")
+
+    def count_text(self, text: str) -> TokenCount:
+        return TokenCount(
+            value=len(self._encoding.encode(text)),
+            source=self.source,
+            exact=True,
+        )
+
+
+class TransformersTokenCounter:
+    """Token counter backed by transformers.AutoTokenizer."""
+
+    source = "transformers"
+    exact = True
+
+    def __init__(self, *, model: str) -> None:
+        transformers = importlib.import_module("transformers")
+        auto_tokenizer = transformers.AutoTokenizer
+        self._tokenizer = auto_tokenizer.from_pretrained(model)
+
+    def count_text(self, text: str) -> TokenCount:
+        token_ids = self._tokenizer.encode(text, add_special_tokens=False)
+        return TokenCount(value=len(token_ids), source=self.source, exact=True)
+
+
+def build_token_counter(
+    *,
+    tokenizer: str,
+    model: str,
+    tokenizer_model: str | None = None,
+    tiktoken_encoding: str | None = None,
+    strict: bool = False,
+) -> TokenCounter:
+    """Build the requested token counter, falling back to estimates in auto mode."""
+    normalized = tokenizer.strip().lower()
+    resolved_model = tokenizer_model or model
+
+    if normalized in {"none", "estimate", "estimated"}:
+        return EstimatedTokenCounter()
+
+    if normalized == "tiktoken":
+        return TiktokenCounter(model=resolved_model, encoding_name=tiktoken_encoding)
+
+    if normalized in {"transformers", "hf", "huggingface"}:
+        return TransformersTokenCounter(model=resolved_model)
+
+    if normalized != "auto":
+        raise ValueError(
+            "--tokenizer must be one of auto, none, tiktoken, transformers"
+        )
+
+    try:
+        return TiktokenCounter(
+            model=resolved_model,
+            encoding_name=tiktoken_encoding,
+        )
+    except Exception:
+        pass
+
+    try:
+        return TransformersTokenCounter(model=resolved_model)
+    except Exception:
+        pass
+
+    if strict:
+        raise RuntimeError("No configured tokenizer is available")
+    return EstimatedTokenCounter()
+
+
+def generate_prompt(target_tokens: int, counter: TokenCounter, *, seed: int) -> str:
+    """Generate a deterministic prompt near the requested token count."""
+    base_words = [
+        "profile",
+        "inference",
+        "latency",
+        "throughput",
+        "memory",
+        "tokens",
+        "scheduler",
+        "request",
+        "streaming",
+        "capacity",
+    ]
+    words: list[str] = []
+    index = seed % len(base_words)
+    while len(words) < target_tokens * 2:
+        words.append(base_words[index % len(base_words)])
+        candidate = " ".join(words)
+        count = counter.count_text(candidate)
+        if count.value >= target_tokens:
+            return candidate
+        index += 1
+    return " ".join(words)

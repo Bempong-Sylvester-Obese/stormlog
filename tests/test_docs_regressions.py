@@ -43,6 +43,11 @@ _BANNED_DOC_SNIPPETS = {
     ],
     "docs/index.md": [
         "The `gpumemprof` and `tfmemprof` CLIs, the `stormlog` TUI entrypoint, and the public Python APIs work with a pip install.",
+        "Stormlog ships three surfaces",
+    ],
+    "docs/architecture.md": [
+        "The shared terminal UI is the `stormlog` entrypoint implemented in `stormlog.tui`.",
+        "The `stormlog` console script points to `stormlog.tui:run_app`.",
     ],
     "docs/cpu_compatibility.md": [
         "python -m examples.cli.quickstart",
@@ -90,12 +95,15 @@ _REQUIRED_DOC_SNIPPETS = {
     "docs/index.md": [
         "## Important: Pip vs Source Checkout",
         "The `examples/` package is **not** included.",
-        "Install `stormlog[tui,torch]` if you want the `stormlog` TUI entrypoint from a pip install.",
+        "Stormlog ships four surfaces",
+        "`stormlog infer`",
+        "Install `stormlog[tui,torch]` if you want `stormlog` or `stormlog tui` to launch the TUI from a pip install.",
     ],
     "README.md": [
         "source-checkout only",
         "gpumemprof info",
         "tfmemprof info",
+        "stormlog infer profile",
     ],
     "docs/article.md": [
         'pip install "stormlog[tui,torch]"',
@@ -104,6 +112,12 @@ _REQUIRED_DOC_SNIPPETS = {
     "docs/cli.md": [
         "**Pip users** should use this CLI-only sequence instead:",
         "`--device /CPU:0`",
+        "stormlog infer profile",
+    ],
+    "docs/inference.md": [
+        "stormlog infer profile",
+        "server_usage",
+        "Chunk inter-arrival timing is chunk-level timing.",
     ],
     "docs/cpu_compatibility.md": [
         "Do **not** use `examples.cli.quickstart` for pip installs",
