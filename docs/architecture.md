@@ -6,16 +6,18 @@ This page describes the current code-level architecture of Stormlog. It is a sou
 
 ## Repository surfaces
 
-Stormlog has three user-facing surfaces that share the same core data model:
+Stormlog has four user-facing surfaces:
 
 - Python APIs for bounded profiling and background tracking
 - CLI entrypoints for capture, analysis, and diagnose flows
+- OpenAI-compatible inference endpoint profiling
 - a Textual TUI for live monitoring, visualization export, and artifact review
 
 Those surfaces are implemented under one package root:
 
-- `stormlog` for PyTorch, CPU fallback utilities, telemetry normalization, and the TUI
+- `stormlog` for PyTorch, CPU fallback utilities, telemetry normalization, inference profiling, local artifact queries, and the TUI
 - `stormlog.tensorflow` for TensorFlow profiling, tracking, and TensorFlow-specific analysis helpers
+- `stormlog.jax` for JAX profiling, tracking, diagnostics, and JAX-specific analysis helpers
 
 ## Package boundaries
 
@@ -30,6 +32,8 @@ The `stormlog` package owns:
 - `MemoryAnalyzer`, `GapFinding`, and collective-attribution helpers
 - `TelemetryEventV2` plus telemetry conversion and validation utilities
 - device collector abstractions in `device_collectors.py`
+- OpenAI-compatible inference profiling under `stormlog.infer`
+- local artifact queries under `stormlog.query` and `stormlog.query_cli`
 - the Textual TUI under `stormlog.tui`
 
 ### `stormlog.tensorflow`
@@ -43,7 +47,17 @@ The `stormlog.tensorflow` subpackage owns:
 - `TensorFlowAnalyzer` and `TensorFlowGapFinding`
 - TensorFlow runtime and backend diagnostics in `stormlog.tensorflow.utils`
 
-The TensorFlow package does not ship a separate TUI. The shared terminal UI is the `stormlog` entrypoint implemented in `stormlog.tui`.
+The TensorFlow package does not ship a separate TUI. The shared terminal UI
+lives in `stormlog.tui`; `stormlog.entrypoint` dispatches to that TUI or to
+top-level command groups such as `stormlog query` and `stormlog infer`.
+
+### `stormlog.jax`
+
+The `stormlog.jax` subpackage owns:
+
+- `JAXMemoryProfiler` for bounded JAX profiling
+- JAX tracking, diagnostics, visualization, and analyzer helpers
+- JAX runtime and device discovery helpers in `stormlog.jax.utils`
 
 ## High-level layering
 
@@ -55,14 +69,17 @@ User code / shell
     |     +-- stormlog.MemoryTracker / CPUMemoryTracker
     |     +-- stormlog.tensorflow.TFMemoryProfiler
     |     +-- stormlog.tensorflow.TensorFlowMemoryTracker
+    |     +-- stormlog.jax.JAXMemoryProfiler
     |
     +-- CLI entrypoints
     |     +-- gpumemprof
     |     +-- tfmemprof
-    |     +-- stormlog
+    |     +-- jaxmemprof
+    |     +-- stormlog / stormlog query / stormlog infer
     |
     +-- Shared artifact layer
           +-- TelemetryEventV2 JSON/CSV exports
+          +-- inference JSONL exports
           +-- diagnose bundles
           +-- PNG / HTML visualization outputs
 ```
@@ -143,6 +160,21 @@ Current concrete collectors:
 - `ROCmDeviceCollector`
 - `MPSDeviceCollector`
 
+### Inference profiling
+
+`stormlog.infer` owns active OpenAI-compatible endpoint profiling. It is kept
+separate from `gpumemprof` and `tfmemprof` because the endpoint backend may be
+PyTorch, vLLM, SGLang, TensorRT-LLM, MLX-LM, a hosted gateway, or another
+server.
+
+Current responsibilities:
+
+- build workload cases from concurrency, prompt token targets, and output caps
+- send Chat Completions requests and parse streaming or non-streaming responses
+- record client-observed request traces with token count provenance
+- write inference-specific JSONL artifacts
+- analyze those artifacts into latency, throughput, failure, and memory summaries
+
 ### Analyzers
 
 Analyzers turn raw or normalized memory data into higher-level findings.
@@ -175,7 +207,10 @@ The PyTorch-side visualizer also underpins the TUI plot export path for:
 
 ## TUI architecture
 
-The `stormlog` console script points to `stormlog.tui:run_app`.
+The `stormlog` console script points to `stormlog.entrypoint:main`. Running
+`stormlog` with no arguments still launches `stormlog.tui:run_app`; command
+groups such as `stormlog query` and `stormlog infer` dispatch through the same
+top-level entrypoint.
 
 The TUI is assembled from:
 

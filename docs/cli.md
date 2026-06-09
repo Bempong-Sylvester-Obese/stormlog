@@ -2,14 +2,17 @@
 
 # Command Line Guide
 
-Stormlog currently exposes three console scripts:
+Stormlog currently exposes four console scripts:
 
 - `gpumemprof`
 - `tfmemprof`
 - `jaxmemprof`
 - `stormlog`
 
-Use `gpumemprof` and `tfmemprof` for automation. Use `stormlog` when you want the Textual TUI.
+Use `gpumemprof`, `tfmemprof`, and `jaxmemprof` for framework memory
+automation. Use `stormlog` with no arguments when you want the Textual TUI,
+`stormlog query` when you want local artifact queries, or `stormlog infer` when
+you want OpenAI-compatible inference endpoint profiling.
 
 If you want task-oriented operational recipes instead of option-by-option
 guidance, use the [Production Cookbook](cookbook/index.md), especially
@@ -23,6 +26,9 @@ guidance, use the [Production Cookbook](cookbook/index.md), especially
 gpumemprof --help
 tfmemprof --help
 jaxmemprof --help
+stormlog --help
+stormlog query --help
+stormlog infer --help
 ```
 
 If you are working from a repository checkout, `pip install -e .` also exposes
@@ -35,9 +41,52 @@ pip install "stormlog[tui,torch]"
 stormlog
 ```
 
-The `stormlog` command is also a small dispatcher. Running it without
-arguments still launches the TUI, while `stormlog query ...` runs the local
-artifact query CLI without importing Textual.
+## `stormlog`
+
+The top-level `stormlog` command is TUI-first for compatibility:
+
+```bash
+stormlog       # launch the TUI
+stormlog tui   # launch the TUI explicitly
+```
+
+The command also dispatches non-TUI workflows without importing Textual:
+
+```bash
+stormlog query --help
+stormlog infer --help
+```
+
+### Profile OpenAI-compatible inference
+
+Use `stormlog infer profile` for active endpoint profiling:
+
+```bash
+stormlog infer profile \
+  --base-url http://localhost:8000/v1 \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --concurrency 1,4,8 \
+  --input-tokens 512,2048 \
+  --output-tokens 128,512 \
+  --requests 20 \
+  --output artifacts/infer_qwen.jsonl
+```
+
+The artifact is newline-delimited JSON with one session record, request traces,
+optional system samples, and a summary record. Analyze it with:
+
+```bash
+stormlog infer analyze artifacts/infer_qwen.jsonl
+stormlog infer analyze artifacts/infer_qwen.jsonl --format json --output report.json
+```
+
+For token fallback support beyond server usage metadata, install:
+
+```bash
+pip install "stormlog[infer-tokenizers]"
+```
+
+See [Inference Profiling](inference.md) for the full endpoint profiling guide.
 
 ## `gpumemprof`
 
