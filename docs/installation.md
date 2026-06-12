@@ -182,8 +182,18 @@ gpumemprof --help
 
 ### `stormlog: command not found`
 
+If you're in a source checkout:
+
 ```bash
 pip install -e .
+hash -r
+stormlog --help
+```
+
+If you installed from PyPI instead:
+
+```bash
+pip install stormlog
 hash -r
 stormlog --help
 ```
