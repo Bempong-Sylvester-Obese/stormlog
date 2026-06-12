@@ -391,6 +391,8 @@ def test_append_only_sink_recovery_rebuilds_interrupted_rollup(
     first_sink._stop_flush_thread()
 
     recovered_sink = AppendOnlyTelemetrySink(config)
+    assert read_telemetry_rollups(tmp_path) is None
+
     recovered_sink.close()
 
     rollups = read_telemetry_rollups(tmp_path)

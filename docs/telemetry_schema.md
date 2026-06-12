@@ -338,10 +338,12 @@ long-running monitor sessions:
 - fixed 60-second session windows with sample/event counts and peak counters
 
 Rollups are written after forced sink flush and terminal manifest persistence on
-`close()`. They are also rebuilt during sink recovery after previously running
-sessions are marked `interrupted`. They are not computed on the append hot path
-or periodic flush path. Future post-processing commands can call the same
-builder to regenerate sidecars for existing sink directories.
+`close()`. Sink recovery marks previously running sessions `interrupted` and
+rewrites the manifest, but it does not replay retained JSONL during construction;
+readers safely fall back to raw events when the sidecar is missing or stale. They
+are not computed on the append hot path or periodic flush path. Future
+post-processing commands can call the same builder to regenerate sidecars for
+existing sink directories.
 
 Rollup coverage is explicit. The sidecar records retained segment filenames,
 retained event counts, retained bytes, and sink prune diagnostics when available.

@@ -9,7 +9,7 @@ import threading
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, TextIO, cast
+from typing import TYPE_CHECKING, Any, Mapping, TextIO, cast
 
 from .session import (
     SESSION_STATUS_COMPLETED,
@@ -22,6 +22,9 @@ from .session import (
     session_summary_to_dict,
     update_session_summary,
 )
+
+if TYPE_CHECKING:
+    from .telemetry_rollups import RollupCoverage
 
 MANIFEST_FILENAME = "manifest.json"
 SEGMENT_PREFIX = "segment-"
@@ -154,6 +157,7 @@ class AppendOnlyTelemetrySink:
             self._flush_locked(force=force)
 
     def close(self, session_status: str = SESSION_STATUS_COMPLETED) -> None:
+        rollup_inputs: tuple[TelemetrySinkManifest, RollupCoverage] | None = None
         try:
             with self._lock:
                 self._flush_locked(force=True)
@@ -175,8 +179,10 @@ class AppendOnlyTelemetrySink:
                         )
                 self._active_session_id = None
                 self._write_manifest_locked()
-                self._write_rollups_locked()
+                rollup_inputs = self._rollup_inputs_locked()
                 self._closed = True
+            if rollup_inputs is not None:
+                self._write_rollups(*rollup_inputs)
         finally:
             self._stop_flush_thread()
 
@@ -361,7 +367,6 @@ class AppendOnlyTelemetrySink:
                 manifest_needs_rewrite = True
             if manifest_needs_rewrite:
                 self._write_manifest_locked()
-                self._write_rollups_locked()
             return
 
         if not discovered:
@@ -379,7 +384,6 @@ class AppendOnlyTelemetrySink:
             )
         self._next_segment_index = self._compute_next_segment_index()
         self._write_manifest_locked()
-        self._write_rollups_locked()
 
     def _compute_next_segment_index(self) -> int:
         max_index = 0
@@ -419,36 +423,39 @@ class AppendOnlyTelemetrySink:
             "final_retained_bytes": retained_bytes,
         }
 
-    def _write_rollups_locked(self) -> None:
+    def _rollup_inputs_locked(
+        self,
+    ) -> tuple[TelemetrySinkManifest, RollupCoverage] | None:
         if not self.config.write_rollups:
-            return
+            return None
+        from .telemetry_rollups import rollup_coverage_from_manifest
+
+        manifest = TelemetrySinkManifest(
+            schema_version=SINK_SCHEMA_VERSION,
+            format="stormlog.append_only_telemetry_sink",
+            sessions=list(self._sessions.values()),
+            segments=list(self._segments),
+        )
+        coverage = rollup_coverage_from_manifest(
+            manifest,
+            pruned_segment_count=self._pruned_segment_count,
+            pruned_bytes=self._pruned_bytes,
+        )
+        return manifest, coverage
+
+    def _write_rollups(
+        self,
+        manifest: TelemetrySinkManifest,
+        coverage: RollupCoverage,
+    ) -> None:
         try:
             from .telemetry import load_telemetry_sessions
             from .telemetry_rollups import (
-                RollupCoverage,
                 build_telemetry_rollups,
                 write_telemetry_rollups,
             )
 
             sessions = load_telemetry_sessions(self.root_dir)
-            manifest = TelemetrySinkManifest(
-                schema_version=SINK_SCHEMA_VERSION,
-                format="stormlog.append_only_telemetry_sink",
-                sessions=list(self._sessions.values()),
-                segments=list(self._segments),
-            )
-            coverage = RollupCoverage(
-                retained_segment_filenames=[
-                    segment.filename for segment in self._segments
-                ],
-                retained_segment_count=len(self._segments),
-                retained_event_count=sum(
-                    segment.event_count for segment in self._segments
-                ),
-                retained_bytes=sum(segment.size_bytes for segment in self._segments),
-                pruned_segment_count=self._pruned_segment_count,
-                pruned_bytes=self._pruned_bytes,
-            )
             rollups = build_telemetry_rollups(
                 sessions,
                 manifest,

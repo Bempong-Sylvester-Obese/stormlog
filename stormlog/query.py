@@ -46,6 +46,14 @@ from .telemetry import (
     telemetry_event_from_record,
     telemetry_event_to_dict,
 )
+from .telemetry_classification import (
+    COLLECTOR_TRANSITION_TYPES,
+    event_backend,
+    event_severity,
+    is_alert_event,
+    is_collector_degradation_event,
+    is_oom_event,
+)
 from .telemetry_rollups import (
     RankRollup,
     SessionRollup,
@@ -81,10 +89,7 @@ SummaryMetric = Literal[
 ]
 SummaryGroupBy = Literal["session", "session-rank", "rank", "status"]
 
-_ALERT_EVENT_TYPES = frozenset({"warning", "critical", "error"})
-_COLLECTOR_TRANSITION_TYPES = frozenset({"collector_degraded", "collector_recovered"})
 _TELEMETRY_FILE_NAME_PARTS = ("event", "events", "track", "telemetry")
-_COLLECTOR_DEGRADED_STATUSES = frozenset({"degraded", "unhealthy"})
 _GAP_ANALYSIS_THRESHOLDS = {
     "gap_ratio_threshold": 0.05,
     "gap_spike_zscore": 2.0,
@@ -647,11 +652,11 @@ class QueryStore:
 
         event_rows = self.query_events(EventFilter())
         for event_row in event_rows:
-            if _is_oom_event(event_row.event):
+            if is_oom_event(event_row.event):
                 _accumulate_oom_event_issue(accumulator, event_row)
-            elif _is_collector_degradation_event(event_row.event):
+            elif is_collector_degradation_event(event_row.event):
                 _accumulate_collector_issue(accumulator, event_row)
-            elif _is_alert_event(event_row.event):
+            elif is_alert_event(event_row.event):
                 _accumulate_alert_issue(accumulator, event_row)
 
         for source in self.catalog.sources:
@@ -719,13 +724,13 @@ class QueryStore:
             }[metric]
             return _summarize_peak(events, metric, field_name, resolved_group_by)
         if metric == "alert_count":
-            alert_events = [row for row in events if _is_alert_event(row.event)]
+            alert_events = [row for row in events if is_alert_event(row.event)]
             return _summarize_count(alert_events, metric, resolved_group_by)
         if metric == "collector_degradation_transitions":
             transition_events = [
                 row
                 for row in events
-                if row.event.event_type in _COLLECTOR_TRANSITION_TYPES
+                if row.event.event_type in COLLECTOR_TRANSITION_TYPES
             ]
             return _summarize_count(transition_events, metric, resolved_group_by)
         if metric == "hidden_memory_gap_growth":
@@ -1154,7 +1159,7 @@ def _event_matches(row: EventRow, filters: EventFilter) -> bool:
         return False
     if filters.time_end_ns is not None and event.timestamp_ns > filters.time_end_ns:
         return False
-    if filters.has_alert is not None and (_is_alert_event(event) != filters.has_alert):
+    if filters.has_alert is not None and (is_alert_event(event) != filters.has_alert):
         return False
     metadata = event.metadata
     if filters.collector_health_status is not None and (
@@ -1202,44 +1207,6 @@ def _datetime_to_ns(value: datetime | None) -> int | None:
     if value is None:
         return None
     return int(value.timestamp() * 1_000_000_000)
-
-
-def _is_alert_event(event: TelemetryEvent) -> bool:
-    if event.event_type in _ALERT_EVENT_TYPES:
-        return True
-    severity = event.metadata.get("severity")
-    return severity in {"warning", "critical", "error"}
-
-
-def _is_oom_event(event: TelemetryEvent) -> bool:
-    if event.event_type != "error":
-        return False
-    metadata = event.metadata
-    return any(key in metadata for key in ("oom_reason", "oom_dump_path"))
-
-
-def _is_collector_degradation_event(event: TelemetryEvent) -> bool:
-    metadata = event.metadata
-    health_status = normalize_text_dimension(metadata.get("collector_health_status"))
-    return (
-        event.event_type == "collector_degraded"
-        or health_status in _COLLECTOR_DEGRADED_STATUSES
-    )
-
-
-def _event_severity(event: TelemetryEvent) -> str:
-    metadata_severity = event.metadata.get("severity")
-    if isinstance(metadata_severity, str) and metadata_severity.strip():
-        return normalize_text_dimension(metadata_severity)
-    if event.event_type in {"critical", "error"}:
-        return "critical"
-    if event.event_type == "warning":
-        return "warning"
-    return "info"
-
-
-def _event_backend(event: TelemetryEvent) -> str:
-    return normalize_text_dimension(event.metadata.get("backend"))
 
 
 def _event_source_path(loaded: LoadedTelemetrySession, source: CatalogSource) -> str:
@@ -1363,7 +1330,7 @@ def _summarize_rollup_hidden_gap_growth(
                     },
                 )
             )
-    return sorted(output, key=lambda row: str(row.as_dict()))
+    return sorted(output, key=lambda row: str((row.session_id, row.rank, row.status)))
 
 
 def _rollup_sessions(
@@ -1538,7 +1505,7 @@ def _accumulate_oom_event_issue(
     fingerprint = IssueFingerprint(
         kind="oom",
         dimensions={
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "reason": reason,
         },
     )
@@ -1561,7 +1528,7 @@ def _accumulate_oom_event_issue(
         seen_ns=event.timestamp_ns,
         session_id=event.session_id,
         details={
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "reason": reason,
             "collector": event.collector,
             "device_id": event.device_id,
@@ -1587,7 +1554,7 @@ def _accumulate_collector_issue(
         kind="collector_degradation",
         dimensions={
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "health_status": health_status,
             "partial_fields": list(partial_fields),
             "error_stem": normalized_error_stem(last_error),
@@ -1620,7 +1587,7 @@ def _accumulate_collector_issue(
         session_id=event.session_id,
         details={
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "health_status": health_status,
             "partial_fields": list(partial_fields),
             "error_stem": normalized_error_stem(last_error),
@@ -1633,7 +1600,7 @@ def _accumulate_alert_issue(
     row: EventRow,
 ) -> None:
     event = row.event
-    severity = _event_severity(event)
+    severity = event_severity(event)
     category = categorize_alert_context(event.context)
     fingerprint = IssueFingerprint(
         kind="alert",
@@ -1641,7 +1608,7 @@ def _accumulate_alert_issue(
             "event_type": event.event_type,
             "severity": severity,
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "category": category,
         },
     )
@@ -1665,7 +1632,7 @@ def _accumulate_alert_issue(
         details={
             "event_type": event.event_type,
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "category": category,
         },
     )
@@ -1704,7 +1671,7 @@ def _accumulate_hidden_memory_issues(
                     else "unknown"
                 ),
                 "backend": (
-                    _event_backend(evidence_event)
+                    event_backend(evidence_event)
                     if evidence_event is not None
                     else "unknown"
                 ),

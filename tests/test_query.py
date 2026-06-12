@@ -22,6 +22,7 @@ def _event_record(
     timestamp_ns: int,
     event_type: str = "sample",
     rank: int = 0,
+    world_size: int = 2,
     allocated: int = 100,
     reserved: int = 150,
     used: int = 175,
@@ -40,7 +41,7 @@ def _event_record(
         "job_id": "job-a",
         "rank": rank,
         "local_rank": rank,
-        "world_size": 2,
+        "world_size": world_size,
         "device_id": 0,
         "allocator_allocated_bytes": allocated,
         "allocator_reserved_bytes": reserved,
@@ -453,6 +454,80 @@ def test_query_summary_falls_back_when_sink_rollup_is_malformed(
     assert len(rows) == 1
     assert rows[0].session_id == "session-malformed"
     assert rows[0].value == 160
+
+
+def test_query_hidden_gap_rollup_order_matches_raw_fallback(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    for rank, used_values in ((10, (200, 260)), (2, (180, 230))):
+        for offset, used in enumerate(used_values):
+            sink.append(
+                _event_record(
+                    session_id="session-order",
+                    timestamp_ns=rank * 10 + offset,
+                    rank=rank,
+                    world_size=16,
+                    reserved=100,
+                    used=used,
+                )
+            )
+    sink.close()
+
+    store = query_api.open([tmp_path])
+    rollup_rows = store.summarize("hidden_memory_gap_growth", group_by="rank")
+    (tmp_path / "rollups.json").write_text("{bad", encoding="utf-8")
+    raw_rows = query_api.open([tmp_path]).summarize(
+        "hidden_memory_gap_growth",
+        group_by="rank",
+    )
+
+    assert [(row.session_id, row.rank, row.status) for row in rollup_rows] == [
+        (row.session_id, row.rank, row.status) for row in raw_rows
+    ]
+    assert [row.value for row in rollup_rows] == [row.value for row in raw_rows]
+
+
+def test_query_alert_count_rollup_matches_raw_fallback_for_metadata_severity(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id="session-alert",
+            timestamp_ns=1,
+            event_type="sample",
+            metadata={"backend": "cuda", "severity": " Warning "},
+        )
+    )
+    sink.close()
+
+    rollup_rows = query_api.open([tmp_path]).summarize(
+        "alert_count",
+        group_by="session",
+    )
+    (tmp_path / "rollups.json").write_text("{bad", encoding="utf-8")
+    raw_rows = query_api.open([tmp_path]).summarize(
+        "alert_count",
+        group_by="session",
+    )
+
+    assert [(row.session_id, row.value) for row in rollup_rows] == [
+        (row.session_id, row.value) for row in raw_rows
+    ]
+    assert rollup_rows[0].value == 1
 
 
 def test_catalog_discovers_csv_telemetry(tmp_path: Path) -> None:

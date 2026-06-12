@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Mapping, Sequence, cast
+from uuid import uuid4
 
 from .session import SessionSummary, now_ns
 from .telemetry import LoadedTelemetrySession, TelemetryEvent
+from .telemetry_classification import (
+    COLLECTOR_TRANSITION_TYPES,
+    event_severity,
+    is_alert_event,
+    is_oom_event,
+)
 from .telemetry_sink import (
     MANIFEST_FILENAME,
     TelemetrySinkManifest,
@@ -21,8 +29,6 @@ ROLLUP_FILENAME = "rollups.json"
 DEFAULT_ROLLUP_WINDOW_SECONDS = 60
 DEFAULT_ROLLUP_WINDOW_NS = DEFAULT_ROLLUP_WINDOW_SECONDS * 1_000_000_000
 
-_ALERT_EVENT_TYPES = frozenset({"warning", "critical", "error"})
-_COLLECTOR_TRANSITION_TYPES = frozenset({"collector_degraded", "collector_recovered"})
 _ROLLUP_FORMAT = "stormlog.telemetry_rollups"
 
 
@@ -215,7 +221,11 @@ class _RankAccumulator:
     first_timestamp_ns: int | None = None
     last_timestamp_ns: int | None = None
     counters: _CounterAccumulator = field(default_factory=_CounterAccumulator)
-    hidden_gap_samples: list[tuple[int, int]] = field(default_factory=list)
+    hidden_gap_first_timestamp_ns: int | None = None
+    hidden_gap_first_bytes: int | None = None
+    hidden_gap_latest_timestamp_ns: int | None = None
+    hidden_gap_latest_bytes: int | None = None
+    hidden_gap_peak_bytes: int | None = None
 
     def observe(self, event: TelemetryEvent) -> None:
         self.event_count += 1
@@ -231,19 +241,25 @@ class _RankAccumulator:
         if event.event_type != "sample":
             return
         self.sample_count += 1
-        self.hidden_gap_samples.append(
-            (
-                event.timestamp_ns,
-                event.device_used_bytes - event.allocator_reserved_bytes,
-            )
+        gap_bytes = event.device_used_bytes - event.allocator_reserved_bytes
+        if self.hidden_gap_first_timestamp_ns is None:
+            self.hidden_gap_first_timestamp_ns = event.timestamp_ns
+            self.hidden_gap_first_bytes = gap_bytes
+        self.hidden_gap_latest_timestamp_ns = event.timestamp_ns
+        self.hidden_gap_latest_bytes = gap_bytes
+        self.hidden_gap_peak_bytes = (
+            gap_bytes
+            if self.hidden_gap_peak_bytes is None
+            else max(self.hidden_gap_peak_bytes, gap_bytes)
         )
 
     def to_rollup(self) -> RankRollup:
-        sorted_gaps = sorted(self.hidden_gap_samples)
-        first_gap = sorted_gaps[0][1] if sorted_gaps else None
-        latest_gap = sorted_gaps[-1][1] if sorted_gaps else None
-        peak_gap = max((gap for _, gap in sorted_gaps), default=None)
-        drift = _drift_bytes_per_second(sorted_gaps)
+        drift = _drift_bytes_per_second(
+            first_timestamp_ns=self.hidden_gap_first_timestamp_ns,
+            first_gap_bytes=self.hidden_gap_first_bytes,
+            latest_timestamp_ns=self.hidden_gap_latest_timestamp_ns,
+            latest_gap_bytes=self.hidden_gap_latest_bytes,
+        )
         return RankRollup(
             rank=self.rank,
             local_rank=self.local_rank,
@@ -253,12 +269,15 @@ class _RankAccumulator:
             first_timestamp_ns=self.first_timestamp_ns,
             last_timestamp_ns=self.last_timestamp_ns,
             counters=self.counters.to_summary(),
-            hidden_gap_first_bytes=first_gap,
-            hidden_gap_latest_bytes=latest_gap,
-            hidden_gap_peak_bytes=peak_gap,
+            hidden_gap_first_bytes=self.hidden_gap_first_bytes,
+            hidden_gap_latest_bytes=self.hidden_gap_latest_bytes,
+            hidden_gap_peak_bytes=self.hidden_gap_peak_bytes,
             hidden_gap_delta_bytes=(
-                latest_gap - first_gap
-                if first_gap is not None and latest_gap is not None
+                self.hidden_gap_latest_bytes - self.hidden_gap_first_bytes
+                if (
+                    self.hidden_gap_first_bytes is not None
+                    and self.hidden_gap_latest_bytes is not None
+                )
                 else None
             ),
             hidden_gap_drift_bytes_per_second=drift,
@@ -284,11 +303,11 @@ class _WindowAccumulator:
         self.counters.observe(event)
         if event.event_type == "sample":
             self.sample_count += 1
-        if _is_alert_event(event):
+        if is_alert_event(event):
             self.alert_count += 1
-        if event.event_type in _COLLECTOR_TRANSITION_TYPES:
+        if event.event_type in COLLECTOR_TRANSITION_TYPES:
             self.collector_transition_count += 1
-        if _is_oom_marker(event):
+        if is_oom_event(event):
             self.oom_count += 1
 
     def to_rollup(self) -> WindowRollup:
@@ -346,13 +365,21 @@ def write_telemetry_rollups(
 
     rollup_path = resolve_telemetry_rollup_path(root_dir)
     rollup_path.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = rollup_path.with_suffix(".tmp")
-    temp_path.write_text(
-        json.dumps(telemetry_rollup_file_to_dict(rollups), indent=2, sort_keys=True)
-        + "\n",
-        encoding="utf-8",
+    temp_path = rollup_path.with_name(
+        f"{rollup_path.name}.{os.getpid()}.{uuid4().hex}.tmp"
     )
+    with temp_path.open("w", encoding="utf-8") as handle:
+        json.dump(
+            telemetry_rollup_file_to_dict(rollups),
+            handle,
+            indent=2,
+            sort_keys=True,
+        )
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
     temp_path.replace(rollup_path)
+    _fsync_directory(rollup_path.parent)
     return rollup_path
 
 
@@ -522,10 +549,10 @@ class _AlertAccumulator:
     event_type_counts: dict[str, int] = field(default_factory=lambda: defaultdict(int))
 
     def observe(self, event: TelemetryEvent) -> None:
-        if not _is_alert_event(event):
+        if not is_alert_event(event):
             return
         self.total_count += 1
-        self.severity_counts[_event_severity(event)] += 1
+        self.severity_counts[event_severity(event)] += 1
         self.event_type_counts[event.event_type] += 1
 
     def to_summary(self) -> AlertSummary:
@@ -546,7 +573,7 @@ class _CollectorHealthAccumulator:
     last_status: str | None = None
 
     def observe(self, event: TelemetryEvent) -> None:
-        if event.event_type not in _COLLECTOR_TRANSITION_TYPES:
+        if event.event_type not in COLLECTOR_TRANSITION_TYPES:
             status = event.metadata.get("collector_health_status")
             if isinstance(status, str) and status.strip():
                 self.last_status = status.strip().lower()
@@ -583,7 +610,7 @@ class _OomAccumulator:
     bundle_paths: set[str] = field(default_factory=set)
 
     def observe(self, event: TelemetryEvent) -> None:
-        if not _is_oom_marker(event):
+        if not is_oom_event(event):
             return
         self.marker_count += 1
         if event.event_type == "error":
@@ -600,14 +627,26 @@ class _OomAccumulator:
         )
 
 
-def _coverage_from_manifest(manifest: TelemetrySinkManifest | None) -> RollupCoverage:
+def rollup_coverage_from_manifest(
+    manifest: TelemetrySinkManifest | None,
+    *,
+    pruned_segment_count: int | None = None,
+    pruned_bytes: int | None = None,
+) -> RollupCoverage:
+    """Build sidecar coverage fields from a sink manifest."""
+
     if manifest is None:
-        return RollupCoverage()
+        return RollupCoverage(
+            pruned_segment_count=pruned_segment_count,
+            pruned_bytes=pruned_bytes,
+        )
     return RollupCoverage(
         retained_segment_filenames=[segment.filename for segment in manifest.segments],
         retained_segment_count=len(manifest.segments),
         retained_event_count=sum(segment.event_count for segment in manifest.segments),
         retained_bytes=sum(segment.size_bytes for segment in manifest.segments),
+        pruned_segment_count=pruned_segment_count,
+        pruned_bytes=pruned_bytes,
     )
 
 
@@ -615,7 +654,7 @@ def _rollup_matches_manifest(
     rollups: TelemetryRollupFile,
     manifest: TelemetrySinkManifest,
 ) -> bool:
-    coverage = _coverage_from_manifest(manifest)
+    coverage = rollup_coverage_from_manifest(manifest)
     return (
         rollups.source_manifest_schema_version == manifest.schema_version
         and rollups.coverage.retained_segment_filenames
@@ -755,39 +794,39 @@ def _oom_summary_from_dict(payload: Mapping[str, Any]) -> OomSummary:
     )
 
 
-def _is_alert_event(event: TelemetryEvent) -> bool:
-    if event.event_type in _ALERT_EVENT_TYPES:
-        return True
-    severity = event.metadata.get("severity")
-    return severity in {"warning", "critical", "error"}
-
-
-def _event_severity(event: TelemetryEvent) -> str:
-    severity = event.metadata.get("severity")
-    if isinstance(severity, str) and severity.strip():
-        return severity.strip().lower()
-    if event.event_type in {"critical", "error"}:
-        return "critical"
-    if event.event_type == "warning":
-        return "warning"
-    return "info"
-
-
-def _is_oom_marker(event: TelemetryEvent) -> bool:
-    return event.event_type == "error" and any(
-        key in event.metadata for key in ("oom_reason", "oom_dump_path")
-    )
-
-
-def _drift_bytes_per_second(samples: Sequence[tuple[int, int]]) -> float | None:
-    if len(samples) < 2:
+def _drift_bytes_per_second(
+    *,
+    first_timestamp_ns: int | None,
+    first_gap_bytes: int | None,
+    latest_timestamp_ns: int | None,
+    latest_gap_bytes: int | None,
+) -> float | None:
+    if (
+        first_timestamp_ns is None
+        or first_gap_bytes is None
+        or latest_timestamp_ns is None
+        or latest_gap_bytes is None
+    ):
         return None
-    first_ts, first_gap = samples[0]
-    last_ts, last_gap = samples[-1]
-    elapsed_ns = last_ts - first_ts
+    elapsed_ns = latest_timestamp_ns - first_timestamp_ns
     if elapsed_ns <= 0:
         return None
-    return round((last_gap - first_gap) / (elapsed_ns / 1_000_000_000), 6)
+    return round((latest_gap_bytes - first_gap_bytes) / (elapsed_ns / 1_000_000_000), 6)
+
+
+def _coverage_from_manifest(manifest: TelemetrySinkManifest | None) -> RollupCoverage:
+    return rollup_coverage_from_manifest(manifest)
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        directory_fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def _min_optional(current: int | None, candidate: int) -> int:
@@ -856,6 +895,7 @@ __all__ = [
     "build_telemetry_rollups",
     "read_telemetry_rollups",
     "resolve_telemetry_rollup_path",
+    "rollup_coverage_from_manifest",
     "telemetry_rollup_file_from_dict",
     "telemetry_rollup_file_to_dict",
     "write_telemetry_rollups",
