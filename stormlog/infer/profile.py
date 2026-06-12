@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import Any
 
 from ..session import (
+    SESSION_STATUS_INCOMPLETE,
     create_session_summary,
     finalize_session_summary,
     session_summary_to_dict,
+    update_session_summary,
 )
 from .analysis import analyze_inference_events
 from .config import ProfileConfig, WorkloadCase
@@ -96,15 +98,35 @@ class InferenceProfiler:
                 stop_sampling.set()
                 await sample_task
 
-        report = analyze_inference_events(output_path)
-        with output_path.open("a", encoding="utf-8") as handle:
-            event = InferenceSummaryEvent(
-                session_id=self.session.session_id,
-                timestamp_ns=time.time_ns(),
-                summary=report,
+        try:
+            report = analyze_inference_events(output_path)
+        except Exception:
+            self._write_terminal_session(output_path=output_path, report=None)
+            raise
+        self._write_terminal_session(output_path=output_path, report=report)
+        return report
+
+    def _write_terminal_session(
+        self,
+        *,
+        output_path: Path,
+        report: dict[str, Any] | None,
+    ) -> None:
+        session = self.session
+        if report is None:
+            session = update_session_summary(
+                session,
+                status=SESSION_STATUS_INCOMPLETE,
             )
-            completed_session = finalize_session_summary(self.session)
-            handle.write(json.dumps(event.to_record(), sort_keys=True) + "\n")
+        completed_session = finalize_session_summary(session)
+        with output_path.open("a", encoding="utf-8") as handle:
+            if report is not None:
+                event = InferenceSummaryEvent(
+                    session_id=self.session.session_id,
+                    timestamp_ns=time.time_ns(),
+                    summary=report,
+                )
+                handle.write(json.dumps(event.to_record(), sort_keys=True) + "\n")
             handle.write(
                 json.dumps(
                     {
@@ -119,7 +141,6 @@ class InferenceProfiler:
                 )
                 + "\n"
             )
-        return report
 
     async def _sample_system_loop(
         self,

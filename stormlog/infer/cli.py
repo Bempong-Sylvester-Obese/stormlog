@@ -26,6 +26,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_profile(args)
         if args.infer_command == "analyze":
             return cmd_analyze(args)
+    except BrokenPipeError:
+        return 1
     except Exception as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

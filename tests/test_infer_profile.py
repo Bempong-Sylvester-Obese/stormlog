@@ -8,13 +8,19 @@ import unittest
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
+from unittest import mock
 
 from stormlog.infer.analysis import analyze_inference_events
 from stormlog.infer.cli import main as infer_main
 from stormlog.infer.config import ProfileConfig
-from stormlog.infer.openai_client import ChatCompletionResult
+from stormlog.infer.openai_client import (
+    ChatCompletionResult,
+    OpenAIChatCompletionsClient,
+)
 from stormlog.infer.profile import InferenceProfiler
+from stormlog.infer.samplers import NvidiaSmiSampler
 
 
 class _FakeOpenAIHandler(BaseHTTPRequestHandler):
@@ -353,6 +359,75 @@ class InferenceProfileTests(unittest.TestCase):
                 900,
             )
 
+    def test_analyze_reports_process_rss_and_ignores_incomplete_time_bounds(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "infer.jsonl"
+            records = [
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.request",
+                    "session_id": "s1",
+                    "request_id": "valid",
+                    "case_id": "c1_in8_out4",
+                    "phase": "measured",
+                    "started_at_ns": 1_000_000_000,
+                    "ended_at_ns": 2_000_000_000,
+                    "status": "ok",
+                    "e2e_latency_ms": 1000.0,
+                    "output_tokens": 4,
+                    "total_tokens": 12,
+                    "output_token_source": "server_usage",
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.request",
+                    "session_id": "s1",
+                    "request_id": "missing-start",
+                    "case_id": "c1_in8_out4",
+                    "phase": "measured",
+                    "ended_at_ns": 10_000_000_000,
+                    "status": "ok",
+                    "e2e_latency_ms": 1000.0,
+                    "output_tokens": 4,
+                    "total_tokens": 12,
+                    "output_token_source": "server_usage",
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.system_sample",
+                    "session_id": "s1",
+                    "timestamp_ns": 1_200_000_000,
+                    "process_rss_bytes": 200,
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.system_sample",
+                    "session_id": "s1",
+                    "timestamp_ns": 1_500_000_000,
+                    "process_rss_bytes": 500,
+                },
+                {
+                    "schema_version": 1,
+                    "event_type": "infer.system_sample",
+                    "session_id": "s1",
+                    "timestamp_ns": 5_000_000_000,
+                    "process_rss_bytes": 900,
+                },
+            ]
+            path.write_text(
+                "\n".join(json.dumps(record) for record in records) + "\n",
+                encoding="utf-8",
+            )
+
+            report = analyze_inference_events(path)
+
+            case = report["cases"]["c1_in8_out4"]
+            self.assertEqual(case["throughput"]["duration_seconds"], 1.0)
+            self.assertIsNone(case["memory"]["peak_device_used_bytes"])
+            self.assertEqual(case["memory"]["peak_process_rss_bytes"], 500)
+
     def test_profile_non_streaming_without_usage_records_estimated_tokens(
         self,
     ) -> None:
@@ -443,6 +518,49 @@ class InferenceProfileTests(unittest.TestCase):
                 self.assertEqual(len(measured), 2)
                 self.assertTrue(all(record["status"] == "error" for record in measured))
 
+    def test_profile_marks_session_incomplete_when_analysis_fails(self) -> None:
+        with _fake_server() as endpoint:
+            with tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "infer.jsonl"
+                profiler = InferenceProfiler(
+                    ProfileConfig(
+                        endpoint=endpoint,
+                        model="fake-model",
+                        concurrency=(1,),
+                        input_tokens=(8,),
+                        output_tokens=(4,),
+                        request_count=1,
+                        output_path=str(output),
+                        system_sampler="none",
+                        tokenizer="none",
+                    )
+                )
+
+                with mock.patch(
+                    "stormlog.infer.profile.analyze_inference_events",
+                    side_effect=ValueError("analysis failed"),
+                ):
+                    with self.assertRaisesRegex(ValueError, "analysis failed"):
+                        profiler.run()
+
+                records = [
+                    json.loads(line)
+                    for line in output.read_text(encoding="utf-8").splitlines()
+                ]
+                sessions = [
+                    record
+                    for record in records
+                    if record.get("event_type") == "infer.session"
+                ]
+                self.assertEqual(sessions[0]["status"], "running")
+                self.assertEqual(sessions[-1]["status"], "incomplete")
+                self.assertFalse(
+                    any(
+                        record.get("event_type") == "infer.summary"
+                        for record in records
+                    )
+                )
+
     def test_requested_concurrency_sets_request_executor_capacity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "infer.jsonl"
@@ -510,6 +628,58 @@ class InferenceProfileTests(unittest.TestCase):
             self.assertEqual(exit_code, 0)
             report = json.loads(report_path.read_text(encoding="utf-8"))
             self.assertEqual(report["summary"]["total_requests"], 1)
+
+    def test_infer_cli_suppresses_broken_pipe_errors(self) -> None:
+        stderr = io.StringIO()
+        with mock.patch(
+            "stormlog.infer.cli.cmd_analyze",
+            side_effect=BrokenPipeError,
+        ):
+            with contextlib.redirect_stderr(stderr):
+                exit_code = infer_main(["analyze", "artifact.jsonl"])
+
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(stderr.getvalue(), "")
+
+    def test_openai_client_rejects_non_http_endpoints(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError, "endpoint must use http:// or https://"
+        ):
+            OpenAIChatCompletionsClient(
+                endpoint="file:///tmp/secret",
+                model="fake-model",
+                timeout_seconds=1.0,
+                api_key="secret",
+            )
+
+    def test_nvidia_sampler_returns_none_when_command_raises(self) -> None:
+        sampler = NvidiaSmiSampler()
+        with mock.patch(
+            "stormlog.infer.samplers.subprocess.run",
+            side_effect=FileNotFoundError,
+        ):
+            self.assertIsNone(sampler.sample(session_id="s1"))
+
+    def test_nvidia_sampler_selects_matching_device_id(self) -> None:
+        sampler = NvidiaSmiSampler(device_id=1)
+        result = SimpleNamespace(
+            returncode=0,
+            stdout=(
+                "3, GPU-3, 40000, 1000, 39000, 7\n" "1, GPU-1, 20000, 3000, 17000, 42\n"
+            ),
+        )
+        with mock.patch(
+            "stormlog.infer.samplers.subprocess.run",
+            return_value=result,
+        ):
+            sample = sampler.sample(session_id="s1")
+
+        self.assertIsNotNone(sample)
+        assert sample is not None
+        self.assertEqual(sample.device_id, 1)
+        self.assertEqual(sample.device_name, "GPU-1")
+        self.assertEqual(sample.device_used_bytes, 3000 * 1024 * 1024)
+        self.assertEqual(sample.gpu_utilization_percent, 42.0)
 
 
 class _BlockingClient:

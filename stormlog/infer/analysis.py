@@ -100,23 +100,18 @@ def _summarize_requests(
     first_chunk = _number_values(requests, "first_chunk_latency_ms")
     output_tokens = sum(_int_value(record.get("output_tokens")) for record in requests)
     total_tokens = sum(_int_value(record.get("total_tokens")) for record in requests)
-    started = [_int_value(record.get("started_at_ns")) for record in requests]
-    ended = [_int_value(record.get("ended_at_ns")) for record in requests]
+    request_window = _request_time_window(requests)
     duration_seconds = (
-        max(max(ended) - min(started), 0) / 1_000_000_000 if started else 0
+        max(request_window[1] - request_window[0], 0) / 1_000_000_000
+        if request_window is not None
+        else 0.0
     )
     request_count = len(requests)
     output_tps = output_tokens / duration_seconds if duration_seconds > 0 else 0.0
     total_tps = total_tokens / duration_seconds if duration_seconds > 0 else 0.0
     request_rate = request_count / duration_seconds if duration_seconds > 0 else 0.0
-    peak_used = max(
-        (
-            _int_value(sample.get("device_used_bytes"))
-            for sample in samples
-            if sample.get("device_used_bytes") is not None
-        ),
-        default=None,
-    )
+    peak_device_used = _peak_sample_value(samples, "device_used_bytes")
+    peak_process_rss = _peak_sample_value(samples, "process_rss_bytes")
     return {
         "request_count": request_count,
         "latency_ms": {
@@ -146,7 +141,8 @@ def _summarize_requests(
             ),
         },
         "memory": {
-            "peak_device_used_bytes": peak_used,
+            "peak_device_used_bytes": peak_device_used,
+            "peak_process_rss_bytes": peak_process_rss,
         },
     }
 
@@ -155,27 +151,41 @@ def _samples_for_request_window(
     samples: list[dict[str, Any]],
     requests: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    started = [
-        _int_value(record.get("started_at_ns"))
-        for record in requests
-        if _is_number(record.get("started_at_ns"))
-    ]
-    ended = [
-        _int_value(record.get("ended_at_ns"))
-        for record in requests
-        if _is_number(record.get("ended_at_ns"))
-    ]
-    if not started or not ended:
+    request_window = _request_time_window(requests)
+    if request_window is None:
         return []
 
-    start_ns = min(started)
-    end_ns = max(ended)
+    start_ns, end_ns = request_window
     return [
         sample
         for sample in samples
         if _is_number(sample.get("timestamp_ns"))
         and start_ns <= _int_value(sample.get("timestamp_ns")) <= end_ns
     ]
+
+
+def _request_time_window(requests: list[dict[str, Any]]) -> tuple[int, int] | None:
+    bounds: list[tuple[int, int]] = []
+    for record in requests:
+        started_at = record.get("started_at_ns")
+        ended_at = record.get("ended_at_ns")
+        if not _is_number(started_at) or not _is_number(ended_at):
+            continue
+        bounds.append((_int_value(started_at), _int_value(ended_at)))
+    if not bounds:
+        return None
+    return min(start for start, _end in bounds), max(end for _start, end in bounds)
+
+
+def _peak_sample_value(samples: list[dict[str, Any]], field: str) -> int | None:
+    return max(
+        (
+            _int_value(sample.get(field))
+            for sample in samples
+            if _is_number(sample.get(field))
+        ),
+        default=None,
+    )
 
 
 def _number_values(records: Iterable[dict[str, Any]], field: str) -> list[float]:

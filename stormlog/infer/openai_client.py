@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -37,6 +38,7 @@ class OpenAIChatCompletionsClient:
         api_key: str | None = None,
         max_tokens_field: Literal["max_tokens", "max_completion_tokens"] = "max_tokens",
     ) -> None:
+        _validate_http_endpoint(endpoint)
         self.endpoint = endpoint
         self.model = model
         self.timeout_seconds = timeout_seconds
@@ -67,6 +69,7 @@ class OpenAIChatCompletionsClient:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
 
+        _validate_http_endpoint(self.endpoint)
         request = urllib.request.Request(
             self.endpoint,
             data=body,
@@ -206,3 +209,9 @@ def _first_choice(payload: Any) -> dict[str, Any]:
         return {}
     first = choices[0]
     return first if isinstance(first, dict) else {}
+
+
+def _validate_http_endpoint(endpoint: str) -> None:
+    parsed = urllib.parse.urlparse(endpoint)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("endpoint must use http:// or https://")

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import importlib
+import logging
 from dataclasses import dataclass
 from typing import Protocol
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -107,13 +110,13 @@ def build_token_counter(
             model=resolved_model,
             encoding_name=tiktoken_encoding,
         )
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("tiktoken unavailable in auto mode: %s", exc)
 
     try:
         return TransformersTokenCounter(model=resolved_model)
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.debug("transformers unavailable in auto mode: %s", exc)
 
     if strict:
         raise RuntimeError("No configured tokenizer is available")

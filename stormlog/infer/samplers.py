@@ -56,41 +56,52 @@ class NvidiaSmiSampler:
         self.device_id = device_id
 
     def sample(self, *, session_id: str) -> InferenceSystemSample | None:
-        result = subprocess.run(
-            [
-                "nvidia-smi",
-                (
-                    "--query-gpu=index,name,memory.total,memory.used,"
-                    "memory.free,utilization.gpu"
-                ),
-                "--format=csv,noheader,nounits",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=2,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "nvidia-smi",
+                    (
+                        "--query-gpu=index,name,memory.total,memory.used,"
+                        "memory.free,utilization.gpu"
+                    ),
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired):
+            return None
         if result.returncode != 0:
             return None
-        lines = [line for line in result.stdout.splitlines() if line.strip()]
-        if self.device_id >= len(lines):
-            return None
-        values = [value.strip() for value in lines[self.device_id].split(",")]
-        if len(values) < 6:
-            return None
-        total_mb = int(values[2])
-        used_mb = int(values[3])
-        free_mb = int(values[4])
-        return InferenceSystemSample(
-            session_id=session_id,
-            timestamp_ns=time.time_ns(),
-            sampler=self.name,
-            device_id=int(values[0]),
-            device_name=values[1],
-            device_total_bytes=total_mb * 1024 * 1024,
-            device_used_bytes=used_mb * 1024 * 1024,
-            device_free_bytes=free_mb * 1024 * 1024,
-            gpu_utilization_percent=float(values[5]),
-        )
+        for line in result.stdout.splitlines():
+            if not line.strip():
+                continue
+            values = [value.strip() for value in line.split(",")]
+            if len(values) < 6:
+                continue
+            try:
+                device_id = int(values[0])
+                total_mb = int(values[2])
+                used_mb = int(values[3])
+                free_mb = int(values[4])
+                gpu_utilization = float(values[5])
+            except ValueError:
+                continue
+            if device_id != self.device_id:
+                continue
+            return InferenceSystemSample(
+                session_id=session_id,
+                timestamp_ns=time.time_ns(),
+                sampler=self.name,
+                device_id=device_id,
+                device_name=values[1],
+                device_total_bytes=total_mb * 1024 * 1024,
+                device_used_bytes=used_mb * 1024 * 1024,
+                device_free_bytes=free_mb * 1024 * 1024,
+                gpu_utilization_percent=gpu_utilization,
+            )
+        return None
 
 
 def build_system_sampler(name: str) -> SystemSampler:
