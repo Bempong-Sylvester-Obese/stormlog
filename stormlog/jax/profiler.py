@@ -24,6 +24,7 @@ from typing import (
 )
 
 from .jax_env import configure_jax_logging
+from .utils import _device_zero
 
 configure_jax_logging()
 
@@ -42,13 +43,6 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 F = TypeVar("F", bound=Callable[..., Any])
-
-
-def _device_zero(device: Any) -> Any:
-    """Create a scalar zero on a device using JAX's runtime-supported keyword."""
-
-    zeros = cast(Callable[..., Any], jax.numpy.zeros)
-    return zeros((), device=device)
 
 
 # ---------------------------------------------------------------------------

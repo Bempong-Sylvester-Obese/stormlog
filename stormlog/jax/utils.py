@@ -10,7 +10,7 @@ import functools
 import logging
 import os
 import platform
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union, cast
 
 from .jax_env import configure_jax_logging
 
@@ -36,6 +36,13 @@ except ImportError:
     psutil = None
 
 logger = logging.getLogger(__name__)
+
+
+def _device_zero(device: Any) -> Any:
+    """Create a scalar zero on a device using JAX's runtime-supported keyword."""
+
+    zeros = cast(Callable[..., Any], jax.numpy.zeros)
+    return zeros((), device=device)
 
 
 @functools.lru_cache(maxsize=1)

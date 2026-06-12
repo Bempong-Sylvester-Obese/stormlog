@@ -18,7 +18,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional, cast
+from typing import Any, Callable, Dict, Iterator, List, Optional
 
 from stormlog.collector_health import (
     COLLECTOR_HEALTH_HEALTHY,
@@ -50,6 +50,7 @@ from stormlog.telemetry import (
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 from .jax_env import configure_jax_logging
+from .utils import _device_zero
 
 configure_jax_logging()
 
@@ -66,13 +67,6 @@ except ImportError:
     psutil = None
 
 logger = logging.getLogger(__name__)
-
-
-def _device_zero(device: Any) -> Any:
-    """Create a scalar zero on a device using JAX's runtime-supported keyword."""
-
-    zeros = cast(Callable[..., Any], jax.numpy.zeros)
-    return zeros((), device=device)
 
 
 @dataclass
