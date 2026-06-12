@@ -30,9 +30,10 @@ def test_all_extra_covers_every_runtime_extra() -> None:
         | set(extras["infer-tokenizers"])
         | set(extras["tui"])
         | set(extras["jax"])
+        | set(extras["wandb"])
     )
 
     assert expected.issubset(set(extras["all"])), (
         "The all extra must cover every user-facing runtime extra "
-        "(viz, torch, tf, infer-tokenizers, tui, jax)."
+        "(viz, torch, tf, infer-tokenizers, tui, jax, wandb)."
     )
