@@ -9,16 +9,17 @@ Use the smallest install that matches your workflow, then validate the console s
 ## Install name vs import names
 
 Install the distribution as `stormlog`, then import the Python APIs from
-`stormlog` or `stormlog.tensorflow`:
+`stormlog`, `stormlog.tensorflow`, or `stormlog.jax`:
 
 | Task | Use |
 | --- | --- |
 | Install from PyPI | `pip install stormlog` |
-| Launch the TUI | `stormlog` |
+| Launch the TUI | `stormlog` or `stormlog tui` |
+| Profile OpenAI-compatible inference | `stormlog infer profile` |
 | Import PyTorch APIs | `from stormlog import GPUMemoryProfiler, MemoryTracker` |
 | Import TensorFlow APIs | `from stormlog.tensorflow import TFMemoryProfiler` |
 | Import JAX APIs | `from stormlog.jax import JAXMemoryProfiler` |
-| Run CLI automation | `gpumemprof`, `tfmemprof`, or `jaxmemprof` |
+| Run framework memory CLI automation | `gpumemprof`, `tfmemprof`, or `jaxmemprof` |
 
 ### Core package
 
@@ -54,6 +55,21 @@ pip install "stormlog[tui,torch]"
 
 Installs the Textual stack plus the current PyTorch runtime dependency required by TUI startup. The `stormlog` console script is declared by the package; these extras make the app runnable.
 
+The `stormlog` command remains TUI-first: running it with no arguments launches
+the TUI. Use `stormlog query ...` for local artifact queries and
+`stormlog infer ...` for OpenAI-compatible inference profiling.
+
+### Inference tokenizer extras
+
+```bash
+pip install "stormlog[infer-tokenizers]"
+```
+
+Core `stormlog infer profile` uses the standard library HTTP stack and can run
+without tokenizer packages. Install this extra when you want `tiktoken` or
+`transformers` fallback token counts for endpoints that do not return usage
+metadata.
+
 ### Framework extras
 
 ```bash
@@ -63,7 +79,8 @@ pip install "stormlog[jax]"
 pip install "stormlog[all]"
 ```
 
-`stormlog[all]` installs every runtime extra: `viz`, `tui`, `torch`, `tf`, and `jax`.
+`stormlog[all]` installs every runtime extra: `viz`, `tui`, `torch`, `tf`,
+`jax`, `infer-tokenizers`, and W&B.
 
 ## Source checkout
 
@@ -120,6 +137,14 @@ If you installed the TUI dependencies:
 
 ```bash
 stormlog
+stormlog tui
+```
+
+### Inference verification
+
+```bash
+stormlog infer --help
+stormlog infer profile --help
 ```
 
 If TUI dependencies are missing after a source checkout, reinstall with:
@@ -157,11 +182,24 @@ gpumemprof --help
 
 ### `stormlog: command not found`
 
+If you're in a source checkout:
+
 ```bash
-pip install -e ".[tui,torch]"
+pip install -e .
 hash -r
-stormlog
+stormlog --help
 ```
+
+If you installed from PyPI instead:
+
+```bash
+pip install stormlog
+hash -r
+stormlog --help
+```
+
+Install `stormlog[tui,torch]` as well if you want `stormlog` with no
+arguments to launch the TUI successfully.
 
 ### Missing framework imports
 
@@ -177,7 +215,8 @@ pip install "stormlog[jax]"
 
 1. Read the [Usage Guide](usage.md) for the Python API and CLI-first workflow.
 2. Read the [CLI Guide](cli.md) if you need telemetry, plots, or diagnose bundles.
-3. Read the [TUI Guide](tui.md) if you want an interactive terminal workflow.
+3. Read the [Inference Profiling Guide](inference.md) if you profile serving endpoints.
+4. Read the [TUI Guide](tui.md) if you want an interactive terminal workflow.
 
 ---
 

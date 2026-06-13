@@ -10,8 +10,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from . import query as query_api
-
 
 @dataclass(frozen=True)
 class _OutputMode:
@@ -27,6 +25,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
+
+    from . import query as query_api
 
     store = query_api.open(args.paths)
     output_mode = _OutputMode(

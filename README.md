@@ -14,7 +14,11 @@
   <em>Current Overview tab from the shipped Textual interface.</em>
 </p>
 
-Stormlog is a memory-profiling toolkit for day-to-day PyTorch and TensorFlow work. It combines Python APIs, CLI commands, and a Textual TUI so you can move from "what is using memory?" to saved artifacts and shareable diagnostics without switching tools.
+Stormlog is a memory-profiling and inference-profiling toolkit for day-to-day
+PyTorch, TensorFlow, JAX, and OpenAI-compatible serving work. It combines
+Python APIs, CLI commands, and a Textual TUI so you can move from "what is
+using memory?" or "what is my endpoint doing under load?" to saved artifacts
+and shareable diagnostics without switching tools.
 
 Long-running `track` and `diagnose` flows are session-aware, so one capture can
 be reconstructed deterministically across sink segments, diagnose bundles, and
@@ -46,23 +50,30 @@ pip install "stormlog[viz]"
 pip install "stormlog[tui,torch]"
 pip install "stormlog[torch]"
 pip install "stormlog[tf]"
+pip install "stormlog[jax]"
+pip install "stormlog[infer-tokenizers]"
 pip install "stormlog[all]"
 ```
 
-`stormlog[all]` installs every runtime extra: visualization, TUI, PyTorch, and TensorFlow dependencies.
+`stormlog[all]` installs every runtime extra: visualization, TUI, PyTorch,
+TensorFlow, JAX, W&B, and inference tokenizer dependencies.
 
 ### Package and import names
 
 `stormlog` is the distribution name on PyPI and the primary Python import root.
-TensorFlow-specific APIs live under `stormlog.tensorflow`.
+TensorFlow-specific APIs live under `stormlog.tensorflow`; JAX-specific APIs
+live under `stormlog.jax`.
 
 | Task | Use |
 | --- | --- |
 | Install the package | `pip install stormlog` |
-| Launch the TUI | `stormlog` |
+| Launch the TUI | `stormlog` or `stormlog tui` |
+| Profile OpenAI-compatible inference | `stormlog infer profile` |
 | Import PyTorch APIs | `from stormlog import GPUMemoryProfiler, MemoryTracker` |
 | Import TensorFlow APIs | `from stormlog.tensorflow import TFMemoryProfiler` |
-| Run CLI automation | `gpumemprof` or `tfmemprof` |
+| Import JAX APIs | `from stormlog.jax import JAXMemoryProfiler` |
+| Query local artifacts | `stormlog query` |
+| Run framework memory CLI automation | `gpumemprof`, `tfmemprof`, or `jaxmemprof` |
 
 ### From source
 
@@ -96,10 +107,31 @@ gpumemprof diagnose --duration 0 --output /tmp/gpumemprof_diag
 
 tfmemprof info
 tfmemprof diagnose --duration 0 --output /tmp/tf_diag
+
+jaxmemprof info
+jaxmemprof diagnose --duration 0 --output /tmp/jax_diag
 ```
 
 If you reuse a sink directory across multiple runs, Stormlog separates those
 captures by `session_id` and defaults analysis to the newest clean session.
+
+### OpenAI-compatible inference workflow
+
+Use `stormlog infer` when you want client-observed latency, throughput,
+failure, token, and optional system telemetry from a Chat Completions endpoint:
+
+```bash
+stormlog infer profile \
+  --base-url http://localhost:8000/v1 \
+  --model Qwen/Qwen2.5-7B-Instruct \
+  --concurrency 1,4,8 \
+  --input-tokens 512,2048 \
+  --output-tokens 128,512 \
+  --requests 20 \
+  --output /tmp/stormlog_infer.jsonl
+
+stormlog infer analyze /tmp/stormlog_infer.jsonl
+```
 
 ### PyTorch API workflow
 

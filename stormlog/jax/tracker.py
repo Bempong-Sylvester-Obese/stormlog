@@ -50,6 +50,7 @@ from stormlog.telemetry import (
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 from .jax_env import configure_jax_logging
+from .utils import _device_zero
 
 configure_jax_logging()
 
@@ -199,7 +200,7 @@ class MemoryTracker:
         self._sync_sentinel: Any = None
         if self._device is not None:
             try:
-                self._sync_sentinel = jax.numpy.zeros((), device=self._device)
+                self._sync_sentinel = _device_zero(self._device)
             except Exception:
                 pass
 
@@ -359,7 +360,7 @@ class MemoryTracker:
         if self._sync_sentinel is not None:
             self._sync_sentinel.block_until_ready()
         elif hasattr(jax.numpy, "zeros"):
-            jax.numpy.zeros((), device=self._device).block_until_ready()
+            _device_zero(self._device).block_until_ready()
         stats = self._device.memory_stats()
         if stats:
             if "bytes_reserved" in stats:

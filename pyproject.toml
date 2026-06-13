@@ -54,6 +54,11 @@ torch = [
 tf = [
     "tensorflow>=2.4.0",
 ]
+infer-tokenizers = [
+    "tiktoken>=0.7",
+    "transformers>=4.40",
+    "sentencepiece>=0.2",
+]
 wandb = [
     "wandb>=0.19.0",
 ]
@@ -70,6 +75,9 @@ all = [
     "dash-bootstrap-components>=1.6.0",
     "torch>=1.8.0",
     "tensorflow>=2.4.0",
+    "tiktoken>=0.7",
+    "transformers>=4.40",
+    "sentencepiece>=0.2",
     "textual>=0.57.0",
     "pyfiglet>=1.0.2",
     "wandb>=0.19.0",
@@ -136,7 +144,7 @@ Repository = "https://github.com/Silas-Asamoah/stormlog.git"
 gpumemprof = "stormlog.cli:main"
 tfmemprof = "stormlog.tensorflow.cli:main"
 jaxmemprof = "stormlog.jax.cli:main"
-stormlog = "stormlog.tui:run_app"
+stormlog = "stormlog.entrypoint:main"
 
 [tool.setuptools_scm]
 fallback_version = "0.0.0"
