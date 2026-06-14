@@ -3,6 +3,10 @@
 from typing import Any
 from unittest import mock
 
+import pytest
+
+pytest.importorskip("jax")
+
 from stormlog.jax.profiler import MemorySnapshot, ProfileResult
 from stormlog.jax.visualizer import MemoryVisualizer
 

@@ -114,10 +114,14 @@ class ProfileResult:
 
     @property
     def memory_growth_rate(self) -> float:
-        """Memory growth rate in bytes/second."""
+        """Memory growth rate in MB/second."""
         if self.duration <= 0:
             return 0.0
-        return (self.peak_memory_bytes - self.min_memory_bytes) / self.duration
+        return (
+            (self.peak_memory_bytes - self.min_memory_bytes)
+            / (1024 * 1024)
+            / self.duration
+        )
 
 
 # ---------------------------------------------------------------------------
