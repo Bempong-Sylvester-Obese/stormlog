@@ -309,14 +309,71 @@ directory during the run:
 ```text
 telemetry_sink/
   manifest.json
+  rollups.json
   segment-000001.jsonl
   segment-000002.jsonl
 ```
 
 - each JSONL line is one canonical telemetry record
 - `manifest.json` is schema `v2` and tracks segment ordering, per-segment `session_id`, and a session ledger
+- `rollups.json` is schema `v1` and stores compact derived summaries for fast browsing
 - closed segments may be pruned when file-count or total-size retention limits are hit
 - on recovery, previously running sessions are closed as `interrupted` and new writes start in a new session
+
+## Compact rollup sidecars
+
+`rollups.json` is a derived sidecar for append-only sink directories. It is safe
+to delete and rebuild because raw JSONL segments and `manifest.json` remain the
+durable evidence. The sidecar schema is documented in
+`docs/schemas/telemetry_rollup_v1.schema.json`.
+
+Stormlog precomputes only low-cardinality summaries that are broadly useful for
+long-running monitor sessions:
+
+- session and rank peak allocator/device counters
+- per-rank hidden-gap first/latest/peak/delta/drift summaries
+- alert counts by severity and event type
+- collector degraded/recovered transition counts and degraded-time estimates
+- OOM marker counts promoted from telemetry metadata
+- fixed 60-second session windows with sample/event counts and peak counters
+
+Rollups are written after forced sink flush and terminal manifest persistence on
+`close()`. Sink recovery marks previously running sessions `interrupted` and
+rewrites the manifest, but it does not replay retained JSONL during construction;
+readers safely fall back to raw events when the sidecar is missing or stale. They
+are not computed on the append hot path or periodic flush path. Future
+post-processing commands can call the same builder to regenerate sidecars for
+existing sink directories.
+
+Rollup coverage is explicit. The sidecar records retained segment filenames,
+retained event counts, retained bytes, and sink prune diagnostics when available.
+If retention has removed older closed segments, the rollup describes only the raw
+segments still present in the sink. Interrupted and incomplete sessions keep
+their lifecycle status in each embedded session summary.
+
+Consumers must treat rollups as an optimization:
+
+- use a current rollup for overview tables, session comparison, and built-in
+  summaries that can be answered exactly from the sidecar
+- fall back to raw events for exact timelines, diagnostics drilldown, stale or
+  malformed sidecars, unsupported filters, and window/rank views that need more
+  detail than the sidecar carries
+
+The rebuild cost is `O(events)` CPU because the builder scans retained raw
+events once. Storage is `O(sessions + ranks + windows)`. A 24-hour session at
+the default 60-second window size produces about 1,440 window entries before
+session and rank metadata. This is intentionally much smaller than replaying
+every raw sample for browsing.
+
+Follow-on work:
+
+- expand TUI overview panels to prefer fresh rollups before raw replay
+- add a post-processing CLI for rebuilding rollups on existing sinks
+- benchmark rollup rebuild cost against large retained sink directories
+- evaluate optional DuckDB or persistent indexing only after real directory
+  sizes justify it
+- keep grouped issue state in a separate future sidecar instead of mixing it
+  into raw telemetry or rollups
 
 `load_telemetry_events()` can read:
 

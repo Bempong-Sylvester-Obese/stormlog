@@ -6,7 +6,7 @@ import builtins
 import csv
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,6 +46,20 @@ from .telemetry import (
     telemetry_event_from_record,
     telemetry_event_to_dict,
 )
+from .telemetry_classification import (
+    COLLECTOR_TRANSITION_TYPES,
+    event_backend,
+    event_severity,
+    is_alert_event,
+    is_collector_degradation_event,
+    is_oom_event,
+)
+from .telemetry_rollups import (
+    RankRollup,
+    SessionRollup,
+    TelemetryRollupFile,
+    read_telemetry_rollups,
+)
 from .telemetry_sink import (
     MANIFEST_FILENAME,
     SEGMENT_SUFFIX,
@@ -75,10 +89,7 @@ SummaryMetric = Literal[
 ]
 SummaryGroupBy = Literal["session", "session-rank", "rank", "status"]
 
-_ALERT_EVENT_TYPES = frozenset({"warning", "critical", "error"})
-_COLLECTOR_TRANSITION_TYPES = frozenset({"collector_degraded", "collector_recovered"})
 _TELEMETRY_FILE_NAME_PARTS = ("event", "events", "track", "telemetry")
-_COLLECTOR_DEGRADED_STATUSES = frozenset({"degraded", "unhealthy"})
 _GAP_ANALYSIS_THRESHOLDS = {
     "gap_ratio_threshold": 0.05,
     "gap_spike_zscore": 2.0,
@@ -641,11 +652,11 @@ class QueryStore:
 
         event_rows = self.query_events(EventFilter())
         for event_row in event_rows:
-            if _is_oom_event(event_row.event):
+            if is_oom_event(event_row.event):
                 _accumulate_oom_event_issue(accumulator, event_row)
-            elif _is_collector_degradation_event(event_row.event):
+            elif is_collector_degradation_event(event_row.event):
                 _accumulate_collector_issue(accumulator, event_row)
-            elif _is_alert_event(event_row.event):
+            elif is_alert_event(event_row.event):
                 _accumulate_alert_issue(accumulator, event_row)
 
         for source in self.catalog.sources:
@@ -696,6 +707,10 @@ class QueryStore:
             return self._summarize_interrupted_sessions_with_oom_bundles()
 
         resolved_group_by: SummaryGroupBy = group_by or "session"
+        rollup_rows = self._summarize_from_rollups(metric, resolved_group_by)
+        if rollup_rows is not None:
+            return rollup_rows
+
         events = self.query_events(EventFilter())
         if metric in {
             "peak_allocator_allocated_bytes",
@@ -709,13 +724,13 @@ class QueryStore:
             }[metric]
             return _summarize_peak(events, metric, field_name, resolved_group_by)
         if metric == "alert_count":
-            alert_events = [row for row in events if _is_alert_event(row.event)]
+            alert_events = [row for row in events if is_alert_event(row.event)]
             return _summarize_count(alert_events, metric, resolved_group_by)
         if metric == "collector_degradation_transitions":
             transition_events = [
                 row
                 for row in events
-                if row.event.event_type in _COLLECTOR_TRANSITION_TYPES
+                if row.event.event_type in COLLECTOR_TRANSITION_TYPES
             ]
             return _summarize_count(transition_events, metric, resolved_group_by)
         if metric == "hidden_memory_gap_growth":
@@ -768,6 +783,57 @@ class QueryStore:
                 )
             )
         return rows
+
+    def _summarize_from_rollups(
+        self,
+        metric: SummaryMetric,
+        group_by: SummaryGroupBy,
+    ) -> list[SummaryRow] | None:
+        rollups = self._fresh_sink_rollups()
+        if rollups is None:
+            return None
+        if metric in {
+            "peak_allocator_allocated_bytes",
+            "peak_allocator_reserved_bytes",
+            "peak_device_used_bytes",
+        }:
+            return _summarize_rollup_peaks(rollups, metric, group_by)
+        if metric == "alert_count" and group_by in {"session", "status"}:
+            return _summarize_rollup_session_counts(
+                rollups,
+                metric,
+                group_by,
+                lambda session: session.alerts.total_count,
+            )
+        if metric == "collector_degradation_transitions" and group_by in {
+            "session",
+            "status",
+        }:
+            return _summarize_rollup_session_counts(
+                rollups,
+                metric,
+                group_by,
+                lambda session: session.collector_health.transition_count,
+            )
+        if metric == "hidden_memory_gap_growth" and group_by in {
+            "rank",
+            "session-rank",
+        }:
+            return _summarize_rollup_hidden_gap_growth(rollups, group_by)
+        return None
+
+    def _fresh_sink_rollups(self) -> list[TelemetryRollupFile] | None:
+        if not self.catalog.sources:
+            return None
+        rollups: list[TelemetryRollupFile] = []
+        for source in self.catalog.sources:
+            if source.source_kind != "sink":
+                return None
+            rollup = read_telemetry_rollups(source.path)
+            if rollup is None:
+                return None
+            rollups.append(rollup)
+        return rollups
 
     def _load_sessions_for_source(
         self,
@@ -1093,7 +1159,7 @@ def _event_matches(row: EventRow, filters: EventFilter) -> bool:
         return False
     if filters.time_end_ns is not None and event.timestamp_ns > filters.time_end_ns:
         return False
-    if filters.has_alert is not None and (_is_alert_event(event) != filters.has_alert):
+    if filters.has_alert is not None and (is_alert_event(event) != filters.has_alert):
         return False
     metadata = event.metadata
     if filters.collector_health_status is not None and (
@@ -1143,44 +1209,6 @@ def _datetime_to_ns(value: datetime | None) -> int | None:
     return int(value.timestamp() * 1_000_000_000)
 
 
-def _is_alert_event(event: TelemetryEvent) -> bool:
-    if event.event_type in _ALERT_EVENT_TYPES:
-        return True
-    severity = event.metadata.get("severity")
-    return severity in {"warning", "critical", "error"}
-
-
-def _is_oom_event(event: TelemetryEvent) -> bool:
-    if event.event_type != "error":
-        return False
-    metadata = event.metadata
-    return any(key in metadata for key in ("oom_reason", "oom_dump_path"))
-
-
-def _is_collector_degradation_event(event: TelemetryEvent) -> bool:
-    metadata = event.metadata
-    health_status = normalize_text_dimension(metadata.get("collector_health_status"))
-    return (
-        event.event_type == "collector_degraded"
-        or health_status in _COLLECTOR_DEGRADED_STATUSES
-    )
-
-
-def _event_severity(event: TelemetryEvent) -> str:
-    metadata_severity = event.metadata.get("severity")
-    if isinstance(metadata_severity, str) and metadata_severity.strip():
-        return normalize_text_dimension(metadata_severity)
-    if event.event_type in {"critical", "error"}:
-        return "critical"
-    if event.event_type == "warning":
-        return "warning"
-    return "info"
-
-
-def _event_backend(event: TelemetryEvent) -> str:
-    return normalize_text_dimension(event.metadata.get("backend"))
-
-
 def _event_source_path(loaded: LoadedTelemetrySession, source: CatalogSource) -> str:
     if loaded.sources_loaded:
         return loaded.sources_loaded[0]
@@ -1198,6 +1226,149 @@ def _summary_group_key(
     if group_by == "status":
         return None, None, row.session_status
     return row.event.session_id, None, None
+
+
+def _summarize_rollup_peaks(
+    rollups: Sequence[TelemetryRollupFile],
+    metric: str,
+    group_by: SummaryGroupBy,
+) -> list[SummaryRow]:
+    field_name = {
+        "peak_allocator_allocated_bytes": "allocator_allocated_bytes",
+        "peak_allocator_reserved_bytes": "allocator_reserved_bytes",
+        "peak_device_used_bytes": "device_used_bytes",
+    }[metric]
+    best: dict[tuple[str | None, int | None, str | None], tuple[int, int | None]] = {}
+
+    for session in _rollup_sessions(rollups):
+        if group_by in {"rank", "session-rank"}:
+            for rank_rollup in session.ranks:
+                peak = getattr(rank_rollup.counters, field_name)
+                key = _rollup_rank_group_key(session, rank_rollup, group_by)
+                _observe_rollup_peak(best, key, peak.value, peak.timestamp_ns)
+            continue
+
+        peak = getattr(session.counters, field_name)
+        key = _rollup_session_group_key(session, group_by)
+        _observe_rollup_peak(best, key, peak.value, peak.timestamp_ns)
+
+    output: list[SummaryRow] = []
+    for key, (value, timestamp_ns) in sorted(
+        best.items(), key=lambda item: str(item[0])
+    ):
+        session_id, row_rank, status = key
+        output.append(
+            SummaryRow(
+                metric=metric,
+                group_by=group_by,
+                session_id=session_id,
+                rank=row_rank,
+                status=status,
+                value=value,
+                details={"timestamp_ns": timestamp_ns},
+            )
+        )
+    return output
+
+
+def _summarize_rollup_session_counts(
+    rollups: Sequence[TelemetryRollupFile],
+    metric: str,
+    group_by: SummaryGroupBy,
+    value_for_session: Callable[[SessionRollup], int],
+) -> list[SummaryRow]:
+    counts: dict[tuple[str | None, int | None, str | None], int] = defaultdict(int)
+    for session in _rollup_sessions(rollups):
+        value = value_for_session(session)
+        if value <= 0:
+            continue
+        counts[_rollup_session_group_key(session, group_by)] += value
+
+    output: list[SummaryRow] = []
+    for session_id, rank, status in sorted(counts, key=str):
+        output.append(
+            SummaryRow(
+                metric=metric,
+                group_by=group_by,
+                session_id=session_id,
+                rank=rank,
+                status=status,
+                value=counts[(session_id, rank, status)],
+            )
+        )
+    return output
+
+
+def _summarize_rollup_hidden_gap_growth(
+    rollups: Sequence[TelemetryRollupFile],
+    group_by: SummaryGroupBy,
+) -> list[SummaryRow] | None:
+    sessions = _rollup_sessions(rollups)
+    if group_by == "rank" and len(sessions) != 1:
+        return None
+
+    output: list[SummaryRow] = []
+    for session in sessions:
+        for rank in session.ranks:
+            if rank.hidden_gap_delta_bytes is None:
+                continue
+            session_id = (
+                session.session.session_id if group_by == "session-rank" else None
+            )
+            output.append(
+                SummaryRow(
+                    metric="hidden_memory_gap_growth",
+                    group_by=group_by,
+                    session_id=session_id,
+                    rank=rank.rank,
+                    value=rank.hidden_gap_delta_bytes,
+                    details={
+                        "first_gap_bytes": rank.hidden_gap_first_bytes,
+                        "latest_gap_bytes": rank.hidden_gap_latest_bytes,
+                        "peak_gap_bytes": rank.hidden_gap_peak_bytes,
+                        "sample_count": rank.sample_count,
+                    },
+                )
+            )
+    return sorted(output, key=lambda row: str((row.session_id, row.rank, row.status)))
+
+
+def _rollup_sessions(
+    rollups: Sequence[TelemetryRollupFile],
+) -> list[SessionRollup]:
+    return [session for rollup in rollups for session in rollup.sessions]
+
+
+def _rollup_session_group_key(
+    session: SessionRollup,
+    group_by: SummaryGroupBy,
+) -> tuple[str | None, int | None, str | None]:
+    if group_by == "status":
+        return None, None, session.session.status
+    return session.session.session_id, None, None
+
+
+def _rollup_rank_group_key(
+    session: SessionRollup,
+    rank: RankRollup,
+    group_by: SummaryGroupBy,
+) -> tuple[str | None, int | None, str | None]:
+    if group_by == "rank":
+        return None, rank.rank, None
+    return session.session.session_id, rank.rank, None
+
+
+def _observe_rollup_peak(
+    best: dict[tuple[str | None, int | None, str | None], tuple[int, int | None]],
+    key: tuple[str | None, int | None, str | None],
+    value: int | None,
+    timestamp_ns: int | None,
+) -> None:
+    if value is None:
+        return
+    existing = best.get(key)
+    if existing is None or value > existing[0]:
+        best[key] = (value, timestamp_ns)
 
 
 @dataclass
@@ -1334,7 +1505,7 @@ def _accumulate_oom_event_issue(
     fingerprint = IssueFingerprint(
         kind="oom",
         dimensions={
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "reason": reason,
         },
     )
@@ -1357,7 +1528,7 @@ def _accumulate_oom_event_issue(
         seen_ns=event.timestamp_ns,
         session_id=event.session_id,
         details={
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "reason": reason,
             "collector": event.collector,
             "device_id": event.device_id,
@@ -1383,7 +1554,7 @@ def _accumulate_collector_issue(
         kind="collector_degradation",
         dimensions={
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "health_status": health_status,
             "partial_fields": list(partial_fields),
             "error_stem": normalized_error_stem(last_error),
@@ -1416,7 +1587,7 @@ def _accumulate_collector_issue(
         session_id=event.session_id,
         details={
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "health_status": health_status,
             "partial_fields": list(partial_fields),
             "error_stem": normalized_error_stem(last_error),
@@ -1429,7 +1600,7 @@ def _accumulate_alert_issue(
     row: EventRow,
 ) -> None:
     event = row.event
-    severity = _event_severity(event)
+    severity = event_severity(event)
     category = categorize_alert_context(event.context)
     fingerprint = IssueFingerprint(
         kind="alert",
@@ -1437,7 +1608,7 @@ def _accumulate_alert_issue(
             "event_type": event.event_type,
             "severity": severity,
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "category": category,
         },
     )
@@ -1461,7 +1632,7 @@ def _accumulate_alert_issue(
         details={
             "event_type": event.event_type,
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "category": category,
         },
     )
@@ -1500,7 +1671,7 @@ def _accumulate_hidden_memory_issues(
                     else "unknown"
                 ),
                 "backend": (
-                    _event_backend(evidence_event)
+                    event_backend(evidence_event)
                     if evidence_event is not None
                     else "unknown"
                 ),

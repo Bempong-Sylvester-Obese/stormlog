@@ -162,7 +162,7 @@ _HEALTHY_COLLECTORS = [
 ]
 
 
-@pytest.mark.parametrize("collector", _DEGRADED_COLLECTORS)  # type: ignore[misc]
+@pytest.mark.parametrize("collector", _DEGRADED_COLLECTORS)  # type: ignore[misc, unused-ignore]
 def test_is_degraded_collector_true_for_known_degraded_strings(
     collector: str,
 ) -> None:
@@ -171,7 +171,7 @@ def test_is_degraded_collector_true_for_known_degraded_strings(
     assert fields["is_degraded_collector"] is True, collector
 
 
-@pytest.mark.parametrize("collector", _HEALTHY_COLLECTORS)  # type: ignore[misc]
+@pytest.mark.parametrize("collector", _HEALTHY_COLLECTORS)  # type: ignore[misc, unused-ignore]
 def test_is_degraded_collector_false_for_healthy_collectors(
     collector: str,
 ) -> None:
