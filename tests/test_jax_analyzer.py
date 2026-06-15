@@ -7,6 +7,7 @@ from unittest import mock
 import pytest
 
 pytest.importorskip("numpy")
+pytest.importorskip("jax")
 
 from stormlog.jax.analyzer import (
     MemoryAnalyzer,

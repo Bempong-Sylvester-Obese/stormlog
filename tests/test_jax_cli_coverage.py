@@ -80,6 +80,7 @@ def test_cmd_diagnose_success(capsys: Any, tmp_path: Any) -> None:
     config = mock.Mock()
     config.enabled = False
     with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
         mock.patch("stormlog.jax.cli.run_diagnose", return_value=(tmp_path, 2)),
     ):
@@ -210,6 +211,29 @@ def test_cmd_monitor_keyboard_interrupt(capsys: Any, tmp_path: Any) -> None:
 
         assert cli.cmd_monitor(args) == 0
         assert (tmp_path / "mon.json").exists()
+
+
+def test_cmd_monitor_uses_requested_interval(capsys: Any, tmp_path: Any) -> None:
+    args = argparse.Namespace(
+        interval=0.25,
+        duration=None,
+        threshold=100,
+        device=0,
+        output=str(tmp_path / "mon_interval.json"),
+        max_history=10000,
+    )
+    sleep_mock = mock.Mock(side_effect=KeyboardInterrupt)
+    with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
+        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
+        mock.patch(
+            "stormlog.jax.cli.MemoryTracker.get_current_memory", return_value=50.0
+        ),
+        mock.patch("time.sleep", sleep_mock),
+    ):
+        assert cli.cmd_monitor(args) == 0
+
+    sleep_mock.assert_called_once_with(0.25)
 
 
 def test_main_no_args() -> None:

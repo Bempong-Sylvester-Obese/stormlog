@@ -293,9 +293,8 @@ class JAXProfiler:
         if not JAX_AVAILABLE:
             raise ImportError("JAX is required for JAXProfiler.profile_training")
 
-        # Convert single-use iterators (like generators) to a list once
-        # so subsequent epochs can reuse the same data.
-        if iter(dataset) is dataset:
+        # Convert single-use iterators only when multiple epochs need replay.
+        if epochs > 1 and iter(dataset) is dataset:
             dataset = list(dataset)
 
         with self.profiler.profile_context("training"):
