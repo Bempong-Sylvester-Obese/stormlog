@@ -10,11 +10,12 @@ This guide documents the test layers that currently exist in the repo and the co
 python3 -m pip install -e ".[test]"
 ```
 
-Add framework extras when you want the full PyTorch or TensorFlow paths:
+Add framework extras when you want the full PyTorch, TensorFlow, or JAX paths:
 
 ```bash
 python3 -m pip install -e ".[torch]"
 python3 -m pip install -e ".[tf]"
+python3 -m pip install -e ".[jax]"
 python3 -m pip install -e ".[all]"
 ```
 
@@ -60,6 +61,12 @@ python3 -m pytest tests/ --ignore-glob="tests/test_tf*.py" -v -m "not tui_pilot 
 
 ```bash
 python3 -m pytest tests/ -o "python_files=test_tf*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty"
+```
+
+### JAX-oriented test slice
+
+```bash
+python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty"
 ```
 
 ## TUI test layers

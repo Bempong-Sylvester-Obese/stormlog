@@ -4,6 +4,10 @@ import time
 from typing import Any
 from unittest import mock
 
+import pytest
+
+pytest.importorskip("jax")
+
 from stormlog.jax.tracker import (
     COLLECTOR_HEALTH_HEALTHY,
     COLLECTOR_HEALTH_UNHEALTHY,

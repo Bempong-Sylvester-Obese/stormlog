@@ -33,7 +33,7 @@ def _compute_memory_stats(
     total_mem = 0
 
     for sample in profile_data.get("samples", []):
-        stack = sample["stack"][::-1]  # Root -> Leaf
+        stack = list(sample["stack"])  # Root -> leaf, as normalized by pprof_parser.
         if not stack:
             continue
 
