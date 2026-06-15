@@ -204,6 +204,81 @@ def test_query_issues_rejects_csv(
     assert "unrecognized arguments: --csv" in capsys.readouterr().err
 
 
+def test_query_correlate_json_output(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(path, [_event_record(timestamp_ns=100)])
+
+    assert query_main(["correlate", str(path), "--at-ns", "100", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["anchor"]["at_ns"] == 100
+    assert payload["evidence"][0]["kind"] == "telemetry_event"
+    assert payload["evidence"][0]["confidence"] == "low"
+
+
+def test_query_correlate_table_filters_kind_rank_and_scope(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(session_id="session-r0", timestamp_ns=100, rank=0),
+            _event_record(
+                session_id="session-r1",
+                timestamp_ns=101,
+                rank=1,
+                event_type="warning",
+            ),
+        ],
+    )
+
+    assert (
+        query_main(
+            [
+                "correlate",
+                str(path),
+                "--at-ns",
+                "100",
+                "--job-id",
+                "job-a",
+                "--scope",
+                "distributed",
+                "--rank",
+                "1",
+                "--kind",
+                "alert",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "Confidence" in output
+    assert "Alert: warning" in output
+    assert "Telemetry Event" not in output
+
+
+def test_query_correlate_requires_anchor(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(path, [_event_record(timestamp_ns=100)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        query_main(["correlate", str(path)])
+
+    assert excinfo.value.code == 2
+    assert "one of the arguments --at-ns --record-id is required" in (
+        capsys.readouterr().err
+    )
+
+
 def test_stormlog_dispatcher_preserves_no_arg_tui(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

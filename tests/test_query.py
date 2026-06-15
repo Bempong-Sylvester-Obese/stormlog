@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -65,13 +66,14 @@ def _write_oom_bundle(
     *,
     session_id: str,
     session_status: str | None = SESSION_STATUS_INTERRUPTED,
+    created_at_utc: str = "2026-05-12T00:00:00Z",
 ) -> Path:
     bundle = root / "oom_dump_20260512T000000Z_123_cuda_1"
     bundle.mkdir(parents=True)
     manifest = {
         "schema_version": 2,
         "bundle_name": bundle.name,
-        "created_at_utc": "2026-05-12T00:00:00Z",
+        "created_at_utc": created_at_utc,
         "reason": "message_pattern:out of memory",
         "backend": "cuda",
         "event_count": 2,
@@ -87,6 +89,92 @@ def _write_oom_bundle(
     (bundle / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     (bundle / "metadata.json").write_text(json.dumps(metadata), encoding="utf-8")
     return bundle
+
+
+def _iso_from_ns(timestamp_ns: int) -> str:
+    timestamp_s = timestamp_ns / 1_000_000_000
+    return (
+        datetime.fromtimestamp(timestamp_s, tz=timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
+
+
+def _write_diagnose_bundle(
+    root: Path,
+    *,
+    session_id: str,
+    started_at_ns: int,
+    ended_at_ns: int,
+) -> Path:
+    summary = create_session_summary(
+        source="stormlog.test.diagnose",
+        status=SESSION_STATUS_COMPLETED,
+        session_id=session_id,
+        started_at_ns=started_at_ns,
+        ended_at_ns=ended_at_ns,
+        host="host-a",
+        pid=123,
+        job_id="job-a",
+        rank=0,
+        local_rank=0,
+        world_size=2,
+    )
+    diagnose = root / "diagnose_bundle"
+    diagnose.mkdir()
+    (diagnose / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "created_iso": _iso_from_ns(started_at_ns),
+                "command_line": "gpumemprof diagnose",
+                "files": ["manifest.json"],
+                "exit_code": 0,
+                "risk_detected": False,
+                "session_id": session_id,
+                "session_status": SESSION_STATUS_COMPLETED,
+                "session": session_summary_to_dict(summary),
+            }
+        ),
+        encoding="utf-8",
+    )
+    return diagnose
+
+
+def _write_attachment_sidecar(
+    root: Path,
+    *,
+    session_id: str,
+    start_ns: int,
+    end_ns: int | None = None,
+) -> Path:
+    trace_path = root / "profiler.trace"
+    trace_path.write_text("trace", encoding="utf-8")
+    sidecar = root / "stormlog_attachments.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.attachments",
+                "attachments": [
+                    {
+                        "title": "Profiler trace",
+                        "kind": "profiler",
+                        "path": trace_path.name,
+                        "session_id": session_id,
+                        "job_id": "job-a",
+                        "rank": 0,
+                        "start_ns": start_ns,
+                        "end_ns": end_ns,
+                        "created_at_utc": _iso_from_ns(start_ns),
+                        "metadata": {"tool": "profiler"},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return sidecar
 
 
 def test_list_sessions_uses_sink_manifest_without_loading_events(
@@ -116,6 +204,207 @@ def test_list_sessions_uses_sink_manifest_without_loading_events(
     assert rows[0].status == SESSION_STATUS_COMPLETED
     assert rows[0].source_kind == "sink"
     assert rows[0].event_count == 1
+
+
+def test_correlate_collects_same_session_evidence_across_artifacts(
+    tmp_path: Path,
+) -> None:
+    base_ns = 1_800_000_000_000_000_000
+    session_id = "session-correlate"
+    sink_dir = tmp_path / "sink"
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=sink_dir,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.start_session(
+        create_session_summary(
+            source="stormlog.test",
+            status=SESSION_STATUS_COMPLETED,
+            session_id=session_id,
+            started_at_ns=base_ns,
+            host="host-a",
+            pid=123,
+            job_id="job-a",
+            rank=0,
+            local_rank=0,
+            world_size=2,
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id=session_id,
+            timestamp_ns=base_ns,
+            event_type="phase_enter",
+            metadata={
+                "backend": "cuda",
+                "phase_scope": {
+                    "action": "enter",
+                    "name": "forward",
+                    "path": ["train", "forward"],
+                    "depth": 2,
+                    "scope_id": "scope-1",
+                    "parent_scope_id": None,
+                    "thread_id": 1,
+                    "thread_name": "MainThread",
+                    "sequence": 1,
+                },
+            },
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id=session_id,
+            timestamp_ns=base_ns + 10,
+            event_type="warning",
+            context="High fragmentation: 40.0%",
+        )
+    )
+    sink.append(
+        _event_record(
+            session_id=session_id,
+            timestamp_ns=base_ns + 20,
+            event_type="phase_exit",
+            metadata={
+                "backend": "cuda",
+                "phase_scope": {
+                    "action": "exit",
+                    "name": "forward",
+                    "path": ["train", "forward"],
+                    "depth": 2,
+                    "scope_id": "scope-1",
+                    "parent_scope_id": None,
+                    "thread_id": 1,
+                    "thread_name": "MainThread",
+                    "sequence": 2,
+                },
+            },
+        )
+    )
+    sink.close()
+    _write_oom_bundle(
+        tmp_path,
+        session_id=session_id,
+        session_status=SESSION_STATUS_COMPLETED,
+        created_at_utc=_iso_from_ns(base_ns + 10),
+    )
+    _write_diagnose_bundle(
+        tmp_path,
+        session_id=session_id,
+        started_at_ns=base_ns,
+        ended_at_ns=base_ns + 30,
+    )
+    _write_attachment_sidecar(
+        tmp_path,
+        session_id=session_id,
+        start_ns=base_ns,
+        end_ns=base_ns + 30,
+    )
+
+    result = query_api.open([tmp_path]).correlate(
+        query_api.CorrelationFilter(
+            session_id=session_id,
+            at_ns=base_ns + 10,
+            window_ns=1_000,
+        )
+    )
+
+    kinds = {row.kind for row in result.evidence}
+    assert {
+        "telemetry_event",
+        "timeline_marker",
+        "alert",
+        "rollup_window",
+        "oom_bundle",
+        "diagnose_bundle",
+        "attachment",
+    }.issubset(kinds)
+    assert all(row.confidence in {"high", "medium"} for row in result.evidence)
+    attachment = next(row for row in result.evidence if row.kind == "attachment")
+    assert attachment.source_path.endswith("profiler.trace")
+
+
+def test_correlate_distributed_scope_uses_job_id_across_ranks(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [
+            _event_record(session_id="session-r0", timestamp_ns=100, rank=0),
+            _event_record(session_id="session-r1", timestamp_ns=105, rank=1),
+        ],
+    )
+
+    result = query_api.open([path]).correlate(
+        query_api.CorrelationFilter(
+            job_id="job-a",
+            scope="distributed",
+            at_ns=100,
+            window_ns=10,
+        )
+    )
+
+    event_rows = [row for row in result.evidence if row.kind == "telemetry_event"]
+    assert {row.rank for row in event_rows} == {0, 1}
+    assert {row.confidence for row in event_rows} <= {"high", "medium"}
+    assert any("same_job_distributed" in row.reasons for row in event_rows)
+
+
+def test_correlate_allows_low_confidence_time_only_matches(tmp_path: Path) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [_event_record(session_id="session-time-only", timestamp_ns=100)],
+    )
+
+    result = query_api.open([path]).correlate(
+        query_api.CorrelationFilter(at_ns=100, window_ns=0)
+    )
+
+    assert result.evidence
+    assert {row.confidence for row in result.evidence} == {"low"}
+    assert all(
+        "time_only_missing_shared_identifier" in row.reasons for row in result.evidence
+    )
+
+
+def test_attachment_sidecar_discovery_resolves_paths_and_reports_warnings(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    sidecar = _write_attachment_sidecar(
+        tmp_path,
+        session_id="session-attachment",
+        start_ns=100,
+    )
+    bad_sidecar_dir = tmp_path / "bad"
+    bad_sidecar_dir.mkdir()
+    (bad_sidecar_dir / "stormlog_attachments.json").write_text(
+        json.dumps({"schema_version": 1, "format": "wrong"}),
+        encoding="utf-8",
+    )
+
+    def _fail_load(*args: Any, **kwargs: Any) -> list[Any]:
+        raise AssertionError("attachment listing should not materialize telemetry")
+
+    monkeypatch.setattr(query_api, "load_telemetry_sessions", _fail_load)
+
+    store = query_api.open([tmp_path])
+    rows = store.list_attachments(
+        query_api.AttachmentFilter(session_id="session-attachment")
+    )
+
+    assert len(rows) == 1
+    assert rows[0].sidecar_path == str(sidecar)
+    assert rows[0].path is not None
+    assert rows[0].path.endswith("profiler.trace")
+    assert any(
+        "unrecognized attachment sidecar" in item.message
+        for item in store.catalog.warnings
+    )
 
 
 def test_list_sessions_discovers_sink_manifest_file(tmp_path: Path) -> None:
