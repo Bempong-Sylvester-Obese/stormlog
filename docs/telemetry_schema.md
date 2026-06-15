@@ -234,10 +234,11 @@ Each attachment includes:
 
 - `title`
 - `kind`
+- `attachment_id` for stable lifecycle-managed sidecars
 - `url` or `path`
 - `session_id`, `job_id`, and `rank` when known
 - `start_ns` and `end_ns` when the attachment is time-bounded
-- `created_at_utc`
+- `created_at_utc` and `updated_at_utc`
 - `metadata`
 
 Relative `path` values resolve against the sidecar directory. Stormlog records

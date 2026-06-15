@@ -40,6 +40,10 @@
           "type": "string",
           "minLength": 1
         },
+        "attachment_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
         "url": {
           "type": ["string", "null"],
           "minLength": 1
@@ -69,6 +73,9 @@
           "minimum": 0
         },
         "created_at_utc": {
+          "type": ["string", "null"]
+        },
+        "updated_at_utc": {
           "type": ["string", "null"]
         },
         "metadata": {

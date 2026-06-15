@@ -158,6 +158,7 @@ def _write_attachment_sidecar(
                 "format": "stormlog.attachments",
                 "attachments": [
                     {
+                        "attachment_id": "profiler-trace-1",
                         "title": "Profiler trace",
                         "kind": "profiler",
                         "path": trace_path.name,
@@ -167,6 +168,7 @@ def _write_attachment_sidecar(
                         "start_ns": start_ns,
                         "end_ns": end_ns,
                         "created_at_utc": _iso_from_ns(start_ns),
+                        "updated_at_utc": _iso_from_ns(start_ns),
                         "metadata": {"tool": "profiler"},
                     }
                 ],
@@ -324,6 +326,8 @@ def test_correlate_collects_same_session_evidence_across_artifacts(
     assert all(row.confidence in {"high", "medium"} for row in result.evidence)
     attachment = next(row for row in result.evidence if row.kind == "attachment")
     assert attachment.source_path.endswith("profiler.trace")
+    assert result.anchor["clock_domain"] == "unix_epoch_ns"
+    assert result.anchor["clock_normalization"] == "producer_emitted_epoch_ns"
 
 
 def test_correlate_distributed_scope_uses_job_id_across_ranks(
@@ -399,6 +403,8 @@ def test_attachment_sidecar_discovery_resolves_paths_and_reports_warnings(
 
     assert len(rows) == 1
     assert rows[0].sidecar_path == str(sidecar)
+    assert rows[0].attachment_id == "profiler-trace-1"
+    assert rows[0].updated_at_utc == rows[0].created_at_utc
     assert rows[0].path is not None
     assert rows[0].path.endswith("profiler.trace")
     assert any(

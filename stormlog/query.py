@@ -17,6 +17,8 @@ from .correlation import (
     ATTACHMENTS_FILENAME,
     ATTACHMENTS_FORMAT,
     ATTACHMENTS_SCHEMA_VERSION,
+    CLOCK_DOMAIN_UNIX_EPOCH_NS,
+    CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS,
     AttachmentFilter,
     CorrelationEvidence,
     CorrelationFilter,
@@ -969,6 +971,9 @@ class QueryStore:
                     "event_type": row.event.event_type,
                     "scope": filters.scope,
                     "window_ns": filters.window_ns,
+                    "clock_domain": CLOCK_DOMAIN_UNIX_EPOCH_NS,
+                    "clock_normalization": CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS,
+                    "clock_note": "correlation does not rewrite cross-host clocks",
                 }
             raise ValueError(f"record_id not found: {filters.record_id}")
         return {
@@ -983,6 +988,9 @@ class QueryStore:
             "event_type": None,
             "scope": filters.scope,
             "window_ns": filters.window_ns,
+            "clock_domain": CLOCK_DOMAIN_UNIX_EPOCH_NS,
+            "clock_normalization": CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS,
+            "clock_note": "correlation does not rewrite cross-host clocks",
         }
 
     def _correlation_evidence(
@@ -1259,6 +1267,7 @@ def _attachment_from_payload(
     return ExternalAttachment(
         title=title,
         kind=kind,
+        attachment_id=_string_or_none(payload.get("attachment_id")),
         url=url,
         path=resolved_path,
         session_id=_string_or_none(payload.get("session_id")),
@@ -1267,6 +1276,7 @@ def _attachment_from_payload(
         start_ns=start_ns,
         end_ns=end_ns,
         created_at_utc=_string_or_none(payload.get("created_at_utc")),
+        updated_at_utc=_string_or_none(payload.get("updated_at_utc")),
         metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
         sidecar_path=str(sidecar_path),
     )
@@ -1630,6 +1640,7 @@ def _attachment_correlation_evidence(
             CorrelationEvidence(
                 evidence_id=_evidence_id(
                     "attachment",
+                    attachment.attachment_id,
                     attachment.sidecar_path,
                     attachment.title,
                     attachment.url,

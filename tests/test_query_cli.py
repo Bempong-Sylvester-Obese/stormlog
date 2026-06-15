@@ -215,6 +215,7 @@ def test_query_correlate_json_output(
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["anchor"]["at_ns"] == 100
+    assert payload["anchor"]["clock_domain"] == "unix_epoch_ns"
     assert payload["evidence"][0]["kind"] == "telemetry_event"
     assert payload["evidence"][0]["confidence"] == "low"
 

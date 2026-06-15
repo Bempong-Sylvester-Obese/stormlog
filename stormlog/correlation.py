@@ -8,6 +8,8 @@ from typing import Any, Literal, Mapping, Sequence
 ATTACHMENTS_FILENAME = "stormlog_attachments.json"
 ATTACHMENTS_FORMAT = "stormlog.attachments"
 ATTACHMENTS_SCHEMA_VERSION = 1
+CLOCK_DOMAIN_UNIX_EPOCH_NS = "unix_epoch_ns"
+CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS = "producer_emitted_epoch_ns"
 DEFAULT_CORRELATION_WINDOW_NS = 60_000_000_000
 
 CorrelationScope = Literal["session", "distributed"]
@@ -108,6 +110,7 @@ class ExternalAttachment:
 
     title: str
     kind: str
+    attachment_id: str | None
     url: str | None
     path: str | None
     session_id: str | None
@@ -116,6 +119,7 @@ class ExternalAttachment:
     start_ns: int | None
     end_ns: int | None
     created_at_utc: str | None
+    updated_at_utc: str | None
     metadata: Mapping[str, Any]
     sidecar_path: str
 
@@ -124,6 +128,7 @@ class ExternalAttachment:
         return {
             "title": self.title,
             "kind": self.kind,
+            "attachment_id": self.attachment_id,
             "url": self.url,
             "path": self.path,
             "session_id": self.session_id,
@@ -132,6 +137,7 @@ class ExternalAttachment:
             "start_ns": self.start_ns,
             "end_ns": self.end_ns,
             "created_at_utc": self.created_at_utc,
+            "updated_at_utc": self.updated_at_utc,
             "metadata": dict(self.metadata),
             "sidecar_path": self.sidecar_path,
         }
@@ -141,6 +147,8 @@ __all__ = [
     "ATTACHMENTS_FILENAME",
     "ATTACHMENTS_FORMAT",
     "ATTACHMENTS_SCHEMA_VERSION",
+    "CLOCK_DOMAIN_UNIX_EPOCH_NS",
+    "CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS",
     "DEFAULT_CORRELATION_WINDOW_NS",
     "AttachmentFilter",
     "CorrelationEvidence",

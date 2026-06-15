@@ -72,6 +72,7 @@ Minimal shape:
   "format": "stormlog.attachments",
   "attachments": [
     {
+      "attachment_id": "wandb-run-123",
       "title": "W&B run",
       "kind": "experiment",
       "url": "https://wandb.ai/example/project/runs/run-123",
@@ -80,6 +81,7 @@ Minimal shape:
       "rank": 0,
       "start_ns": 1700000000000000000,
       "end_ns": 1700000060000000000,
+      "updated_at_utc": "2026-06-14T21:00:00Z",
       "metadata": {"owner": "training"}
     }
   ]
@@ -88,4 +90,6 @@ Minimal shape:
 
 Relative `path` values resolve against the sidecar directory. Each attachment
 must provide either `url` or `path`, and should provide identifiers and time
-bounds whenever possible.
+bounds whenever possible. `attachment_id` is optional but recommended for
+sidecars that are updated over time because it gives correlation output a stable
+evidence identity.
