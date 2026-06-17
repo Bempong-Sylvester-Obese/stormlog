@@ -59,13 +59,3 @@ def fake_jax_runtime(monkeypatch: pytest.MonkeyPatch) -> None:
             monkeypatch.setattr(module, "_jax", fake_jax)
         if hasattr(module, "JAX_AVAILABLE"):
             monkeypatch.setattr(module, "JAX_AVAILABLE", True)
-
-    # The current CLI binds fallback objects at import time. Keep its tests
-    # runtime-backed until the lazy-loader refactor removes those bindings.
-    cli_module = sys.modules.get("stormlog.jax.cli")
-    if cli_module is not None and hasattr(cli_module, "MemoryTracker"):
-        from stormlog.jax.diagnose import run_diagnose
-        from stormlog.jax.tracker import MemoryTracker
-
-        monkeypatch.setattr(cli_module, "MemoryTracker", MemoryTracker)
-        monkeypatch.setattr(cli_module, "run_diagnose", run_diagnose)
