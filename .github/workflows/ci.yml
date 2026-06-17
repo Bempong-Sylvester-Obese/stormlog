@@ -48,7 +48,7 @@ jobs:
                   elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
                       pip install tensorflow-cpu==2.15.0
                   elif [ "${{ matrix.framework }}" = "jax" ]; then
-                      pip install jax==0.4.20 jaxlib==0.4.20 'numpy<2.0.0'
+                      pip install jax==0.4.20 jaxlib==0.4.20 'numpy<2.0.0' 'protobuf>=6.31.1'
                   fi
 
             - name: Verify JAX runtime
