@@ -121,7 +121,11 @@ class ProfileResult:
 
     @property
     def memory_growth_rate(self) -> float:
-        """Memory growth rate in MB/second."""
+        """Memory growth rate in MB/second.
+
+        Stormlog versions before 0.3.6 reported this property in bytes/second;
+        0.3.6 and later report MB/second.
+        """
         if self.duration <= 0:
             return 0.0
         return (

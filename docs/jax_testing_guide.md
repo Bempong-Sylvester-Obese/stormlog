@@ -32,6 +32,7 @@ with profiler.profile_context("training"):
 
 results = profiler.get_results()
 print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+print(f"Memory growth rate: {results.memory_growth_rate:.2f} MB/s")
 print(f"Snapshots captured: {len(results.snapshots)}")
 ```
 

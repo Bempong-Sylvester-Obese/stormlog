@@ -96,6 +96,14 @@ Primary exported symbols:
 - `profile_function`
 - `profile_context`
 
+## JAX Result Units
+
+`stormlog.jax.profiler.ProfileResult.memory_growth_rate` reports memory growth
+in MB/second.
+
+Stormlog versions before `0.3.6` reported this property in bytes/second;
+`0.3.6` and later report MB/second.
+
 ## Usage Paths
 
 For task-oriented guidance:
