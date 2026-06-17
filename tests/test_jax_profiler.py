@@ -6,8 +6,6 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.profiler import (
     JAXMemoryProfiler,
     MemorySnapshot,
@@ -17,7 +15,13 @@ from stormlog.jax.profiler import (
     get_global_profiler,
     get_profile_summaries,
 )
-from tests.jax_test_helpers import jax_fixture, jax_mark
+from tests.jax_test_helpers import (  # noqa: F401
+    fake_jax_runtime,
+    jax_fixture,
+    jax_mark,
+)
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_fixture

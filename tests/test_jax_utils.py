@@ -4,8 +4,6 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.utils import (
     detect_jax_backend,
     format_memory,
@@ -15,6 +13,9 @@ from stormlog.jax.utils import (
     jax_is_available,
     validate_jax_environment,
 )
+from tests.jax_test_helpers import fake_jax_runtime  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 def test_jax_is_available() -> None:

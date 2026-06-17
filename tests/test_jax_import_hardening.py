@@ -26,19 +26,20 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
         # Test that lazy loading doesn't crash on import
         assert stormlog.jax.__name__ == "stormlog.jax"
 
-        try:
-            _ = stormlog.jax.MemoryTracker
-        except ImportError as exc:
-            assert "stormlog[jax]" in str(exc)
-        else:
-            raise AssertionError("Expected MemoryTracker symbol load to fail lazily without jax")
+        memory_tracker = stormlog.jax.MemoryTracker
+        memory_profiler = stormlog.jax.JAXMemoryProfiler
+        assert callable(memory_tracker)
+        assert callable(memory_profiler)
 
-        try:
-            _ = stormlog.jax.JAXMemoryProfiler
-        except ImportError as exc:
-            assert "stormlog[jax]" in str(exc)
-        else:
-            raise AssertionError("Expected JAXMemoryProfiler symbol load to fail lazily without jax")
+        for runtime_class in (memory_tracker, memory_profiler):
+            try:
+                runtime_class()
+            except ImportError as exc:
+                assert "stormlog[jax]" in str(exc)
+            else:
+                raise AssertionError(
+                    f"Expected {runtime_class.__name__} construction to fail without jax"
+                )
 
         print("ok")
         """

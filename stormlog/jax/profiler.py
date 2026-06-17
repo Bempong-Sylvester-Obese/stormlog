@@ -28,9 +28,16 @@ from .utils import _device_zero
 
 configure_jax_logging()
 
-import jax  # noqa: E402
+jax: Any
 
-JAX_AVAILABLE = True
+try:
+    import jax as _jax  # noqa: E402
+
+    jax = _jax
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+    jax = None
 
 try:
     import psutil
@@ -149,6 +156,11 @@ class JAXMemoryProfiler:
     """
 
     def __init__(self, device_index: int = 0) -> None:
+        if not JAX_AVAILABLE:
+            raise ImportError(
+                "JAX not available. Install with `pip install 'stormlog[jax]'`."
+            )
+
         self._device_index = device_index
         self._device: Any = None
         self._lock = threading.Lock()
@@ -162,13 +174,12 @@ class JAXMemoryProfiler:
         self._start_time: Optional[float] = None
         self._end_time: Optional[float] = None
 
-        if JAX_AVAILABLE:
-            try:
-                devices = jax.local_devices()
-                if device_index < len(devices):
-                    self._device = devices[device_index]
-            except Exception as exc:
-                logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
+        try:
+            devices = jax.local_devices()
+            if device_index < len(devices):
+                self._device = devices[device_index]
+        except Exception as exc:
+            logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
 
         # Cache a scalar sentinel for sync barriers
         self._sync_sentinel: Any = None

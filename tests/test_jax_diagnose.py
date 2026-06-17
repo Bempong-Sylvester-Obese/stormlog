@@ -8,15 +8,15 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.diagnose import (
     build_diagnostic_summary,
     collect_environment,
     run_diagnose,
     run_timeline_capture,
 )
-from tests.jax_test_helpers import jax_mark
+from tests.jax_test_helpers import fake_jax_runtime, jax_mark  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_mark

@@ -3,17 +3,21 @@
 from typing import Any
 from unittest import mock
 
-import pytest
-
-pytest.importorskip("jax")
 import numpy as np
+import pytest
 
 from stormlog.jax.context_profiler import (
     JAXProfiler,
     ProfiledFunction,
 )
 from stormlog.jax.profiler import JAXMemoryProfiler
-from tests.jax_test_helpers import jax_fixture, jax_mark
+from tests.jax_test_helpers import (  # noqa: F401
+    fake_jax_runtime,
+    jax_fixture,
+    jax_mark,
+)
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_fixture
