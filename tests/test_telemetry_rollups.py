@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import jsonschema  # type: ignore[import-untyped, unused-ignore]
+import pytest
 
 from stormlog.session import create_session_summary
 from stormlog.telemetry import LoadedTelemetrySession, telemetry_event_from_record
@@ -264,4 +265,21 @@ def test_read_telemetry_rollups_tolerates_missing_and_malformed(
 ) -> None:
     assert read_telemetry_rollups(tmp_path) is None
     (tmp_path / ROLLUP_FILENAME).write_text("{bad", encoding="utf-8")
+    assert read_telemetry_rollups(tmp_path) is None
+
+
+def test_read_telemetry_rollups_rejects_structurally_invalid_payload(
+    tmp_path: Path,
+) -> None:
+    rollups = build_telemetry_rollups(
+        [_loaded_session([_event_record(timestamp_ns=1)])],
+        _manifest(),
+    )
+    payload = telemetry_rollup_file_to_dict(rollups)
+    del payload["coverage"]["retained_event_count"]
+
+    with pytest.raises(ValueError):
+        telemetry_rollup_file_from_dict(payload)
+
+    (tmp_path / ROLLUP_FILENAME).write_text(json.dumps(payload), encoding="utf-8")
     assert read_telemetry_rollups(tmp_path) is None

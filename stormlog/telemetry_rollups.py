@@ -7,7 +7,7 @@ import os
 from collections import defaultdict
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Mapping, Sequence, cast
+from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
 from .session import SessionSummary, now_ns
@@ -427,40 +427,58 @@ def telemetry_rollup_file_from_dict(
 ) -> TelemetryRollupFile:
     """Deserialize a rollup payload from JSON."""
 
-    schema_version = int(payload.get("schema_version", 0))
+    schema_version = _required_int(payload, "schema_version", minimum=1)
     if schema_version != TELEMETRY_ROLLUP_SCHEMA_VERSION:
         raise ValueError("unsupported telemetry rollup schema_version")
     fmt = payload.get("format")
     if fmt != _ROLLUP_FORMAT:
         raise ValueError("unsupported telemetry rollup format")
-    coverage_payload = _mapping(payload.get("coverage"))
+    coverage_payload = _required_mapping(payload, "coverage")
     return TelemetryRollupFile(
         schema_version=schema_version,
         format=str(fmt),
-        generated_at_ns=int(payload.get("generated_at_ns", 0)),
-        source_manifest=_optional_string(payload.get("source_manifest")),
-        source_manifest_schema_version=_optional_int(
-            payload.get("source_manifest_schema_version")
+        generated_at_ns=_required_int(payload, "generated_at_ns", minimum=0),
+        source_manifest=_required_optional_string(payload, "source_manifest"),
+        source_manifest_schema_version=_required_optional_int(
+            payload,
+            "source_manifest_schema_version",
+            minimum=1,
         ),
-        window_duration_ns=int(payload.get("window_duration_ns", 0)),
+        window_duration_ns=_required_int(payload, "window_duration_ns", minimum=1),
         coverage=RollupCoverage(
-            retained_segment_filenames=[
-                str(item)
-                for item in _list(coverage_payload.get("retained_segment_filenames"))
-            ],
-            retained_segment_count=int(
-                coverage_payload.get("retained_segment_count", 0)
+            retained_segment_filenames=_required_string_list(
+                coverage_payload,
+                "retained_segment_filenames",
             ),
-            retained_event_count=int(coverage_payload.get("retained_event_count", 0)),
-            retained_bytes=int(coverage_payload.get("retained_bytes", 0)),
-            pruned_segment_count=_optional_int(
-                coverage_payload.get("pruned_segment_count")
+            retained_segment_count=_required_int(
+                coverage_payload,
+                "retained_segment_count",
+                minimum=0,
             ),
-            pruned_bytes=_optional_int(coverage_payload.get("pruned_bytes")),
+            retained_event_count=_required_int(
+                coverage_payload,
+                "retained_event_count",
+                minimum=0,
+            ),
+            retained_bytes=_required_int(
+                coverage_payload,
+                "retained_bytes",
+                minimum=0,
+            ),
+            pruned_segment_count=_required_optional_int(
+                coverage_payload,
+                "pruned_segment_count",
+                minimum=0,
+            ),
+            pruned_bytes=_required_optional_int(
+                coverage_payload,
+                "pruned_bytes",
+                minimum=0,
+            ),
         ),
         sessions=[
-            _session_rollup_from_dict(_mapping(item))
-            for item in _list(payload.get("sessions"))
+            _session_rollup_from_dict(_ensure_mapping(item, "sessions item"))
+            for item in _required_list(payload, "sessions")
         ],
     )
 
@@ -683,94 +701,127 @@ def _session_rollup_from_dict(payload: Mapping[str, Any]) -> SessionRollup:
     from .session import session_summary_from_dict
 
     return SessionRollup(
-        session=session_summary_from_dict(_mapping(payload.get("session"))),
-        event_count=int(payload.get("event_count", 0)),
-        sample_count=int(payload.get("sample_count", 0)),
-        first_timestamp_ns=_optional_int(payload.get("first_timestamp_ns")),
-        last_timestamp_ns=_optional_int(payload.get("last_timestamp_ns")),
-        source_count=int(payload.get("source_count", 0)),
-        sources_loaded=[str(item) for item in _list(payload.get("sources_loaded"))],
-        warnings=[str(item) for item in _list(payload.get("warnings"))],
-        counters=_counter_summary_from_dict(_mapping(payload.get("counters"))),
-        alerts=_alert_summary_from_dict(_mapping(payload.get("alerts"))),
-        collector_health=_collector_health_from_dict(
-            _mapping(payload.get("collector_health"))
+        session=session_summary_from_dict(_required_mapping(payload, "session")),
+        event_count=_required_int(payload, "event_count", minimum=0),
+        sample_count=_required_int(payload, "sample_count", minimum=0),
+        first_timestamp_ns=_required_optional_int(
+            payload,
+            "first_timestamp_ns",
+            minimum=0,
         ),
-        oom=_oom_summary_from_dict(_mapping(payload.get("oom"))),
+        last_timestamp_ns=_required_optional_int(
+            payload,
+            "last_timestamp_ns",
+            minimum=0,
+        ),
+        source_count=_required_int(payload, "source_count", minimum=0),
+        sources_loaded=_required_string_list(payload, "sources_loaded"),
+        warnings=_required_string_list(payload, "warnings"),
+        counters=_counter_summary_from_dict(_required_mapping(payload, "counters")),
+        alerts=_alert_summary_from_dict(_required_mapping(payload, "alerts")),
+        collector_health=_collector_health_from_dict(
+            _required_mapping(payload, "collector_health")
+        ),
+        oom=_oom_summary_from_dict(_required_mapping(payload, "oom")),
         ranks=[
-            _rank_rollup_from_dict(_mapping(item))
-            for item in _list(payload.get("ranks"))
+            _rank_rollup_from_dict(_ensure_mapping(item, "ranks item"))
+            for item in _required_list(payload, "ranks")
         ],
         windows=[
-            _window_rollup_from_dict(_mapping(item))
-            for item in _list(payload.get("windows"))
+            _window_rollup_from_dict(_ensure_mapping(item, "windows item"))
+            for item in _required_list(payload, "windows")
         ],
     )
 
 
 def _rank_rollup_from_dict(payload: Mapping[str, Any]) -> RankRollup:
     return RankRollup(
-        rank=int(payload.get("rank", 0)),
-        local_rank=int(payload.get("local_rank", 0)),
-        world_size=max(1, int(payload.get("world_size", 1))),
-        event_count=int(payload.get("event_count", 0)),
-        sample_count=int(payload.get("sample_count", 0)),
-        first_timestamp_ns=_optional_int(payload.get("first_timestamp_ns")),
-        last_timestamp_ns=_optional_int(payload.get("last_timestamp_ns")),
-        counters=_counter_summary_from_dict(_mapping(payload.get("counters"))),
-        hidden_gap_first_bytes=_optional_int(payload.get("hidden_gap_first_bytes")),
-        hidden_gap_latest_bytes=_optional_int(payload.get("hidden_gap_latest_bytes")),
-        hidden_gap_peak_bytes=_optional_int(payload.get("hidden_gap_peak_bytes")),
-        hidden_gap_delta_bytes=_optional_int(payload.get("hidden_gap_delta_bytes")),
-        hidden_gap_drift_bytes_per_second=_optional_float(
-            payload.get("hidden_gap_drift_bytes_per_second")
+        rank=_required_int(payload, "rank", minimum=0),
+        local_rank=_required_int(payload, "local_rank", minimum=0),
+        world_size=_required_int(payload, "world_size", minimum=1),
+        event_count=_required_int(payload, "event_count", minimum=0),
+        sample_count=_required_int(payload, "sample_count", minimum=0),
+        first_timestamp_ns=_required_optional_int(
+            payload,
+            "first_timestamp_ns",
+            minimum=0,
+        ),
+        last_timestamp_ns=_required_optional_int(
+            payload,
+            "last_timestamp_ns",
+            minimum=0,
+        ),
+        counters=_counter_summary_from_dict(_required_mapping(payload, "counters")),
+        hidden_gap_first_bytes=_required_optional_int(
+            payload,
+            "hidden_gap_first_bytes",
+        ),
+        hidden_gap_latest_bytes=_required_optional_int(
+            payload,
+            "hidden_gap_latest_bytes",
+        ),
+        hidden_gap_peak_bytes=_required_optional_int(
+            payload,
+            "hidden_gap_peak_bytes",
+        ),
+        hidden_gap_delta_bytes=_required_optional_int(
+            payload,
+            "hidden_gap_delta_bytes",
+        ),
+        hidden_gap_drift_bytes_per_second=_required_optional_float(
+            payload,
+            "hidden_gap_drift_bytes_per_second",
         ),
     )
 
 
 def _window_rollup_from_dict(payload: Mapping[str, Any]) -> WindowRollup:
     return WindowRollup(
-        index=int(payload.get("index", 0)),
-        start_ns=int(payload.get("start_ns", 0)),
-        end_ns=int(payload.get("end_ns", 0)),
-        event_count=int(payload.get("event_count", 0)),
-        sample_count=int(payload.get("sample_count", 0)),
-        rank_count=int(payload.get("rank_count", 0)),
-        counters=_counter_summary_from_dict(_mapping(payload.get("counters"))),
-        alert_count=int(payload.get("alert_count", 0)),
-        collector_transition_count=int(payload.get("collector_transition_count", 0)),
-        oom_count=int(payload.get("oom_count", 0)),
+        index=_required_int(payload, "index", minimum=0),
+        start_ns=_required_int(payload, "start_ns", minimum=0),
+        end_ns=_required_int(payload, "end_ns", minimum=0),
+        event_count=_required_int(payload, "event_count", minimum=0),
+        sample_count=_required_int(payload, "sample_count", minimum=0),
+        rank_count=_required_int(payload, "rank_count", minimum=0),
+        counters=_counter_summary_from_dict(_required_mapping(payload, "counters")),
+        alert_count=_required_int(payload, "alert_count", minimum=0),
+        collector_transition_count=_required_int(
+            payload,
+            "collector_transition_count",
+            minimum=0,
+        ),
+        oom_count=_required_int(payload, "oom_count", minimum=0),
     )
 
 
 def _counter_summary_from_dict(payload: Mapping[str, Any]) -> CounterSummary:
     return CounterSummary(
         allocator_allocated_bytes=_peak_value_from_dict(
-            _mapping(payload.get("allocator_allocated_bytes"))
+            _required_mapping(payload, "allocator_allocated_bytes")
         ),
         allocator_reserved_bytes=_peak_value_from_dict(
-            _mapping(payload.get("allocator_reserved_bytes"))
+            _required_mapping(payload, "allocator_reserved_bytes")
         ),
         device_used_bytes=_peak_value_from_dict(
-            _mapping(payload.get("device_used_bytes"))
+            _required_mapping(payload, "device_used_bytes")
         ),
     )
 
 
 def _peak_value_from_dict(payload: Mapping[str, Any]) -> PeakValue:
     return PeakValue(
-        value=_optional_int(payload.get("value")),
-        timestamp_ns=_optional_int(payload.get("timestamp_ns")),
-        rank=_optional_int(payload.get("rank")),
-        device_id=_optional_int(payload.get("device_id")),
+        value=_required_optional_int(payload, "value"),
+        timestamp_ns=_required_optional_int(payload, "timestamp_ns", minimum=0),
+        rank=_required_optional_int(payload, "rank", minimum=0),
+        device_id=_required_optional_int(payload, "device_id"),
     )
 
 
 def _alert_summary_from_dict(payload: Mapping[str, Any]) -> AlertSummary:
     return AlertSummary(
-        total_count=int(payload.get("total_count", 0)),
-        severity_counts=_int_mapping(payload.get("severity_counts")),
-        event_type_counts=_int_mapping(payload.get("event_type_counts")),
+        total_count=_required_int(payload, "total_count", minimum=0),
+        severity_counts=_required_int_mapping(payload, "severity_counts"),
+        event_type_counts=_required_int_mapping(payload, "event_type_counts"),
     )
 
 
@@ -778,19 +829,19 @@ def _collector_health_from_dict(
     payload: Mapping[str, Any],
 ) -> CollectorHealthSummary:
     return CollectorHealthSummary(
-        transition_count=int(payload.get("transition_count", 0)),
-        degraded_count=int(payload.get("degraded_count", 0)),
-        recovered_count=int(payload.get("recovered_count", 0)),
-        degraded_time_ns=int(payload.get("degraded_time_ns", 0)),
-        last_status=_optional_string(payload.get("last_status")),
+        transition_count=_required_int(payload, "transition_count", minimum=0),
+        degraded_count=_required_int(payload, "degraded_count", minimum=0),
+        recovered_count=_required_int(payload, "recovered_count", minimum=0),
+        degraded_time_ns=_required_int(payload, "degraded_time_ns", minimum=0),
+        last_status=_required_optional_string(payload, "last_status"),
     )
 
 
 def _oom_summary_from_dict(payload: Mapping[str, Any]) -> OomSummary:
     return OomSummary(
-        marker_count=int(payload.get("marker_count", 0)),
-        event_count=int(payload.get("event_count", 0)),
-        bundle_path_count=int(payload.get("bundle_path_count", 0)),
+        marker_count=_required_int(payload, "marker_count", minimum=0),
+        event_count=_required_int(payload, "event_count", minimum=0),
+        bundle_path_count=_required_int(payload, "bundle_path_count", minimum=0),
     )
 
 
@@ -837,44 +888,100 @@ def _max_optional(current: int | None, candidate: int) -> int:
     return candidate if current is None else max(current, candidate)
 
 
-def _mapping(value: object) -> Mapping[str, Any]:
-    return value if isinstance(value, Mapping) else {}
-
-
-def _list(value: object) -> list[object]:
-    return value if isinstance(value, list) else []
-
-
-def _optional_int(value: object) -> int | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return int(cast(Any, value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_float(value: object) -> float | None:
-    if value is None or isinstance(value, bool):
-        return None
-    try:
-        return float(cast(Any, value))
-    except (TypeError, ValueError):
-        return None
-
-
-def _optional_string(value: object) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-def _int_mapping(value: object) -> dict[str, int]:
+def _ensure_mapping(value: object, label: str) -> Mapping[str, Any]:
     if not isinstance(value, Mapping):
-        return {}
-    return {
-        str(key): int(item)
-        for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
-        if not isinstance(item, bool)
-    }
+        raise ValueError(f"{label} must be an object")
+    return value
+
+
+def _required_mapping(payload: Mapping[str, Any], key: str) -> Mapping[str, Any]:
+    if key not in payload:
+        raise ValueError(f"missing required {key}")
+    return _ensure_mapping(payload[key], key)
+
+
+def _required_list(payload: Mapping[str, Any], key: str) -> list[object]:
+    if key not in payload:
+        raise ValueError(f"missing required {key}")
+    value = payload[key]
+    if not isinstance(value, list):
+        raise ValueError(f"{key} must be a list")
+    return value
+
+
+def _required_string_list(payload: Mapping[str, Any], key: str) -> list[str]:
+    values = _required_list(payload, key)
+    strings: list[str] = []
+    for item in values:
+        if not isinstance(item, str):
+            raise ValueError(f"{key} must contain only strings")
+        strings.append(item)
+    return strings
+
+
+def _required_int(
+    payload: Mapping[str, Any],
+    key: str,
+    *,
+    minimum: int | None = None,
+) -> int:
+    if key not in payload:
+        raise ValueError(f"missing required {key}")
+    value = payload[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{key} must be an integer")
+    if minimum is not None and value < minimum:
+        raise ValueError(f"{key} must be >= {minimum}")
+    return int(value)
+
+
+def _required_optional_int(
+    payload: Mapping[str, Any],
+    key: str,
+    *,
+    minimum: int | None = None,
+) -> int | None:
+    if key not in payload:
+        raise ValueError(f"missing required {key}")
+    if payload[key] is None:
+        return None
+    return _required_int(payload, key, minimum=minimum)
+
+
+def _required_optional_float(
+    payload: Mapping[str, Any],
+    key: str,
+) -> float | None:
+    if key not in payload:
+        raise ValueError(f"missing required {key}")
+    value = payload[key]
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{key} must be a number or null")
+    return float(value)
+
+
+def _required_optional_string(
+    payload: Mapping[str, Any],
+    key: str,
+) -> str | None:
+    if key not in payload:
+        raise ValueError(f"missing required {key}")
+    value = payload[key]
+    if value is None or isinstance(value, str):
+        return value
+    raise ValueError(f"{key} must be a string or null")
+
+
+def _required_int_mapping(payload: Mapping[str, Any], key: str) -> dict[str, int]:
+    value = _required_mapping(payload, key)
+    result: dict[str, int] = {}
+    for item_key, item in sorted(value.items(), key=lambda entry: str(entry[0])):
+        if isinstance(item, bool) or not isinstance(item, int) or item < 0:
+            raise ValueError(f"{key} values must be non-negative integers")
+        result[str(item_key)] = item
+    return result
 
 
 __all__ = [

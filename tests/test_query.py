@@ -720,7 +720,18 @@ def test_query_summary_uses_fresh_sink_rollup_without_loading_events(
 
 def test_query_summary_falls_back_when_sink_rollup_is_stale(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
+    original_load = query_api.load_telemetry_sessions
+    load_calls = 0
+
+    def _counted_load(*args: Any, **kwargs: Any) -> list[Any]:
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(query_api, "load_telemetry_sessions", _counted_load)
+
     sink = AppendOnlyTelemetrySink(
         TelemetrySinkConfig(
             root_dir=tmp_path,
@@ -749,11 +760,23 @@ def test_query_summary_falls_back_when_sink_rollup_is_stale(
     assert len(rows) == 1
     assert rows[0].session_id == "session-stale"
     assert rows[0].value == 150
+    assert load_calls > 0
 
 
 def test_query_summary_falls_back_when_sink_rollup_is_malformed(
     tmp_path: Path,
+    monkeypatch: Any,
 ) -> None:
+    original_load = query_api.load_telemetry_sessions
+    load_calls = 0
+
+    def _counted_load(*args: Any, **kwargs: Any) -> list[Any]:
+        nonlocal load_calls
+        load_calls += 1
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(query_api, "load_telemetry_sessions", _counted_load)
+
     sink = AppendOnlyTelemetrySink(
         TelemetrySinkConfig(
             root_dir=tmp_path,
@@ -779,6 +802,7 @@ def test_query_summary_falls_back_when_sink_rollup_is_malformed(
     assert len(rows) == 1
     assert rows[0].session_id == "session-malformed"
     assert rows[0].value == 160
+    assert load_calls > 0
 
 
 def test_query_hidden_gap_rollup_order_matches_raw_fallback(
