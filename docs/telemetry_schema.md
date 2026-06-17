@@ -367,7 +367,7 @@ long-running monitor sessions:
 - alert counts by severity and event type
 - collector degraded/recovered transition counts and degraded-time estimates
 - OOM marker counts promoted from telemetry metadata
-- fixed 60-second session windows with sample/event counts and peak counters
+- fixed-duration session windows (60s by default) with sample/event counts and peak counters
 
 Rollups are written after forced sink flush and terminal manifest persistence on
 `close()`. Sink recovery marks previously running sessions `interrupted` and
