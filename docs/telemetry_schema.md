@@ -212,6 +212,38 @@ future sidecar or catalog layer. They can share the `TimelineMarker` shape, but
 they should use an annotation-specific `source` rather than mutating historical
 telemetry records.
 
+## External attachment sidecars
+
+Correlation queries can also discover local `stormlog_attachments.json`
+sidecars. These sidecars are not raw telemetry and do not change
+`TelemetryEvent v3`; they are catalog/query-layer metadata that links external
+evidence such as experiment-tracking URLs, profiler traces, or runbooks to a
+session/job/rank/time window.
+
+Schema file:
+
+- `docs/schemas/stormlog_attachments_v1.schema.json`
+
+Top-level fields:
+
+- `schema_version` (`1`)
+- `format` (`stormlog.attachments`)
+- `attachments`
+
+Each attachment includes:
+
+- `title`
+- `kind`
+- `attachment_id` for stable lifecycle-managed sidecars
+- `url` or `path`
+- `session_id`, `job_id`, and `rank` when known
+- `start_ns` and `end_ns` when the attachment is time-bounded
+- `created_at_utc` and `updated_at_utc`
+- `metadata`
+
+Relative `path` values resolve against the sidecar directory. Stormlog records
+remote URLs but does not fetch them during local correlation.
+
 ## Analyzer phase attribution payloads
 
 Analyze and Diagnostics outputs may also include a derived

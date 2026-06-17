@@ -333,6 +333,29 @@ stormlog query summary ./live_sink \
   --group-by session-rank
 ```
 
+Find correlated evidence around a timestamp or projected telemetry record:
+
+```bash
+stormlog query correlate ./live_sink ./artifacts \
+  --at-ns 1800000000000000010 \
+  --session-id session-123 \
+  --window-ns 60000000000 \
+  --json
+
+stormlog query correlate ./distributed_runs \
+  --at-ns 1800000000000000010 \
+  --job-id train-42 \
+  --scope distributed \
+  --kind alert \
+  --kind oom_bundle
+```
+
+Correlation returns nearby evidence with confidence reasons instead of only
+listing artifacts. Evidence can include telemetry events, timeline markers,
+alerts, OOM bundles, diagnose bundles, rollup windows, and local attachment
+sidecars. Use `--record-id` instead of `--at-ns` to anchor on a projected
+telemetry record id.
+
 Supported output formats:
 
 - `--table`: readable table output, used by default
