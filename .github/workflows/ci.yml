@@ -51,6 +51,24 @@ jobs:
                       pip install jax==0.4.20 jaxlib==0.4.20 'numpy<2.0.0'
                   fi
 
+            - name: Verify JAX runtime
+              if: matrix.framework == 'jax'
+              run: |
+                  python3 - <<'PY'
+                  import jax
+                  import jaxlib
+
+                  print(f"jax={jax.__version__}")
+                  print(f"jaxlib={jaxlib.__version__}")
+                  devices = jax.devices()
+                  if not devices:
+                      raise RuntimeError("JAX initialized without any devices")
+                  result = jax.numpy.arange(3) + 1
+                  result.block_until_ready()
+                  print(f"devices={devices}")
+                  print(f"result={result}")
+                  PY
+
             - name: Run tests
               run: |
                   if [ "${{ matrix.framework }}" = "pytorch" ]; then
@@ -58,7 +76,7 @@ jobs:
                   elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
                       python3 -m pytest tests/ -o "python_files=test_tf*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
                   elif [ "${{ matrix.framework }}" = "jax" ]; then
-                      python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
+                      python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -ra -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
                   fi
 
             - name: Upload coverage to Codecov
