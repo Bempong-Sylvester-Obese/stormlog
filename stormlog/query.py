@@ -1842,12 +1842,16 @@ def _evidence_distance_ns(
 ) -> int:
     if at_ns is None:
         return 0
-    starts = [
+    bounds = [
         value for value in (evidence.start_ns, evidence.end_ns) if value is not None
     ]
-    if not starts:
+    if not bounds:
         return 0
-    return min(abs(value - at_ns) for value in starts)
+    start_ns = min(bounds)
+    end_ns = max(bounds)
+    if start_ns <= at_ns <= end_ns:
+        return 0
+    return min(abs(start_ns - at_ns), abs(end_ns - at_ns))
 
 
 def _evidence_id(*parts: object) -> str:

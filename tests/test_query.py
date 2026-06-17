@@ -375,6 +375,36 @@ def test_correlate_allows_low_confidence_time_only_matches(tmp_path: Path) -> No
     )
 
 
+def test_correlate_sorts_interval_containing_anchor_as_nearest(
+    tmp_path: Path,
+) -> None:
+    session_id = "session-interval"
+    path = tmp_path / "track.json"
+    _write_json_events(
+        path,
+        [_event_record(session_id=session_id, timestamp_ns=110)],
+    )
+    _write_attachment_sidecar(
+        tmp_path,
+        session_id=session_id,
+        start_ns=50,
+        end_ns=150,
+    )
+
+    result = query_api.open([tmp_path]).correlate(
+        query_api.CorrelationFilter(
+            session_id=session_id,
+            at_ns=100,
+            window_ns=100,
+        )
+    )
+
+    assert [row.kind for row in result.evidence[:2]] == [
+        "attachment",
+        "telemetry_event",
+    ]
+
+
 def test_attachment_sidecar_discovery_resolves_paths_and_reports_warnings(
     tmp_path: Path,
     monkeypatch: Any,
