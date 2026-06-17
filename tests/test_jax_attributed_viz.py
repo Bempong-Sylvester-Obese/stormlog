@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Any, cast
 
 import stormlog.attributed_viz as attributed_viz
 import stormlog.cuda_native_debug as native_debug
 from stormlog.jax.attributed_viz import render_jax_attributed_html
+from stormlog.jax.pprof_parser import parse_jax_memory_profile
 
 
 def _extract_embedded_payload(html: str) -> dict[str, Any]:
@@ -481,11 +483,10 @@ def test_render_attributed_wandb_preview_labels_snapshot_only_view() -> None:
     assert "Trace Events" in html
 
 
-def test_render_jax_attributed_html_keeps_root_to_leaf_order() -> None:
-    html = render_jax_attributed_html(
-        {"samples": [{"stack": ["root", "caller", "leaf"], "values": [1, 100]}]},
-        output_path="",
-    )
+def test_jax_parser_renderer_keeps_root_to_leaf_order() -> None:
+    fixture_path = Path(__file__).parent / "fixtures" / "jax" / "root_caller_leaf.prof"
+    profile_data = parse_jax_memory_profile(str(fixture_path))
+    html = render_jax_attributed_html(profile_data, output_path="")
 
     leaf_row = re.search(
         r"<tr>\s*<td>\d+</td>\s*"
@@ -509,3 +510,4 @@ def test_render_jax_attributed_html_keeps_root_to_leaf_order() -> None:
     assert "100.00B" in leaf_row.group("flat")
     assert "100.00B" in leaf_row.group("cum")
     assert "0.00B" in root_row.group("flat")
+    assert "100.00B" in root_row.group("cum")
