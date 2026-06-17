@@ -230,7 +230,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     print(f"Sampling interval: {args.interval} seconds")
     print(
         f"Duration: {args.duration} seconds"
-        if args.duration
+        if args.duration is not None
         else "Duration: Indefinite"
     )
     if args.threshold:
@@ -251,7 +251,10 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
         start_time = time.time()
         while True:
-            if args.duration and (time.time() - start_time) >= args.duration:
+            if (
+                args.duration is not None
+                and (time.time() - start_time) >= args.duration
+            ):
                 break
 
             current_memory = tracker.get_current_memory()
@@ -260,7 +263,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
             )
 
             sleep_for = args.interval
-            if args.duration:
+            if args.duration is not None:
                 remaining = args.duration - (time.time() - start_time)
                 sleep_for = min(sleep_for, max(remaining, 0.0))
             time.sleep(sleep_for)
