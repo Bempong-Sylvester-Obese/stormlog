@@ -464,7 +464,7 @@ class AppendOnlyTelemetrySink:
             )
             write_telemetry_rollups(self.root_dir, rollups)
         except Exception as exc:
-            _LOGGER.warning("telemetry rollup write failed: %s", exc)
+            _LOGGER.warning("telemetry rollup write failed: %s", exc, exc_info=True)
 
     @staticmethod
     def _count_records(path: Path) -> int:
