@@ -10,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from .correlation import DEFAULT_CORRELATION_WINDOW_NS
+
 
 @dataclass(frozen=True)
 class _OutputMode:
@@ -116,6 +118,28 @@ def main(argv: Sequence[str] | None = None) -> int:
                 for row in store.summarize(args.metric, group_by=args.group_by)
             ]
             _emit_rows(rows, output_mode, _SUMMARY_COLUMNS)
+        elif args.command == "correlate":
+            result = store.correlate(
+                query_api.CorrelationFilter(
+                    session_id=args.session_id,
+                    job_id=args.job_id,
+                    rank=args.rank,
+                    scope=args.scope,
+                    at_ns=args.at_ns,
+                    record_id=args.record_id,
+                    window_ns=args.window_ns,
+                    kinds=tuple(args.kind or ()),
+                    limit=args.limit,
+                )
+            )
+            if output_mode.json:
+                print(json.dumps(result.as_dict(), indent=2, sort_keys=True))
+            else:
+                _emit_rows(
+                    [row.as_dict() for row in result.evidence],
+                    output_mode,
+                    _CORRELATION_COLUMNS,
+                )
     except BrokenPipeError:
         return 1
     except Exception as exc:
@@ -218,6 +242,43 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=["session", "session-rank", "rank", "status"],
         default=None,
     )
+
+    correlate = subparsers.add_parser(
+        "correlate",
+        help="Find evidence correlated with a timestamp or telemetry record",
+    )
+    _add_paths(correlate)
+    _add_output_flags(correlate, include_csv=False)
+    anchor = correlate.add_mutually_exclusive_group(required=True)
+    anchor.add_argument("--at-ns", type=int)
+    anchor.add_argument("--record-id")
+    correlate.add_argument("--session-id", "--session", dest="session_id")
+    correlate.add_argument("--job-id")
+    correlate.add_argument("--rank", type=int)
+    correlate.add_argument(
+        "--scope",
+        choices=["session", "distributed"],
+        default="session",
+    )
+    correlate.add_argument(
+        "--window-ns",
+        type=int,
+        default=DEFAULT_CORRELATION_WINDOW_NS,
+    )
+    correlate.add_argument(
+        "--kind",
+        action="append",
+        choices=[
+            "telemetry_event",
+            "timeline_marker",
+            "alert",
+            "oom_bundle",
+            "diagnose_bundle",
+            "rollup_window",
+            "attachment",
+        ],
+    )
+    correlate.add_argument("--limit", type=int)
     return parser
 
 
@@ -379,6 +440,19 @@ _SUMMARY_COLUMNS = (
     "latest_gap_bytes",
     "peak_gap_bytes",
     "sample_count",
+)
+_CORRELATION_COLUMNS = (
+    "confidence",
+    "kind",
+    "title",
+    "session_id",
+    "job_id",
+    "rank",
+    "start_ns",
+    "end_ns",
+    "source_kind",
+    "source_path",
+    "reasons",
 )
 
 

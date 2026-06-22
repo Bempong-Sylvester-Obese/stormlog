@@ -73,6 +73,38 @@ def test_jax_profiler_training(mock_device: mock.Mock) -> None:
 
 
 @jax_mark
+def test_jax_profiler_training_streams_single_epoch_generator(
+    mock_device: mock.Mock,
+) -> None:
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            events: list[str] = []
+
+            def dataset() -> Any:
+                for batch in [1, 2, 3]:
+                    events.append(f"yield_{batch}")
+                    yield batch
+
+            def train_step(batch: int) -> None:
+                events.append(f"step_{batch}")
+
+            jp.profile_training(train_step, dataset(), epochs=1)
+
+            assert events == [
+                "yield_1",
+                "step_1",
+                "yield_2",
+                "step_2",
+                "yield_3",
+                "step_3",
+            ]
+
+
+@jax_mark
 def test_jax_profiler_inference_iterable(mock_device: mock.Mock) -> None:
     with mock.patch(
         "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]

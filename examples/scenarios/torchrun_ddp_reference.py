@@ -15,7 +15,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Sequence, cast
 
 try:
     import torch
@@ -92,7 +92,7 @@ class TutorialNet(nn.Module):
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.net(inputs)
+        return cast(torch.Tensor, self.net(inputs))
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -267,7 +267,11 @@ def _train(
         },
     ):
         for epoch_index in range(args.epochs):
-            dataloader.sampler.set_epoch(epoch_index)
+            sampler = cast(
+                DistributedSampler[tuple[torch.Tensor, torch.Tensor]],
+                dataloader.sampler,
+            )
+            sampler.set_epoch(epoch_index)
             epoch_loss_total = 0.0
             step_count = 0
 

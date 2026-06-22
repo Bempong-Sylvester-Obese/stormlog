@@ -55,6 +55,10 @@ The row contracts are explicit and automation-friendly:
   `source_kind`, and `session_status`
 - `OOMBundleRow`: bundle path, creation time, backend, reason, event count,
   session linkage, and exception type/module
+- `ExternalAttachment`: local attachment sidecar rows that link URLs or local
+  paths to session/job/rank/time metadata
+- `CorrelationEvidence`: derived evidence rows with confidence and reasons for
+  investigation pivots around a timestamp or projected telemetry record
 - `StormlogIssue`: grouped issue fingerprint, state, hit count, first/last
   seen timestamps, affected sessions, representative evidence, and evidence
   links back to raw sessions/events/bundles
@@ -62,6 +66,14 @@ The row contracts are explicit and automation-friendly:
 
 The canonical telemetry schema remains the event contract. Query rows add
 provenance but do not mutate persisted telemetry records.
+
+`QueryStore.correlate(...)` is the first correlation-oriented query surface. It
+collects telemetry events, derived timeline markers, alerts, OOM bundles,
+diagnose manifests, fresh rollup windows, and `stormlog_attachments.json`
+sidecars into one evidence list. Correlation requires a timestamp anchor or a
+projected telemetry `record_id`; rows are ranked by identifier match, time-window
+overlap, and distance from the anchor. See [Correlation Workflow](correlation.md)
+for the matching contract.
 
 Issue grouping is also derived. `QueryStore.list_issues()` groups OOMs,
 collector degradation, alerts, and hidden-memory anomalies using deterministic

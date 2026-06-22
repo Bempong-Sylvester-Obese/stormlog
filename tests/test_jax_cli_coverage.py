@@ -80,6 +80,7 @@ def test_cmd_diagnose_success(capsys: Any, tmp_path: Any) -> None:
     config = mock.Mock()
     config.enabled = False
     with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
         mock.patch("stormlog.jax.cli.run_diagnose", return_value=(tmp_path, 2)),
     ):
@@ -210,6 +211,69 @@ def test_cmd_monitor_keyboard_interrupt(capsys: Any, tmp_path: Any) -> None:
 
         assert cli.cmd_monitor(args) == 0
         assert (tmp_path / "mon.json").exists()
+
+
+def test_cmd_monitor_uses_requested_interval(capsys: Any, tmp_path: Any) -> None:
+    args = argparse.Namespace(
+        interval=0.25,
+        duration=None,
+        threshold=100,
+        device=0,
+        output=str(tmp_path / "mon_interval.json"),
+        max_history=10000,
+    )
+    sleep_mock = mock.Mock(side_effect=KeyboardInterrupt)
+    with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
+        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
+        mock.patch(
+            "stormlog.jax.cli.MemoryTracker.get_current_memory", return_value=50.0
+        ),
+        mock.patch("time.sleep", sleep_mock),
+    ):
+        assert cli.cmd_monitor(args) == 0
+
+    sleep_mock.assert_called_once_with(0.25)
+
+
+def test_cmd_monitor_zero_duration_exits_without_sampling(capsys: Any) -> None:
+    args = argparse.Namespace(
+        interval=0.25,
+        duration=0,
+        threshold=100,
+        device=0,
+        output=None,
+        max_history=10000,
+    )
+    results = argparse.Namespace(
+        peak_memory_bytes=0,
+        average_memory_bytes=0,
+        duration=0,
+        memory_usage=[],
+        timestamps=[],
+        alert_count=0,
+    )
+    sleep_mock = mock.Mock()
+    get_current_memory = mock.Mock(return_value=50.0)
+    with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
+        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
+        mock.patch(
+            "stormlog.jax.cli.MemoryTracker.get_current_memory",
+            get_current_memory,
+        ),
+        mock.patch(
+            "stormlog.jax.cli.MemoryTracker.stop_tracking",
+            return_value=results,
+        ),
+        mock.patch("time.sleep", sleep_mock),
+    ):
+        assert cli.cmd_monitor(args) == 0
+
+    output = capsys.readouterr().out
+    assert "Duration: 0 seconds" in output
+    get_current_memory.assert_not_called()
+    sleep_mock.assert_not_called()
 
 
 def test_main_no_args() -> None:

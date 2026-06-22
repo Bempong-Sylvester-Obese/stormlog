@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from stormlog.telemetry import load_telemetry_sessions
+from stormlog.telemetry_rollups import ROLLUP_FILENAME, read_telemetry_rollups
 from stormlog.telemetry_sink import (
     AppendOnlyTelemetrySink,
     TelemetrySinkConfig,
@@ -17,6 +18,44 @@ from stormlog.telemetry_sink import (
 def _segment_records(path: Path) -> list[dict[str, object]]:
     with path.open("r", encoding="utf-8") as handle:
         return [json.loads(line) for line in handle if line.strip()]
+
+
+def _event_record(
+    *,
+    session_id: str,
+    timestamp_ns: int,
+    event_type: str = "sample",
+    rank: int = 0,
+    allocated: int = 100,
+    reserved: int = 150,
+    used: int = 175,
+    metadata: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return {
+        "schema_version": 3,
+        "session_id": session_id,
+        "timestamp_ns": timestamp_ns,
+        "event_type": event_type,
+        "collector": "stormlog.cuda_tracker",
+        "sampling_interval_ms": 100,
+        "pid": 123,
+        "host": "host-a",
+        "job_id": "job-a",
+        "rank": rank,
+        "local_rank": rank,
+        "world_size": 2,
+        "device_id": 0,
+        "allocator_allocated_bytes": allocated,
+        "allocator_reserved_bytes": reserved,
+        "allocator_active_bytes": None,
+        "allocator_inactive_bytes": None,
+        "allocator_change_bytes": reserved - allocated,
+        "device_used_bytes": used,
+        "device_free_bytes": None,
+        "device_total_bytes": 1000,
+        "context": event_type,
+        "metadata": metadata or {"backend": "cuda"},
+    }
 
 
 def test_append_only_sink_writes_jsonl_segment_and_manifest(tmp_path: Path) -> None:
@@ -43,6 +82,36 @@ def test_append_only_sink_writes_jsonl_segment_and_manifest(tmp_path: Path) -> N
 
     records = _segment_records(tmp_path / manifest["segments"][0]["filename"])
     assert records == [{"event_type": "start", "schema_version": 2, "seq": 1}]
+
+
+def test_append_only_sink_close_writes_rollup_sidecar(tmp_path: Path) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+
+    sink.append(_event_record(session_id="session-a", timestamp_ns=1))
+    sink.append(
+        _event_record(
+            session_id="session-a",
+            timestamp_ns=2,
+            allocated=250,
+            reserved=300,
+            used=400,
+        )
+    )
+    sink.close()
+
+    rollups = read_telemetry_rollups(tmp_path)
+
+    assert rollups is not None
+    assert (tmp_path / ROLLUP_FILENAME).exists()
+    assert rollups.coverage.retained_event_count == 2
+    assert rollups.sessions[0].session.session_id == "session-a"
+    assert rollups.sessions[0].counters.device_used_bytes.value == 400
 
 
 def test_append_only_sink_rolls_over_by_event_count(tmp_path: Path) -> None:
@@ -122,6 +191,39 @@ def test_append_only_sink_exposes_rollover_and_prune_diagnostics(
     assert diagnostics["pruned_bytes"] > 0
     assert diagnostics["final_retained_files"] == 2
     assert diagnostics["final_retained_bytes"] > 0
+
+
+def test_append_only_sink_rollup_coverage_reflects_retention_pruning(
+    tmp_path: Path,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            rollover_max_events=1,
+            rollover_max_bytes=1024,
+            retention_max_files=2,
+            retention_max_total_bytes=1024 * 1024,
+        )
+    )
+
+    sink.append(_event_record(session_id="session-a", timestamp_ns=1))
+    sink.append(_event_record(session_id="session-a", timestamp_ns=2))
+    sink.append(_event_record(session_id="session-a", timestamp_ns=3))
+    sink.close()
+
+    rollups = read_telemetry_rollups(tmp_path)
+
+    assert rollups is not None
+    assert rollups.coverage.pruned_segment_count == 1
+    assert rollups.coverage.pruned_bytes is not None
+    assert rollups.coverage.pruned_bytes > 0
+    assert rollups.coverage.retained_segment_filenames == [
+        "segment-000002.jsonl",
+        "segment-000003.jsonl",
+    ]
+    assert rollups.coverage.retained_event_count == 2
 
 
 def test_append_only_sink_flushes_without_new_events(tmp_path: Path) -> None:
@@ -271,6 +373,69 @@ def test_append_only_sink_recovery_marks_prior_session_interrupted(
     ]
     assert [event.context for event in sessions[0].events] == ["second"]
     assert [event.context for event in sessions[1].events] == ["first"]
+
+
+def test_append_only_sink_recovery_rebuilds_interrupted_rollup(
+    tmp_path: Path,
+) -> None:
+    config = TelemetrySinkConfig(
+        root_dir=tmp_path,
+        flush_every_events=1,
+        flush_every_seconds=1.0,
+    )
+    first_sink = AppendOnlyTelemetrySink(config)
+    first_sink.append(_event_record(session_id="session-a", timestamp_ns=1))
+    if first_sink._handle is not None:
+        first_sink._handle.close()
+        first_sink._handle = None
+    first_sink._stop_flush_thread()
+
+    recovered_sink = AppendOnlyTelemetrySink(config)
+    assert read_telemetry_rollups(tmp_path) is None
+
+    recovered_sink.close()
+
+    rollups = read_telemetry_rollups(tmp_path)
+
+    assert rollups is not None
+    assert rollups.sessions[0].session.session_id == "session-a"
+    assert rollups.sessions[0].session.status == "interrupted"
+
+
+def test_append_only_sink_config_can_disable_rollups(tmp_path: Path) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+            write_rollups=False,
+        )
+    )
+
+    sink.append(_event_record(session_id="session-a", timestamp_ns=1))
+    sink.close()
+
+    assert not (tmp_path / ROLLUP_FILENAME).exists()
+
+
+def test_append_only_sink_malformed_rollup_source_does_not_fail_close(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+
+    sink.append({"seq": 1})
+    sink.close()
+
+    assert _segment_records(tmp_path / "segment-000001.jsonl") == [{"seq": 1}]
+    assert not (tmp_path / ROLLUP_FILENAME).exists()
+    assert "telemetry rollup write failed" in caplog.text
 
 
 def test_telemetry_sink_config_rejects_total_retention_below_rollover() -> None:

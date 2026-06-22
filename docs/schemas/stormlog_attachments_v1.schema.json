@@ -1,0 +1,87 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/Silas-Asamoah/stormlog/docs/schemas/stormlog_attachments_v1.schema.json",
+  "title": "Stormlog Attachments v1",
+  "description": "External evidence sidecar for local Stormlog correlation queries.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "format", "attachments"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "format": {
+      "type": "string",
+      "const": "stormlog.attachments"
+    },
+    "attachments": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/attachment"
+      }
+    }
+  },
+  "$defs": {
+    "attachment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "kind", "metadata"],
+      "anyOf": [
+        {"required": ["url"]},
+        {"required": ["path"]}
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attachment_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1
+        },
+        "session_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "job_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "rank": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "start_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "end_ns": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "created_at_utc": {
+          "type": ["string", "null"]
+        },
+        "updated_at_utc": {
+          "type": ["string", "null"]
+        },
+        "metadata": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

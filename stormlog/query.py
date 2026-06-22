@@ -4,14 +4,27 @@ from __future__ import annotations
 
 import builtins
 import csv
+import hashlib
 import json
 from collections import defaultdict
-from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from .correlation import (
+    ATTACHMENTS_FILENAME,
+    ATTACHMENTS_FORMAT,
+    ATTACHMENTS_SCHEMA_VERSION,
+    CLOCK_DOMAIN_UNIX_EPOCH_NS,
+    CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS,
+    AttachmentFilter,
+    CorrelationEvidence,
+    CorrelationFilter,
+    CorrelationResult,
+    ExternalAttachment,
+)
 from .gap_analysis import analyze_hidden_memory_gaps
 from .issues import (
     ISSUE_STATE_OPEN,
@@ -43,8 +56,23 @@ from .telemetry import (
     TelemetryEvent,
     TelemetryEventV2,
     load_telemetry_sessions,
+    project_telemetry_event,
     telemetry_event_from_record,
     telemetry_event_to_dict,
+)
+from .telemetry_classification import (
+    COLLECTOR_TRANSITION_TYPES,
+    event_backend,
+    event_severity,
+    is_alert_event,
+    is_collector_degradation_event,
+    is_oom_event,
+)
+from .telemetry_rollups import (
+    RankRollup,
+    SessionRollup,
+    TelemetryRollupFile,
+    read_telemetry_rollups,
 )
 from .telemetry_sink import (
     MANIFEST_FILENAME,
@@ -52,6 +80,10 @@ from .telemetry_sink import (
     TelemetrySinkManifest,
     read_telemetry_sink_manifest,
     resolve_telemetry_sink_segment_paths,
+)
+from .timeline_markers import (
+    derive_session_timeline_markers,
+    timeline_marker_to_dict,
 )
 from .utils import format_bytes
 
@@ -75,10 +107,7 @@ SummaryMetric = Literal[
 ]
 SummaryGroupBy = Literal["session", "session-rank", "rank", "status"]
 
-_ALERT_EVENT_TYPES = frozenset({"warning", "critical", "error"})
-_COLLECTOR_TRANSITION_TYPES = frozenset({"collector_degraded", "collector_recovered"})
 _TELEMETRY_FILE_NAME_PARTS = ("event", "events", "track", "telemetry")
-_COLLECTOR_DEGRADED_STATUSES = frozenset({"degraded", "unhealthy"})
 _GAP_ANALYSIS_THRESHOLDS = {
     "gap_ratio_threshold": 0.05,
     "gap_spike_zscore": 2.0,
@@ -323,9 +352,11 @@ class ArtifactCatalog:
         self.paths = tuple(Path(path) for path in paths)
         self.sources: list[CatalogSource] = []
         self.oom_bundles: list[CatalogOOMBundle] = []
+        self.attachments: list[ExternalAttachment] = []
         self.warnings: list[CatalogWarning] = []
         self._source_keys: set[tuple[Path, SourceKind]] = set()
         self._oom_bundle_paths: set[Path] = set()
+        self._attachment_sidecar_paths: set[Path] = set()
         self._covered_event_paths: set[Path] = set()
         self._discover()
 
@@ -334,6 +365,7 @@ class ArtifactCatalog:
             "paths": [str(path) for path in self.paths],
             "sources": [source.as_dict() for source in self.sources],
             "oom_bundles": [bundle.as_dict() for bundle in self.oom_bundles],
+            "attachments": [attachment.as_dict() for attachment in self.attachments],
             "warnings": [warning.as_dict() for warning in self.warnings],
         }
 
@@ -354,6 +386,7 @@ class ArtifactCatalog:
         self._discover_directory(path)
 
     def _discover_directory(self, directory: Path) -> None:
+        self._discover_attachment_sidecar(directory / ATTACHMENTS_FILENAME)
         manifest_path = directory / MANIFEST_FILENAME
         manifest_payload = _read_json_object(manifest_path)
         if manifest_payload is not None:
@@ -409,12 +442,18 @@ class ArtifactCatalog:
                     )
                 )
 
+        for attachment_sidecar in sorted(directory.rglob(ATTACHMENTS_FILENAME)):
+            self._discover_attachment_sidecar(attachment_sidecar)
+
         for candidate in self._discover_candidate_files(directory):
             if candidate in self._covered_event_paths:
                 continue
             self._discover_file(candidate)
 
     def _discover_file(self, path: Path) -> None:
+        if path.name == ATTACHMENTS_FILENAME:
+            self._discover_attachment_sidecar(path)
+            return
         if path.name == MANIFEST_FILENAME:
             payload = _read_json_object(path)
             if payload is None:
@@ -527,6 +566,34 @@ class ArtifactCatalog:
             )
         )
 
+    def _discover_attachment_sidecar(self, path: Path) -> None:
+        if not path.exists() or not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved in self._attachment_sidecar_paths:
+            return
+        self._attachment_sidecar_paths.add(resolved)
+        payload = _read_json_object(path)
+        if payload is None:
+            self._warn(path, "attachment sidecar is not a JSON object")
+            return
+        if not _is_attachment_sidecar(payload):
+            self._warn(path, "unrecognized attachment sidecar shape")
+            return
+        attachments = payload.get("attachments")
+        if not isinstance(attachments, Sequence) or isinstance(attachments, str):
+            self._warn(path, "attachment sidecar attachments must be a list")
+            return
+        for index, item in enumerate(attachments):
+            if not isinstance(item, Mapping):
+                self._warn(path, f"attachment {index} is not an object")
+                continue
+            attachment = _attachment_from_payload(item, path)
+            if attachment is None:
+                self._warn(path, f"attachment {index} is invalid")
+                continue
+            self.attachments.append(attachment)
+
     def _warn(self, path: Path, message: str) -> None:
         self.warnings.append(CatalogWarning(path=str(path), message=message))
 
@@ -622,6 +689,36 @@ class QueryStore:
         rows.sort(key=lambda row: (row.created_at_utc or "", row.bundle_path))
         return rows
 
+    def list_attachments(
+        self,
+        filters: AttachmentFilter | None = None,
+    ) -> list[ExternalAttachment]:
+        """Return filtered external attachment sidecar rows."""
+        filters = filters or AttachmentFilter()
+        rows = [
+            attachment
+            for attachment in self.catalog.attachments
+            if _attachment_matches(attachment, filters)
+        ]
+        rows.sort(
+            key=lambda row: (
+                row.start_ns if row.start_ns is not None else -1,
+                row.title,
+                row.sidecar_path,
+            )
+        )
+        return rows
+
+    def correlate(self, filters: CorrelationFilter) -> CorrelationResult:
+        """Return evidence related to a timestamp or telemetry record anchor."""
+        anchor = self._correlation_anchor(filters)
+        evidence = self._correlation_evidence(anchor, filters)
+        return CorrelationResult(
+            anchor=anchor,
+            evidence=evidence,
+            warnings=[warning.message for warning in self.catalog.warnings],
+        )
+
     def list_issues(
         self,
         filters: IssueFilter | None = None,
@@ -641,11 +738,11 @@ class QueryStore:
 
         event_rows = self.query_events(EventFilter())
         for event_row in event_rows:
-            if _is_oom_event(event_row.event):
+            if is_oom_event(event_row.event):
                 _accumulate_oom_event_issue(accumulator, event_row)
-            elif _is_collector_degradation_event(event_row.event):
+            elif is_collector_degradation_event(event_row.event):
                 _accumulate_collector_issue(accumulator, event_row)
-            elif _is_alert_event(event_row.event):
+            elif is_alert_event(event_row.event):
                 _accumulate_alert_issue(accumulator, event_row)
 
         for source in self.catalog.sources:
@@ -696,6 +793,10 @@ class QueryStore:
             return self._summarize_interrupted_sessions_with_oom_bundles()
 
         resolved_group_by: SummaryGroupBy = group_by or "session"
+        rollup_rows = self._summarize_from_rollups(metric, resolved_group_by)
+        if rollup_rows is not None:
+            return rollup_rows
+
         events = self.query_events(EventFilter())
         if metric in {
             "peak_allocator_allocated_bytes",
@@ -709,13 +810,13 @@ class QueryStore:
             }[metric]
             return _summarize_peak(events, metric, field_name, resolved_group_by)
         if metric == "alert_count":
-            alert_events = [row for row in events if _is_alert_event(row.event)]
+            alert_events = [row for row in events if is_alert_event(row.event)]
             return _summarize_count(alert_events, metric, resolved_group_by)
         if metric == "collector_degradation_transitions":
             transition_events = [
                 row
                 for row in events
-                if row.event.event_type in _COLLECTOR_TRANSITION_TYPES
+                if row.event.event_type in COLLECTOR_TRANSITION_TYPES
             ]
             return _summarize_count(transition_events, metric, resolved_group_by)
         if metric == "hidden_memory_gap_growth":
@@ -769,6 +870,57 @@ class QueryStore:
             )
         return rows
 
+    def _summarize_from_rollups(
+        self,
+        metric: SummaryMetric,
+        group_by: SummaryGroupBy,
+    ) -> list[SummaryRow] | None:
+        rollups = self._fresh_sink_rollups()
+        if rollups is None:
+            return None
+        if metric in {
+            "peak_allocator_allocated_bytes",
+            "peak_allocator_reserved_bytes",
+            "peak_device_used_bytes",
+        }:
+            return _summarize_rollup_peaks(rollups, metric, group_by)
+        if metric == "alert_count" and group_by in {"session", "status"}:
+            return _summarize_rollup_session_counts(
+                rollups,
+                metric,
+                group_by,
+                lambda session: session.alerts.total_count,
+            )
+        if metric == "collector_degradation_transitions" and group_by in {
+            "session",
+            "status",
+        }:
+            return _summarize_rollup_session_counts(
+                rollups,
+                metric,
+                group_by,
+                lambda session: session.collector_health.transition_count,
+            )
+        if metric == "hidden_memory_gap_growth" and group_by in {
+            "rank",
+            "session-rank",
+        }:
+            return _summarize_rollup_hidden_gap_growth(rollups, group_by)
+        return None
+
+    def _fresh_sink_rollups(self) -> list[TelemetryRollupFile] | None:
+        if not self.catalog.sources:
+            return None
+        rollups: list[TelemetryRollupFile] = []
+        for source in self.catalog.sources:
+            if source.source_kind != "sink":
+                return None
+            rollup = read_telemetry_rollups(source.path)
+            if rollup is None:
+                return None
+            rollups.append(rollup)
+        return rollups
+
     def _load_sessions_for_source(
         self,
         source: CatalogSource,
@@ -793,6 +945,221 @@ class QueryStore:
 
         self._loaded_sessions_by_source[key] = loaded
         return loaded
+
+    def _correlation_anchor(self, filters: CorrelationFilter) -> dict[str, Any]:
+        if filters.record_id is None and filters.at_ns is None:
+            raise ValueError("correlation requires --at-ns or --record-id")
+        if filters.record_id is not None:
+            for row in self.query_events(EventFilter()):
+                projected = project_telemetry_event(row.event)
+                if projected.record_id != filters.record_id:
+                    continue
+                if (
+                    filters.at_ns is not None
+                    and filters.at_ns != projected.timestamp_ns
+                ):
+                    raise ValueError("record_id timestamp does not match at_ns")
+                return {
+                    "at_ns": projected.timestamp_ns,
+                    "record_id": projected.record_id,
+                    "session_id": row.event.session_id,
+                    "job_id": row.event.job_id,
+                    "rank": row.event.rank,
+                    "world_size": row.event.world_size,
+                    "source_path": row.source_path,
+                    "source_kind": row.source_kind,
+                    "event_type": row.event.event_type,
+                    "scope": filters.scope,
+                    "window_ns": filters.window_ns,
+                    "clock_domain": CLOCK_DOMAIN_UNIX_EPOCH_NS,
+                    "clock_normalization": CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS,
+                    "clock_note": "correlation does not rewrite cross-host clocks",
+                }
+            raise ValueError(f"record_id not found: {filters.record_id}")
+        return {
+            "at_ns": filters.at_ns,
+            "record_id": None,
+            "session_id": filters.session_id,
+            "job_id": filters.job_id,
+            "rank": filters.rank,
+            "world_size": None,
+            "source_path": None,
+            "source_kind": None,
+            "event_type": None,
+            "scope": filters.scope,
+            "window_ns": filters.window_ns,
+            "clock_domain": CLOCK_DOMAIN_UNIX_EPOCH_NS,
+            "clock_normalization": CLOCK_NORMALIZATION_PRODUCER_EPOCH_NS,
+            "clock_note": "correlation does not rewrite cross-host clocks",
+        }
+
+    def _correlation_evidence(
+        self,
+        anchor: Mapping[str, Any],
+        filters: CorrelationFilter,
+    ) -> list[CorrelationEvidence]:
+        rows: list[CorrelationEvidence] = []
+        for candidate in self._candidate_correlation_evidence():
+            matched = _match_correlation_evidence(candidate, anchor, filters)
+            if matched is not None:
+                rows.append(matched)
+        rows.sort(key=lambda row: _correlation_sort_key(row, anchor))
+        if filters.limit is not None:
+            return rows[: filters.limit]
+        return rows
+
+    def _candidate_correlation_evidence(self) -> list[CorrelationEvidence]:
+        evidence: list[CorrelationEvidence] = []
+        event_rows = self.query_events(EventFilter())
+        evidence.extend(_event_correlation_evidence(event_rows))
+        evidence.extend(_alert_correlation_evidence(event_rows))
+        evidence.extend(self._marker_correlation_evidence())
+        evidence.extend(self._oom_correlation_evidence())
+        evidence.extend(self._diagnose_correlation_evidence())
+        evidence.extend(self._rollup_correlation_evidence())
+        evidence.extend(_attachment_correlation_evidence(self.catalog.attachments))
+        return evidence
+
+    def _marker_correlation_evidence(self) -> list[CorrelationEvidence]:
+        evidence: list[CorrelationEvidence] = []
+        for source in self.catalog.sources:
+            for loaded in self._load_sessions_for_source(source):
+                source_path = _event_source_path(loaded, source)
+                for marker in derive_session_timeline_markers(loaded):
+                    evidence.append(
+                        CorrelationEvidence(
+                            evidence_id=_evidence_id(
+                                "marker",
+                                marker.session_id,
+                                marker.kind,
+                                marker.start_ns,
+                                marker.rank,
+                                marker.label,
+                            ),
+                            kind="timeline_marker",
+                            title=marker.label,
+                            session_id=marker.session_id,
+                            job_id=loaded.summary.job_id,
+                            rank=marker.rank,
+                            world_size=marker.world_size,
+                            start_ns=marker.start_ns,
+                            end_ns=marker.end_ns,
+                            source_path=source_path,
+                            source_kind=source.source_kind,
+                            metadata=timeline_marker_to_dict(marker),
+                        )
+                    )
+        return evidence
+
+    def _oom_correlation_evidence(self) -> list[CorrelationEvidence]:
+        session_by_id = {
+            session.session_id: session for session in self.list_sessions()
+        }
+        evidence: list[CorrelationEvidence] = []
+        for row in self.list_oom_bundles():
+            summary = (
+                session_by_id.get(row.session_id)
+                if row.session_id is not None
+                else None
+            )
+            seen_ns = _datetime_to_ns(_parse_datetime(row.created_at_utc))
+            evidence.append(
+                CorrelationEvidence(
+                    evidence_id=_evidence_id("oom", row.bundle_path, row.session_id),
+                    kind="oom_bundle",
+                    title="OOM bundle",
+                    session_id=row.session_id,
+                    job_id=summary.job_id if summary is not None else None,
+                    rank=summary.rank if summary is not None else None,
+                    world_size=summary.world_size if summary is not None else None,
+                    start_ns=seen_ns,
+                    end_ns=seen_ns,
+                    source_path=row.bundle_path,
+                    source_kind="oom_bundle",
+                    metadata=row.as_dict(),
+                )
+            )
+        return evidence
+
+    def _diagnose_correlation_evidence(self) -> list[CorrelationEvidence]:
+        evidence: list[CorrelationEvidence] = []
+        for source in self.catalog.sources:
+            if source.source_kind != "diagnose_bundle":
+                continue
+            summary = _diagnose_session_summary(source.manifest_path)
+            if summary is None:
+                continue
+            evidence.append(
+                CorrelationEvidence(
+                    evidence_id=_evidence_id(
+                        "diagnose",
+                        str(source.manifest_path),
+                        summary.session_id,
+                    ),
+                    kind="diagnose_bundle",
+                    title="Diagnose bundle",
+                    session_id=summary.session_id,
+                    job_id=summary.job_id,
+                    rank=summary.rank,
+                    world_size=summary.world_size,
+                    start_ns=summary.started_at_ns,
+                    end_ns=summary.ended_at_ns,
+                    source_path=str(source.path),
+                    source_kind=source.source_kind,
+                    metadata={
+                        "manifest_path": (
+                            str(source.manifest_path)
+                            if source.manifest_path is not None
+                            else None
+                        ),
+                        "session_status": summary.status,
+                    },
+                )
+            )
+        return evidence
+
+    def _rollup_correlation_evidence(self) -> list[CorrelationEvidence]:
+        evidence: list[CorrelationEvidence] = []
+        for source in self.catalog.sources:
+            if source.source_kind != "sink":
+                continue
+            rollup = read_telemetry_rollups(source.path)
+            if rollup is None:
+                continue
+            for session in rollup.sessions:
+                for window in session.windows:
+                    evidence.append(
+                        CorrelationEvidence(
+                            evidence_id=_evidence_id(
+                                "rollup",
+                                session.session.session_id,
+                                window.index,
+                                window.start_ns,
+                            ),
+                            kind="rollup_window",
+                            title=f"Rollup window {window.index}",
+                            session_id=session.session.session_id,
+                            job_id=session.session.job_id,
+                            rank=None,
+                            world_size=session.session.world_size,
+                            start_ns=window.start_ns,
+                            end_ns=window.end_ns,
+                            source_path=str(source.path),
+                            source_kind="rollup",
+                            metadata={
+                                "event_count": window.event_count,
+                                "sample_count": window.sample_count,
+                                "rank_count": window.rank_count,
+                                "alert_count": window.alert_count,
+                                "collector_transition_count": (
+                                    window.collector_transition_count
+                                ),
+                                "oom_count": window.oom_count,
+                                "window_duration_ns": rollup.window_duration_ns,
+                            },
+                        )
+                    )
+        return evidence
 
     def _summarize_session_count_by_status(self) -> list[SummaryRow]:
         counts: dict[str, int] = defaultdict(int)
@@ -864,6 +1231,54 @@ def _is_diagnose_manifest(payload: Mapping[str, Any]) -> bool:
         and "files" in payload
         and "risk_detected" in payload
         and "session_id" in payload
+    )
+
+
+def _is_attachment_sidecar(payload: Mapping[str, Any]) -> bool:
+    return (
+        payload.get("schema_version") == ATTACHMENTS_SCHEMA_VERSION
+        and payload.get("format") == ATTACHMENTS_FORMAT
+    )
+
+
+def _attachment_from_payload(
+    payload: Mapping[str, Any],
+    sidecar_path: Path,
+) -> ExternalAttachment | None:
+    title = _string_or_none(payload.get("title"))
+    kind = _string_or_none(payload.get("kind"))
+    if title is None or kind is None:
+        return None
+    url = _string_or_none(payload.get("url"))
+    raw_path = _string_or_none(payload.get("path"))
+    if url is None and raw_path is None:
+        return None
+    resolved_path: str | None = None
+    if raw_path is not None:
+        path = Path(raw_path)
+        if not path.is_absolute():
+            path = sidecar_path.parent / path
+        resolved_path = str(path.resolve())
+    start_ns = _int_or_none(payload.get("start_ns"))
+    end_ns = _int_or_none(payload.get("end_ns"))
+    if start_ns is not None and end_ns is not None and end_ns < start_ns:
+        return None
+    metadata = payload.get("metadata")
+    return ExternalAttachment(
+        title=title,
+        kind=kind,
+        attachment_id=_string_or_none(payload.get("attachment_id")),
+        url=url,
+        path=resolved_path,
+        session_id=_string_or_none(payload.get("session_id")),
+        job_id=_string_or_none(payload.get("job_id")),
+        rank=_int_or_none(payload.get("rank")),
+        start_ns=start_ns,
+        end_ns=end_ns,
+        created_at_utc=_string_or_none(payload.get("created_at_utc")),
+        updated_at_utc=_string_or_none(payload.get("updated_at_utc")),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+        sidecar_path=str(sidecar_path),
     )
 
 
@@ -1093,7 +1508,7 @@ def _event_matches(row: EventRow, filters: EventFilter) -> bool:
         return False
     if filters.time_end_ns is not None and event.timestamp_ns > filters.time_end_ns:
         return False
-    if filters.has_alert is not None and (_is_alert_event(event) != filters.has_alert):
+    if filters.has_alert is not None and (is_alert_event(event) != filters.has_alert):
         return False
     metadata = event.metadata
     if filters.collector_health_status is not None and (
@@ -1122,6 +1537,329 @@ def _oom_matches(row: OOMBundleRow, filters: OOMBundleFilter) -> bool:
     return True
 
 
+def _attachment_matches(
+    row: ExternalAttachment,
+    filters: AttachmentFilter,
+) -> bool:
+    if filters.session_id is not None and row.session_id != filters.session_id:
+        return False
+    if filters.job_id is not None and row.job_id != filters.job_id:
+        return False
+    if filters.rank is not None and row.rank != filters.rank:
+        return False
+    if filters.kind is not None and row.kind != filters.kind:
+        return False
+    return True
+
+
+def _event_correlation_evidence(
+    rows: Sequence[EventRow],
+) -> list[CorrelationEvidence]:
+    evidence: list[CorrelationEvidence] = []
+    for row in rows:
+        event = row.event
+        projected = project_telemetry_event(event)
+        metadata = {
+            "record_id": projected.record_id,
+            "observed_timestamp_ns": projected.observed_timestamp_ns,
+            "event_type": event.event_type,
+            "collector": event.collector,
+            "context": event.context,
+            "session_status": row.session_status,
+            "metadata": event.metadata,
+        }
+        evidence.append(
+            CorrelationEvidence(
+                evidence_id=f"event:{projected.record_id}",
+                kind="telemetry_event",
+                title=f"{event.event_type} telemetry event",
+                session_id=event.session_id,
+                job_id=event.job_id,
+                rank=event.rank,
+                world_size=event.world_size,
+                start_ns=event.timestamp_ns,
+                end_ns=None,
+                source_path=row.source_path,
+                source_kind=row.source_kind,
+                metadata=metadata,
+            )
+        )
+    return evidence
+
+
+def _alert_correlation_evidence(
+    rows: Sequence[EventRow],
+) -> list[CorrelationEvidence]:
+    evidence: list[CorrelationEvidence] = []
+    for row in rows:
+        event = row.event
+        if not is_alert_event(event):
+            continue
+        evidence.append(
+            CorrelationEvidence(
+                evidence_id=_evidence_id(
+                    "alert",
+                    event.session_id,
+                    event.timestamp_ns,
+                    event.rank,
+                    event.event_type,
+                ),
+                kind="alert",
+                title=f"Alert: {event.event_type}",
+                session_id=event.session_id,
+                job_id=event.job_id,
+                rank=event.rank,
+                world_size=event.world_size,
+                start_ns=event.timestamp_ns,
+                end_ns=None,
+                source_path=row.source_path,
+                source_kind=row.source_kind,
+                metadata={
+                    "event_type": event.event_type,
+                    "severity": event_severity(event),
+                    "collector": event.collector,
+                    "context": event.context,
+                    "metadata": event.metadata,
+                },
+            )
+        )
+    return evidence
+
+
+def _attachment_correlation_evidence(
+    attachments: Sequence[ExternalAttachment],
+) -> list[CorrelationEvidence]:
+    evidence: list[CorrelationEvidence] = []
+    for attachment in attachments:
+        created_ns = _datetime_to_ns(_parse_datetime(attachment.created_at_utc))
+        start_ns = (
+            attachment.start_ns if attachment.start_ns is not None else created_ns
+        )
+        end_ns = attachment.end_ns if attachment.end_ns is not None else start_ns
+        evidence.append(
+            CorrelationEvidence(
+                evidence_id=_evidence_id(
+                    "attachment",
+                    attachment.attachment_id,
+                    attachment.sidecar_path,
+                    attachment.title,
+                    attachment.url,
+                    attachment.path,
+                ),
+                kind="attachment",
+                title=attachment.title,
+                session_id=attachment.session_id,
+                job_id=attachment.job_id,
+                rank=attachment.rank,
+                world_size=None,
+                start_ns=start_ns,
+                end_ns=end_ns,
+                source_path=attachment.url
+                or attachment.path
+                or attachment.sidecar_path,
+                source_kind="attachment",
+                metadata=attachment.as_dict(),
+            )
+        )
+    return evidence
+
+
+def _match_correlation_evidence(
+    evidence: CorrelationEvidence,
+    anchor: Mapping[str, Any],
+    filters: CorrelationFilter,
+) -> CorrelationEvidence | None:
+    if filters.kinds and evidence.kind not in filters.kinds:
+        return None
+    if not _explicit_correlation_filters_match(evidence, filters):
+        return None
+
+    anchor_at = cast(int | None, anchor.get("at_ns"))
+    if anchor_at is None:
+        return None
+
+    has_time = evidence.start_ns is not None or evidence.end_ns is not None
+    time_matches = (
+        _evidence_overlaps_anchor_window(evidence, anchor_at, filters.window_ns)
+        if has_time
+        else False
+    )
+    identity_match = _identity_match(evidence, anchor, filters.scope)
+    if has_time and not time_matches:
+        return None
+    if identity_match is None and not time_matches:
+        return None
+    if _has_identity_conflict(evidence, anchor, filters.scope):
+        return None
+
+    confidence, reasons = _correlation_confidence(
+        evidence,
+        anchor,
+        identity_match,
+        has_time,
+        time_matches,
+    )
+    return replace(evidence, confidence=confidence, reasons=tuple(reasons))
+
+
+def _explicit_correlation_filters_match(
+    evidence: CorrelationEvidence,
+    filters: CorrelationFilter,
+) -> bool:
+    if filters.session_id is not None and evidence.session_id != filters.session_id:
+        return False
+    if filters.job_id is not None and evidence.job_id != filters.job_id:
+        return False
+    if (
+        filters.rank is not None
+        and evidence.rank is not None
+        and evidence.rank != filters.rank
+    ):
+        return False
+    return True
+
+
+def _evidence_overlaps_anchor_window(
+    evidence: CorrelationEvidence,
+    at_ns: int,
+    window_ns: int,
+) -> bool:
+    evidence_start = (
+        evidence.start_ns if evidence.start_ns is not None else evidence.end_ns
+    )
+    evidence_end = evidence.end_ns if evidence.end_ns is not None else evidence.start_ns
+    if evidence_start is None or evidence_end is None:
+        return False
+    anchor_start = at_ns - window_ns
+    anchor_end = at_ns + window_ns
+    return evidence_start <= anchor_end and evidence_end >= anchor_start
+
+
+def _identity_match(
+    evidence: CorrelationEvidence,
+    anchor: Mapping[str, Any],
+    scope: str,
+) -> str | None:
+    anchor_session = _string_or_none(anchor.get("session_id"))
+    anchor_job = _string_or_none(anchor.get("job_id"))
+    if (
+        anchor_session is not None
+        and evidence.session_id is not None
+        and evidence.session_id == anchor_session
+    ):
+        return "session"
+    if (
+        scope == "distributed"
+        and anchor_job is not None
+        and evidence.job_id is not None
+        and evidence.job_id == anchor_job
+    ):
+        return "job"
+    return None
+
+
+def _has_identity_conflict(
+    evidence: CorrelationEvidence,
+    anchor: Mapping[str, Any],
+    scope: str,
+) -> bool:
+    anchor_session = _string_or_none(anchor.get("session_id"))
+    anchor_job = _string_or_none(anchor.get("job_id"))
+    same_job = (
+        anchor_job is not None
+        and evidence.job_id is not None
+        and evidence.job_id == anchor_job
+    )
+    if (
+        anchor_session is not None
+        and evidence.session_id is not None
+        and evidence.session_id != anchor_session
+        and not (scope == "distributed" and same_job)
+    ):
+        return True
+    if (
+        anchor_job is not None
+        and evidence.job_id is not None
+        and evidence.job_id != anchor_job
+        and evidence.session_id != anchor_session
+    ):
+        return True
+    return False
+
+
+def _correlation_confidence(
+    evidence: CorrelationEvidence,
+    anchor: Mapping[str, Any],
+    identity_match: str | None,
+    has_time: bool,
+    time_matches: bool,
+) -> tuple[str, list[str]]:
+    reasons: list[str] = []
+    if time_matches:
+        reasons.append("overlaps_anchor_window")
+    elif not has_time:
+        reasons.append("identifier_only_no_time")
+
+    anchor_rank = _int_or_none(anchor.get("rank"))
+    same_rank = (
+        anchor_rank is None or evidence.rank is None or evidence.rank == anchor_rank
+    )
+    if identity_match == "session":
+        reasons.append("same_session")
+        if same_rank:
+            reasons.append("same_rank_or_rank_agnostic")
+            return "high", reasons
+        reasons.append("cross_rank_same_session")
+        return "medium", reasons
+    if identity_match == "job":
+        reasons.append("same_job_distributed")
+        if same_rank:
+            reasons.append("same_rank_or_rank_agnostic")
+            return "high", reasons
+        reasons.append("cross_rank_same_job")
+        return "medium", reasons
+
+    reasons.append("time_only_missing_shared_identifier")
+    return "low", reasons
+
+
+def _correlation_sort_key(
+    evidence: CorrelationEvidence,
+    anchor: Mapping[str, Any],
+) -> tuple[int, int, str, str]:
+    confidence_rank = {"high": 0, "medium": 1, "low": 2}.get(
+        evidence.confidence,
+        9,
+    )
+    anchor_at = cast(int | None, anchor.get("at_ns"))
+    distance = _evidence_distance_ns(evidence, anchor_at)
+    return confidence_rank, distance, evidence.kind, evidence.title
+
+
+def _evidence_distance_ns(
+    evidence: CorrelationEvidence,
+    at_ns: int | None,
+) -> int:
+    if at_ns is None:
+        return 0
+    bounds = [
+        value for value in (evidence.start_ns, evidence.end_ns) if value is not None
+    ]
+    if not bounds:
+        return 0
+    start_ns = min(bounds)
+    end_ns = max(bounds)
+    if start_ns <= at_ns <= end_ns:
+        return 0
+    return min(abs(start_ns - at_ns), abs(end_ns - at_ns))
+
+
+def _evidence_id(*parts: object) -> str:
+    payload = json.dumps([str(part) for part in parts], sort_keys=True)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+    return f"evidence-{digest}"
+
+
 def _parse_datetime(value: str | None) -> datetime | None:
     if not value:
         return None
@@ -1143,44 +1881,6 @@ def _datetime_to_ns(value: datetime | None) -> int | None:
     return int(value.timestamp() * 1_000_000_000)
 
 
-def _is_alert_event(event: TelemetryEvent) -> bool:
-    if event.event_type in _ALERT_EVENT_TYPES:
-        return True
-    severity = event.metadata.get("severity")
-    return severity in {"warning", "critical", "error"}
-
-
-def _is_oom_event(event: TelemetryEvent) -> bool:
-    if event.event_type != "error":
-        return False
-    metadata = event.metadata
-    return any(key in metadata for key in ("oom_reason", "oom_dump_path"))
-
-
-def _is_collector_degradation_event(event: TelemetryEvent) -> bool:
-    metadata = event.metadata
-    health_status = normalize_text_dimension(metadata.get("collector_health_status"))
-    return (
-        event.event_type == "collector_degraded"
-        or health_status in _COLLECTOR_DEGRADED_STATUSES
-    )
-
-
-def _event_severity(event: TelemetryEvent) -> str:
-    metadata_severity = event.metadata.get("severity")
-    if isinstance(metadata_severity, str) and metadata_severity.strip():
-        return normalize_text_dimension(metadata_severity)
-    if event.event_type in {"critical", "error"}:
-        return "critical"
-    if event.event_type == "warning":
-        return "warning"
-    return "info"
-
-
-def _event_backend(event: TelemetryEvent) -> str:
-    return normalize_text_dimension(event.metadata.get("backend"))
-
-
 def _event_source_path(loaded: LoadedTelemetrySession, source: CatalogSource) -> str:
     if loaded.sources_loaded:
         return loaded.sources_loaded[0]
@@ -1198,6 +1898,149 @@ def _summary_group_key(
     if group_by == "status":
         return None, None, row.session_status
     return row.event.session_id, None, None
+
+
+def _summarize_rollup_peaks(
+    rollups: Sequence[TelemetryRollupFile],
+    metric: str,
+    group_by: SummaryGroupBy,
+) -> list[SummaryRow]:
+    field_name = {
+        "peak_allocator_allocated_bytes": "allocator_allocated_bytes",
+        "peak_allocator_reserved_bytes": "allocator_reserved_bytes",
+        "peak_device_used_bytes": "device_used_bytes",
+    }[metric]
+    best: dict[tuple[str | None, int | None, str | None], tuple[int, int | None]] = {}
+
+    for session in _rollup_sessions(rollups):
+        if group_by in {"rank", "session-rank"}:
+            for rank_rollup in session.ranks:
+                peak = getattr(rank_rollup.counters, field_name)
+                key = _rollup_rank_group_key(session, rank_rollup, group_by)
+                _observe_rollup_peak(best, key, peak.value, peak.timestamp_ns)
+            continue
+
+        peak = getattr(session.counters, field_name)
+        key = _rollup_session_group_key(session, group_by)
+        _observe_rollup_peak(best, key, peak.value, peak.timestamp_ns)
+
+    output: list[SummaryRow] = []
+    for key, (value, timestamp_ns) in sorted(
+        best.items(), key=lambda item: str(item[0])
+    ):
+        session_id, row_rank, status = key
+        output.append(
+            SummaryRow(
+                metric=metric,
+                group_by=group_by,
+                session_id=session_id,
+                rank=row_rank,
+                status=status,
+                value=value,
+                details={"timestamp_ns": timestamp_ns},
+            )
+        )
+    return output
+
+
+def _summarize_rollup_session_counts(
+    rollups: Sequence[TelemetryRollupFile],
+    metric: str,
+    group_by: SummaryGroupBy,
+    value_for_session: Callable[[SessionRollup], int],
+) -> list[SummaryRow]:
+    counts: dict[tuple[str | None, int | None, str | None], int] = defaultdict(int)
+    for session in _rollup_sessions(rollups):
+        value = value_for_session(session)
+        if value <= 0:
+            continue
+        counts[_rollup_session_group_key(session, group_by)] += value
+
+    output: list[SummaryRow] = []
+    for session_id, rank, status in sorted(counts, key=str):
+        output.append(
+            SummaryRow(
+                metric=metric,
+                group_by=group_by,
+                session_id=session_id,
+                rank=rank,
+                status=status,
+                value=counts[(session_id, rank, status)],
+            )
+        )
+    return output
+
+
+def _summarize_rollup_hidden_gap_growth(
+    rollups: Sequence[TelemetryRollupFile],
+    group_by: SummaryGroupBy,
+) -> list[SummaryRow] | None:
+    sessions = _rollup_sessions(rollups)
+    if group_by == "rank" and len(sessions) != 1:
+        return None
+
+    output: list[SummaryRow] = []
+    for session in sessions:
+        for rank in session.ranks:
+            if rank.hidden_gap_delta_bytes is None:
+                continue
+            session_id = (
+                session.session.session_id if group_by == "session-rank" else None
+            )
+            output.append(
+                SummaryRow(
+                    metric="hidden_memory_gap_growth",
+                    group_by=group_by,
+                    session_id=session_id,
+                    rank=rank.rank,
+                    value=rank.hidden_gap_delta_bytes,
+                    details={
+                        "first_gap_bytes": rank.hidden_gap_first_bytes,
+                        "latest_gap_bytes": rank.hidden_gap_latest_bytes,
+                        "peak_gap_bytes": rank.hidden_gap_peak_bytes,
+                        "sample_count": rank.sample_count,
+                    },
+                )
+            )
+    return sorted(output, key=lambda row: str((row.session_id, row.rank, row.status)))
+
+
+def _rollup_sessions(
+    rollups: Sequence[TelemetryRollupFile],
+) -> list[SessionRollup]:
+    return [session for rollup in rollups for session in rollup.sessions]
+
+
+def _rollup_session_group_key(
+    session: SessionRollup,
+    group_by: SummaryGroupBy,
+) -> tuple[str | None, int | None, str | None]:
+    if group_by == "status":
+        return None, None, session.session.status
+    return session.session.session_id, None, None
+
+
+def _rollup_rank_group_key(
+    session: SessionRollup,
+    rank: RankRollup,
+    group_by: SummaryGroupBy,
+) -> tuple[str | None, int | None, str | None]:
+    if group_by == "rank":
+        return None, rank.rank, None
+    return session.session.session_id, rank.rank, None
+
+
+def _observe_rollup_peak(
+    best: dict[tuple[str | None, int | None, str | None], tuple[int, int | None]],
+    key: tuple[str | None, int | None, str | None],
+    value: int | None,
+    timestamp_ns: int | None,
+) -> None:
+    if value is None:
+        return
+    existing = best.get(key)
+    if existing is None or value > existing[0]:
+        best[key] = (value, timestamp_ns)
 
 
 @dataclass
@@ -1334,7 +2177,7 @@ def _accumulate_oom_event_issue(
     fingerprint = IssueFingerprint(
         kind="oom",
         dimensions={
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "reason": reason,
         },
     )
@@ -1357,7 +2200,7 @@ def _accumulate_oom_event_issue(
         seen_ns=event.timestamp_ns,
         session_id=event.session_id,
         details={
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "reason": reason,
             "collector": event.collector,
             "device_id": event.device_id,
@@ -1383,7 +2226,7 @@ def _accumulate_collector_issue(
         kind="collector_degradation",
         dimensions={
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "health_status": health_status,
             "partial_fields": list(partial_fields),
             "error_stem": normalized_error_stem(last_error),
@@ -1416,7 +2259,7 @@ def _accumulate_collector_issue(
         session_id=event.session_id,
         details={
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "health_status": health_status,
             "partial_fields": list(partial_fields),
             "error_stem": normalized_error_stem(last_error),
@@ -1429,7 +2272,7 @@ def _accumulate_alert_issue(
     row: EventRow,
 ) -> None:
     event = row.event
-    severity = _event_severity(event)
+    severity = event_severity(event)
     category = categorize_alert_context(event.context)
     fingerprint = IssueFingerprint(
         kind="alert",
@@ -1437,7 +2280,7 @@ def _accumulate_alert_issue(
             "event_type": event.event_type,
             "severity": severity,
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "category": category,
         },
     )
@@ -1461,7 +2304,7 @@ def _accumulate_alert_issue(
         details={
             "event_type": event.event_type,
             "collector": event.collector,
-            "backend": _event_backend(event),
+            "backend": event_backend(event),
             "category": category,
         },
     )
@@ -1500,7 +2343,7 @@ def _accumulate_hidden_memory_issues(
                     else "unknown"
                 ),
                 "backend": (
-                    _event_backend(evidence_event)
+                    event_backend(evidence_event)
                     if evidence_event is not None
                     else "unknown"
                 ),
@@ -1697,12 +2540,17 @@ def _int_or_none(value: object) -> int | None:
 
 
 __all__ = [
+    "AttachmentFilter",
     "ArtifactCatalog",
     "CatalogOOMBundle",
     "CatalogSource",
     "CatalogWarning",
+    "CorrelationEvidence",
+    "CorrelationFilter",
+    "CorrelationResult",
     "EventFilter",
     "EventRow",
+    "ExternalAttachment",
     "IssueFilter",
     "OOMBundleFilter",
     "OOMBundleRow",

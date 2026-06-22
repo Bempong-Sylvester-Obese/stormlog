@@ -51,6 +51,7 @@ telemetry_schema
 telemetry_projection
 query_layer
 issue_fingerprinting
+correlation
 pytorch_testing_guide
 tensorflow_testing_guide
 jax_testing_guide

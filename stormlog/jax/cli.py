@@ -5,8 +5,10 @@ import json
 import logging
 import sys
 import time
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
@@ -52,6 +54,56 @@ except ImportError:
 if JAX_AVAILABLE:
     from .diagnose import run_diagnose
     from .tracker import MemoryTracker
+else:
+
+    @dataclass
+    class _UnavailableTrackingResult:
+        peak_memory_bytes: int = 0
+        average_memory_bytes: int = 0
+        duration: float = 0.0
+        memory_usage: list[int] = field(default_factory=list)
+        timestamps: list[float] = field(default_factory=list)
+        alert_count: int = 0
+        telemetry_events: list[dict[str, Any]] = field(default_factory=list)
+        device_memory_profile_path: Optional[str] = None
+
+    class MemoryTracker:  # type: ignore[no-redef]
+        oom_buffer_size = 0
+        last_oom_dump_path: Optional[str] = None
+
+        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+            pass
+
+        def add_alert_callback(self, _callback: Any) -> None:
+            pass
+
+        def start_tracking(self) -> None:
+            raise ImportError("JAX not available")
+
+        def stop_tracking(self) -> _UnavailableTrackingResult:
+            return _UnavailableTrackingResult()
+
+        def get_current_memory(self) -> float:
+            return 0.0
+
+        def get_statistics(self) -> dict[str, Any]:
+            return {"total_events": 0, "peak_memory_mb": 0.0}
+
+        def capture_oom(self, *_args: Any, **_kwargs: Any) -> Any:
+            return nullcontext()
+
+        def get_session_summary(self) -> None:
+            return None
+
+    def run_diagnose(
+        output: Optional[str],
+        device_index: int,
+        duration: float,
+        interval: float,
+        command_line: str,
+    ) -> tuple[Path, int]:
+        _ = (output, device_index, duration, interval, command_line)
+        raise ImportError("JAX not available")
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -178,7 +230,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     print(f"Sampling interval: {args.interval} seconds")
     print(
         f"Duration: {args.duration} seconds"
-        if args.duration
+        if args.duration is not None
         else "Duration: Indefinite"
     )
     if args.threshold:
@@ -199,7 +251,10 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
         start_time = time.time()
         while True:
-            if args.duration and (time.time() - start_time) >= args.duration:
+            if (
+                args.duration is not None
+                and (time.time() - start_time) >= args.duration
+            ):
                 break
 
             current_memory = tracker.get_current_memory()
@@ -207,7 +262,11 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 f"\rCurrent memory usage: {current_memory:.1f} MB", end="", flush=True
             )
 
-            time.sleep(1.0)
+            sleep_for = args.interval
+            if args.duration is not None:
+                remaining = args.duration - (time.time() - start_time)
+                sleep_for = min(sleep_for, max(remaining, 0.0))
+            time.sleep(sleep_for)
 
     except KeyboardInterrupt:
         print("\n\nStopping monitoring...")

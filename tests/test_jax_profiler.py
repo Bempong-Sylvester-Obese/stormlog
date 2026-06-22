@@ -82,6 +82,7 @@ def test_profile_result_properties() -> None:
         function_profiles={},
     )
     assert result.duration == 2.0
+    assert result.memory_growth_rate == pytest.approx(4000 / (1024 * 1024) / 2.0)
 
 
 @jax_mark

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, cast
 
 import stormlog.attributed_viz as attributed_viz
 import stormlog.cuda_native_debug as native_debug
+from stormlog.jax.attributed_viz import render_jax_attributed_html
 
 
 def _extract_embedded_payload(html: str) -> dict[str, Any]:
@@ -477,3 +479,33 @@ def test_render_attributed_wandb_preview_labels_snapshot_only_view() -> None:
     assert "Static W&amp;B preview from the live allocator snapshot" in html
     assert "recorded events" not in html
     assert "Trace Events" in html
+
+
+def test_render_jax_attributed_html_keeps_root_to_leaf_order() -> None:
+    html = render_jax_attributed_html(
+        {"samples": [{"stack": ["root", "caller", "leaf"], "values": [1, 100]}]},
+        output_path="",
+    )
+
+    leaf_row = re.search(
+        r"<tr>\s*<td>\d+</td>\s*"
+        r'<td style="[^"]*">leaf</td>\s*'
+        r"<td>(?P<flat>.*?)</td>\s*"
+        r"<td>(?P<cum>.*?)</td>",
+        html,
+        re.DOTALL,
+    )
+    root_row = re.search(
+        r"<tr>\s*<td>\d+</td>\s*"
+        r'<td style="[^"]*">root</td>\s*'
+        r"<td>(?P<flat>.*?)</td>\s*"
+        r"<td>(?P<cum>.*?)</td>",
+        html,
+        re.DOTALL,
+    )
+
+    assert leaf_row is not None
+    assert root_row is not None
+    assert "100.00B" in leaf_row.group("flat")
+    assert "100.00B" in leaf_row.group("cum")
+    assert "0.00B" in root_row.group("flat")
