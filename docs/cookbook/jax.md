@@ -28,6 +28,36 @@ results = profiler.get_results()
 print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
 ```
 
+## Profiling multi-epoch training data
+
+`JAXProfiler.profile_training` can replay normal re-iterable datasets across
+epochs.  For streaming inputs, pass a zero-argument dataset factory so each
+epoch receives a fresh iterator.
+
+```python
+from stormlog.jax import JAXProfiler
+
+profiler = JAXProfiler()
+
+def make_dataset():
+    return load_training_batches()
+
+def train_step(batch):
+    loss = compiled_train_step(batch)
+    loss.block_until_ready()
+
+profiler.profile_training(
+    train_step,
+    make_dataset,
+    epochs=3,
+    steps_per_epoch=100,
+)
+```
+
+Use `steps_per_epoch` for large or infinite streams.  Finite one-shot iterators
+can be replayed, but Stormlog snapshots only the capped window when
+`steps_per_epoch` is set.
+
 ## Wrapping functions for telemetry tracking
 
 For complex architectures or library code where context managers are intrusive, you can use the `profile_function` decorator to instrument a JAX function globally.

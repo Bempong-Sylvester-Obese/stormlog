@@ -15,6 +15,7 @@ import functools
 import logging
 import threading
 from contextlib import contextmanager
+from itertools import islice
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -63,6 +64,26 @@ logger = logging.getLogger(__name__)
 _global_profiler: Optional[JAXMemoryProfiler] = None
 _profiler_lock = threading.Lock()
 F = TypeVar("F", bound=Callable[..., Any])
+
+
+def _iter_training_batches(dataset: Any, source_description: str) -> Iterator[Any]:
+    try:
+        return iter(dataset)
+    except TypeError as exc:
+        raise TypeError(
+            f"{source_description} must be an iterable of training batches"
+        ) from exc
+
+
+def _materialize_replay_batches(
+    iterator: Iterator[Any],
+    steps_per_epoch: Optional[int],
+) -> list[Any]:
+    if steps_per_epoch is None:
+        return list(iterator)
+    if steps_per_epoch <= 0:
+        return []
+    return list(islice(iterator, steps_per_epoch))
 
 
 # ---------------------------------------------------------------------------
@@ -283,9 +304,10 @@ class JAXProfiler:
         Args:
             train_step_fn: A callable ``(batch) -> Any`` that executes a
                 single training step.
-            dataset: An iterable of batches (must be re-iterable for
-                multi-epoch training; generators are exhausted after
-                epoch 0).  Each epoch iterates over the full dataset
+            dataset: An iterable of batches, a finite one-shot iterator, or
+                a zero-argument factory returning an iterable.  Multi-epoch
+                training requires replayable data; use a factory for large or
+                streaming inputs.  Each epoch iterates over the full dataset
                 (or up to steps_per_epoch batches).
             epochs: Number of epochs to profile.
             steps_per_epoch: Optional cap on the number of steps per epoch.
@@ -293,16 +315,34 @@ class JAXProfiler:
         if not JAX_AVAILABLE:
             raise ImportError("JAX is required for JAXProfiler.profile_training")
 
-        # Convert single-use iterators only when multiple epochs need replay.
-        if epochs > 1 and iter(dataset) is dataset:
-            dataset = list(dataset)
+        dataset_factory: Optional[Callable[[], Any]] = (
+            dataset if callable(dataset) else None
+        )
+
+        # Convert true single-use iterators only when multiple epochs need
+        # replay.  Respect steps_per_epoch so large/infinite streams are not
+        # drained just to build the replay snapshot.
+        if dataset_factory is None and epochs > 1:
+            dataset_iterator = _iter_training_batches(dataset, "dataset")
+            if dataset_iterator is dataset:
+                dataset = _materialize_replay_batches(
+                    dataset_iterator,
+                    steps_per_epoch,
+                )
 
         with self.profiler.profile_context("training"):
+            first_epoch_steps: Optional[int] = None
+
             for epoch in range(epochs):
                 with self.profiler.profile_context(f"epoch_{epoch}"):
                     step_count = 0
+                    epoch_dataset = dataset_factory() if dataset_factory else dataset
+                    batch_iter = _iter_training_batches(
+                        epoch_dataset,
+                        "dataset factory result" if dataset_factory else "dataset",
+                    )
 
-                    for batch in dataset:
+                    for batch in batch_iter:
                         if (
                             steps_per_epoch is not None
                             and step_count >= steps_per_epoch
@@ -313,6 +353,16 @@ class JAXProfiler:
                             train_step_fn(batch)
 
                         step_count += 1
+
+                    if epoch == 0:
+                        first_epoch_steps = step_count
+                    elif first_epoch_steps and step_count == 0:
+                        raise ValueError(
+                            "dataset yielded batches for epoch 0 but no batches "
+                            "for a later epoch; pass a re-iterable dataset, a "
+                            "finite one-shot iterator, or a zero-argument "
+                            "dataset factory for multi-epoch profiling"
+                        )
 
     # -- Inference profiling -----------------------------------------------
 

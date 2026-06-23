@@ -96,6 +96,11 @@ Primary exported symbols:
 - `profile_function`
 - `profile_context`
 
+`JAXProfiler.profile_training` accepts re-iterable datasets, finite one-shot
+iterators, and zero-argument dataset factories.  Use a factory for streaming
+multi-epoch inputs, and combine large or infinite streams with
+`steps_per_epoch`.
+
 ## JAX Result Units
 
 `stormlog.jax.profiler.ProfileResult.memory_growth_rate` reports memory growth
