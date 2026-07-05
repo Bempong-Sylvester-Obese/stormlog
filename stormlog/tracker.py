@@ -173,6 +173,7 @@ class MemoryTracker:
 
         # Tracking state
         self.events: deque[TrackingEvent] = deque(maxlen=max_events)
+        self._events_lock = threading.Lock()
         self._history_dropped_events = 0
         self.is_tracking = False
         self._tracking_thread: Optional[threading.Thread] = None
@@ -245,8 +246,9 @@ class MemoryTracker:
 
     def _reset_tracking_state_for_new_session(self) -> None:
         """Clear per-session in-memory state before starting a new run."""
-        self.events.clear()
-        self._history_dropped_events = 0
+        with self._events_lock:
+            self.events.clear()
+            self._history_dropped_events = 0
         self._last_sink_diagnostics = self._empty_sink_diagnostics()
         self.last_oom_dump_path = None
         self.stats.update(
@@ -660,9 +662,10 @@ class MemoryTracker:
             backend=self.backend,
         )
 
-        if len(self.events) == self.max_events:
-            self._history_dropped_events += 1
-        self.events.append(event)
+        with self._events_lock:
+            if len(self.events) == self.max_events:
+                self._history_dropped_events += 1
+            self.events.append(event)
         self._oom_flight_recorder.record_event(self._tracking_event_payload(event))
         self._append_to_telemetry_sink(event)
 
@@ -1129,7 +1132,8 @@ class MemoryTracker:
         Returns:
             List of filtered events
         """
-        events = list(self.events)
+        with self._events_lock:
+            events = list(self.events)
 
         # Filter by type
         if event_type:
@@ -1155,12 +1159,15 @@ class MemoryTracker:
         Returns:
             Dictionary with timeline data
         """
-        if not self.events:
+        with self._events_lock:
+            events_snapshot = list(self.events)
+
+        if not events_snapshot:
             return {"timestamps": [], "allocated": [], "reserved": []}
 
         # Group events by time intervals
-        start_time = self.events[0].timestamp
-        end_time = self.events[-1].timestamp
+        start_time = events_snapshot[0].timestamp
+        end_time = events_snapshot[-1].timestamp
 
         timestamps = []
         allocated_values = []
@@ -1171,7 +1178,7 @@ class MemoryTracker:
             # Find events in this interval
             interval_events = [
                 e
-                for e in self.events
+                for e in events_snapshot
                 if current_time <= e.timestamp < current_time + interval
             ]
 
@@ -1193,7 +1200,10 @@ class MemoryTracker:
     def get_statistics(self) -> Dict[str, Any]:
         """Get comprehensive tracking statistics."""
         current_stats = self.stats.copy()
-        recent_events = [e for e in self.events if e.timestamp > time.time() - 3600]
+        with self._events_lock:
+            events_snapshot = list(self.events)
+            history_dropped_events = self._history_dropped_events
+        recent_events = [e for e in events_snapshot if e.timestamp > time.time() - 3600]
         sample = (
             self._last_observed_sample
             if self._collector_health.status != COLLECTOR_HEALTH_UNHEALTHY
@@ -1202,11 +1212,11 @@ class MemoryTracker:
 
         current_stats.update(
             {
-                "total_events": len(self.events),
+                "total_events": len(events_snapshot),
                 "events_last_hour": len(recent_events),
                 "history_window_limit_events": self.max_events,
-                "history_retained_events": len(self.events),
-                "history_dropped_events": self._history_dropped_events,
+                "history_retained_events": len(events_snapshot),
+                "history_dropped_events": history_dropped_events,
                 "backend": self.backend,
                 "oom_flight_recorder_enabled": self._oom_flight_recorder.config.enabled,
                 "last_oom_dump_path": self.last_oom_dump_path,
@@ -1266,11 +1276,16 @@ class MemoryTracker:
 
         import pandas as pd
 
-        if not self.events:
+        with self._events_lock:
+            events_snapshot = list(self.events)
+
+        if not events_snapshot:
             return
 
         # Convert events to canonical telemetry records.
-        records = [self._telemetry_record_from_event(event) for event in self.events]
+        records = [
+            self._telemetry_record_from_event(event) for event in events_snapshot
+        ]
 
         if format == "csv":
             df = pd.DataFrame(records)
@@ -1283,8 +1298,9 @@ class MemoryTracker:
 
     def clear_events(self) -> None:
         """Clear all tracking events."""
-        self.events.clear()
-        self._history_dropped_events = 0
+        with self._events_lock:
+            self.events.clear()
+            self._history_dropped_events = 0
 
         # Reset statistics
         self.stats.update(
@@ -1314,7 +1330,9 @@ class MemoryTracker:
     def get_alerts(self, last_n: Optional[int] = None) -> List[TrackingEvent]:
         """Get all alert events (warnings, critical, errors)."""
         alert_types = ["warning", "critical", "error"]
-        alerts = [e for e in self.events if e.event_type in alert_types]
+        with self._events_lock:
+            events_snapshot = list(self.events)
+        alerts = [e for e in events_snapshot if e.event_type in alert_types]
 
         if last_n:
             alerts = alerts[-last_n:]
