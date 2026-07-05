@@ -54,9 +54,16 @@ from .utils import _device_zero
 
 configure_jax_logging()
 
-import jax  # noqa: E402
+jax: Any
 
-JAX_AVAILABLE = True
+try:
+    import jax as _jax  # noqa: E402
+
+    jax = _jax
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+    jax = None
 
 try:
     import psutil

@@ -6,10 +6,10 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.cli import main
-from tests.jax_test_helpers import jax_mark
+from tests.jax_test_helpers import fake_jax_runtime, jax_mark  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_mark
@@ -127,9 +127,10 @@ def test_cmd_track_args(mock_wandb_config: Any, tmp_path: Any) -> None:
 
 @jax_mark
 @mock.patch("sys.argv", ["jaxmemprof", "diagnose", "--duration", "0"])
-@mock.patch("stormlog.jax.cli.run_diagnose")
-def test_cmd_diagnose(mock_run_diagnose: Any, tmp_path: Any) -> None:
+@mock.patch("stormlog.jax.cli._load_run_diagnose")
+def test_cmd_diagnose(mock_loader: Any, tmp_path: Any) -> None:
     """Verify diagnose command creates valid output."""
+    mock_run_diagnose = mock_loader.return_value
     mock_run_diagnose.return_value = (tmp_path / "dummy", 0)
 
     assert main() == 0

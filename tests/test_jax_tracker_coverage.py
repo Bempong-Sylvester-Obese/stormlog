@@ -6,13 +6,14 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.tracker import (
     COLLECTOR_HEALTH_HEALTHY,
     COLLECTOR_HEALTH_UNHEALTHY,
     MemoryTracker,
 )
+from tests.jax_test_helpers import fake_jax_runtime  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 def test_transition_to_failure_and_success() -> None:

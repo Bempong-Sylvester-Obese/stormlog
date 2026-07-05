@@ -6,11 +6,16 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
 from stormlog.jax.tracker import JAXMemoryTracker
 from stormlog.oom_flight_recorder import OOMExceptionClassification
 from stormlog.session import SESSION_STATUS_COMPLETED
-from tests.jax_test_helpers import jax_fixture, jax_mark
+from tests.jax_test_helpers import (  # noqa: F401
+    fake_jax_runtime,
+    jax_fixture,
+    jax_mark,
+)
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_fixture

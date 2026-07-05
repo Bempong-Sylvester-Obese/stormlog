@@ -5,10 +5,11 @@ from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.profiler import MemorySnapshot, ProfileResult
 from stormlog.jax.visualizer import MemoryVisualizer
+from tests.jax_test_helpers import fake_jax_runtime  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 def test_visualizer_init() -> None:
@@ -32,7 +33,7 @@ def test_plot_memory_timeline_matplotlib(mock_plt: Any) -> None:
     mock_plt.show.assert_called_once()
 
 
-@mock.patch("stormlog.jax.visualizer.go")
+@mock.patch("stormlog.jax.visualizer.go", create=True)
 def test_plot_memory_timeline_plotly(mock_go: Any) -> None:
     # Set PLOTLY_AVAILABLE to True for the test
     with mock.patch("stormlog.jax.visualizer.PLOTLY_AVAILABLE", True):

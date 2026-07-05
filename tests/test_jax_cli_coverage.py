@@ -1,12 +1,38 @@
 """Tests for targeting missing lines in JAX CLI coverage."""
 
 import argparse
-from typing import Any
+from contextlib import nullcontext
+from types import SimpleNamespace
+from typing import Any, cast
 from unittest import mock
 
 import pytest
 
 from stormlog.jax import cli
+
+
+def _configure_tracker_loader(mock_loader: mock.Mock) -> mock.Mock:
+    tracker = cast(mock.Mock, mock_loader.return_value.return_value)
+    tracker.oom_buffer_size = 10_000
+    tracker.last_oom_dump_path = None
+    tracker.get_current_memory.return_value = 0.0
+    tracker.get_statistics.return_value = {
+        "total_events": 0,
+        "peak_memory_mb": 0.0,
+    }
+    tracker.capture_oom.return_value = nullcontext()
+    tracker.get_session_summary.return_value = None
+    tracker.stop_tracking.return_value = SimpleNamespace(
+        peak_memory_bytes=0,
+        average_memory_bytes=0,
+        duration=0.0,
+        memory_usage=[],
+        timestamps=[],
+        alert_count=0,
+        telemetry_events=[],
+        device_memory_profile_path=None,
+    )
+    return tracker
 
 
 def test_cmd_analyze_no_file(capsys: Any) -> None:
@@ -54,8 +80,12 @@ def test_cmd_diagnose_bad_args(capsys: Any) -> None:
 
 def test_cmd_diagnose_jax_not_available(capsys: Any) -> None:
     args = argparse.Namespace()
-    with mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False):
+    with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False),
+        mock.patch("stormlog.jax.cli._load_run_diagnose") as mock_loader,
+    ):
         assert cli.cmd_diagnose(args) == 1
+        mock_loader.assert_not_called()
 
 
 def test_cmd_diagnose_wandb_none(capsys: Any) -> None:
@@ -70,7 +100,10 @@ def test_cmd_diagnose_oserror(capsys: Any) -> None:
     config.enabled = False
     with (
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
-        mock.patch("stormlog.jax.cli.run_diagnose", side_effect=OSError("test error")),
+        mock.patch(
+            "stormlog.jax.cli._load_run_diagnose",
+            return_value=mock.Mock(side_effect=OSError("test error")),
+        ),
     ):
         assert cli.cmd_diagnose(args) == 1
 
@@ -82,7 +115,10 @@ def test_cmd_diagnose_success(capsys: Any, tmp_path: Any) -> None:
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
-        mock.patch("stormlog.jax.cli.run_diagnose", return_value=(tmp_path, 2)),
+        mock.patch(
+            "stormlog.jax.cli._load_run_diagnose",
+            return_value=mock.Mock(return_value=(tmp_path, 2)),
+        ),
     ):
         # Test finding manifest
         manifest_file = tmp_path / "manifest.json"
@@ -94,14 +130,20 @@ def test_cmd_diagnose_success(capsys: Any, tmp_path: Any) -> None:
         assert cli.cmd_diagnose(args) == 2
 
         # Test 0 exit code
-        with mock.patch("stormlog.jax.cli.run_diagnose", return_value=(tmp_path, 0)):
+        with mock.patch(
+            "stormlog.jax.cli._load_run_diagnose",
+            return_value=mock.Mock(return_value=(tmp_path, 0)),
+        ):
             assert cli.cmd_diagnose(args) == 0
 
         # Test wandb success
         config.enabled = True
         with (
             mock.patch("stormlog.jax.cli.WANDB_AVAILABLE", True),
-            mock.patch("stormlog.jax.cli.run_diagnose", return_value=(tmp_path, 0)),
+            mock.patch(
+                "stormlog.jax.cli._load_run_diagnose",
+                return_value=mock.Mock(return_value=(tmp_path, 0)),
+            ),
             mock.patch(
                 "stormlog.jax.cli.export_diagnose_bundle_to_wandb"
             ) as mock_wandb,
@@ -112,7 +154,10 @@ def test_cmd_diagnose_success(capsys: Any, tmp_path: Any) -> None:
         # Test wandb error
         with (
             mock.patch("stormlog.jax.cli.WANDB_AVAILABLE", True),
-            mock.patch("stormlog.jax.cli.run_diagnose", return_value=(tmp_path, 0)),
+            mock.patch(
+                "stormlog.jax.cli._load_run_diagnose",
+                return_value=mock.Mock(return_value=(tmp_path, 0)),
+            ),
             mock.patch(
                 "stormlog.jax.cli.export_diagnose_bundle_to_wandb",
                 side_effect=Exception("error"),
@@ -125,8 +170,12 @@ def test_cmd_diagnose_success(capsys: Any, tmp_path: Any) -> None:
 
 def test_cmd_track_jax_not_available(capsys: Any) -> None:
     args = argparse.Namespace()
-    with mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False):
+    with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
+    ):
         assert cli.cmd_track(args) == 1
+        mock_loader.assert_not_called()
 
 
 def test_cmd_track_wandb_none(capsys: Any) -> None:
@@ -151,10 +200,10 @@ def test_cmd_track_keyboard_interrupt(capsys: Any, tmp_path: Any) -> None:
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
-        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", side_effect=KeyboardInterrupt),
     ):
-
+        _configure_tracker_loader(mock_loader)
         assert cli.cmd_track(args) == 0
         assert (tmp_path / "out.json").exists()
 
@@ -176,20 +225,24 @@ def test_cmd_track_stats_and_wandb(capsys: Any, tmp_path: Any) -> None:
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
-        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", sleep_mock),
         mock.patch("stormlog.jax.cli.WANDB_AVAILABLE", True),
         mock.patch("stormlog.jax.cli.export_tracking_run_to_wandb") as mock_wandb,
     ):
-
+        _configure_tracker_loader(mock_loader)
         assert cli.cmd_track(args) == 0
         mock_wandb.assert_called_once()
 
 
 def test_cmd_monitor_jax_not_available(capsys: Any) -> None:
     args = argparse.Namespace()
-    with mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False):
+    with (
+        mock.patch("stormlog.jax.cli.JAX_AVAILABLE", False),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
+    ):
         assert cli.cmd_monitor(args) == 1
+        mock_loader.assert_not_called()
 
 
 def test_cmd_monitor_keyboard_interrupt(capsys: Any, tmp_path: Any) -> None:
@@ -202,13 +255,11 @@ def test_cmd_monitor_keyboard_interrupt(capsys: Any, tmp_path: Any) -> None:
     )
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
-        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
-        mock.patch(
-            "stormlog.jax.cli.MemoryTracker.get_current_memory", return_value=50.0
-        ),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", side_effect=KeyboardInterrupt),
     ):
-
+        tracker = _configure_tracker_loader(mock_loader)
+        tracker.get_current_memory.return_value = 50.0
         assert cli.cmd_monitor(args) == 0
         assert (tmp_path / "mon.json").exists()
 
@@ -225,12 +276,11 @@ def test_cmd_monitor_uses_requested_interval(capsys: Any, tmp_path: Any) -> None
     sleep_mock = mock.Mock(side_effect=KeyboardInterrupt)
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
-        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
-        mock.patch(
-            "stormlog.jax.cli.MemoryTracker.get_current_memory", return_value=50.0
-        ),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", sleep_mock),
     ):
+        tracker = _configure_tracker_loader(mock_loader)
+        tracker.get_current_memory.return_value = 50.0
         assert cli.cmd_monitor(args) == 0
 
     sleep_mock.assert_called_once_with(0.25)
@@ -257,17 +307,12 @@ def test_cmd_monitor_zero_duration_exits_without_sampling(capsys: Any) -> None:
     get_current_memory = mock.Mock(return_value=50.0)
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
-        mock.patch("stormlog.jax.cli.MemoryTracker.start_tracking"),
-        mock.patch(
-            "stormlog.jax.cli.MemoryTracker.get_current_memory",
-            get_current_memory,
-        ),
-        mock.patch(
-            "stormlog.jax.cli.MemoryTracker.stop_tracking",
-            return_value=results,
-        ),
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", sleep_mock),
     ):
+        tracker = _configure_tracker_loader(mock_loader)
+        tracker.get_current_memory = get_current_memory
+        tracker.stop_tracking.return_value = results
         assert cli.cmd_monitor(args) == 0
 
     output = capsys.readouterr().out
@@ -382,11 +427,10 @@ def test_monitor_dropped_samples(capsys: Any, tmp_path: Any) -> None:
     )
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
-        mock.patch("stormlog.jax.cli.MemoryTracker") as mock_tracker_cls,
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", side_effect=KeyboardInterrupt),
     ):
-
-        mock_tracker = mock_tracker_cls.return_value
+        mock_tracker = _configure_tracker_loader(mock_loader)
         mock_tracker.get_current_memory.return_value = 50.0
 
         results = mock.Mock()
@@ -433,11 +477,10 @@ def test_track_oom_telemetry_branches(capsys: Any, tmp_path: Any) -> None:
     with (
         mock.patch("stormlog.jax.cli.JAX_AVAILABLE", True),
         mock.patch("stormlog.jax.cli._resolve_wandb_config", return_value=config),
-        mock.patch("stormlog.jax.cli.MemoryTracker") as mock_tracker_cls,
+        mock.patch("stormlog.jax.cli._load_memory_tracker") as mock_loader,
         mock.patch("time.sleep", side_effect=KeyboardInterrupt),
     ):
-
-        mock_tracker = mock_tracker_cls.return_value
+        mock_tracker = _configure_tracker_loader(mock_loader)
         mock_tracker.oom_buffer_size = 10000
         mock_tracker.last_oom_dump_path = None
         mock_tracker.get_session_summary.return_value = None

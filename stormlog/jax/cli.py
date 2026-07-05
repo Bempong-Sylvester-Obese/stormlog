@@ -1,14 +1,14 @@
 """JAX Stormlog CLI"""
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import sys
 import time
-from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
@@ -51,59 +51,22 @@ except ImportError:
     JAX_AVAILABLE = False
     jax = None
 
-if JAX_AVAILABLE:
-    from .diagnose import run_diagnose
+if TYPE_CHECKING:
     from .tracker import MemoryTracker
-else:
 
-    @dataclass
-    class _UnavailableTrackingResult:
-        peak_memory_bytes: int = 0
-        average_memory_bytes: int = 0
-        duration: float = 0.0
-        memory_usage: list[int] = field(default_factory=list)
-        timestamps: list[float] = field(default_factory=list)
-        alert_count: int = 0
-        telemetry_events: list[dict[str, Any]] = field(default_factory=list)
-        device_memory_profile_path: Optional[str] = None
 
-    class MemoryTracker:  # type: ignore[no-redef]
-        oom_buffer_size = 0
-        last_oom_dump_path: Optional[str] = None
+def _load_memory_tracker() -> type[MemoryTracker]:
+    """Load the JAX tracker only after a command confirms JAX is available."""
+    from .tracker import MemoryTracker
 
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
+    return MemoryTracker
 
-        def add_alert_callback(self, _callback: Any) -> None:
-            pass
 
-        def start_tracking(self) -> None:
-            raise ImportError("JAX not available")
+def _load_run_diagnose() -> Callable[..., tuple[Path, int]]:
+    """Load the diagnose entry point only for a guarded diagnose command."""
+    from .diagnose import run_diagnose
 
-        def stop_tracking(self) -> _UnavailableTrackingResult:
-            return _UnavailableTrackingResult()
-
-        def get_current_memory(self) -> float:
-            return 0.0
-
-        def get_statistics(self) -> dict[str, Any]:
-            return {"total_events": 0, "peak_memory_mb": 0.0}
-
-        def capture_oom(self, *_args: Any, **_kwargs: Any) -> Any:
-            return nullcontext()
-
-        def get_session_summary(self) -> None:
-            return None
-
-    def run_diagnose(
-        output: Optional[str],
-        device_index: int,
-        duration: float,
-        interval: float,
-        command_line: str,
-    ) -> tuple[Path, int]:
-        _ = (output, device_index, duration, interval, command_line)
-        raise ImportError("JAX not available")
+    return run_diagnose
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -238,7 +201,8 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     print("Press Ctrl+C to stop\n")
 
     max_history = int(getattr(args, "max_history", 10000))
-    tracker = MemoryTracker(
+    tracker_class = _load_memory_tracker()
+    tracker = tracker_class(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,
@@ -337,7 +301,8 @@ def cmd_track(args: argparse.Namespace) -> int:
     oom_max_total_mb = int(getattr(args, "oom_max_total_mb", 256))
     max_history = int(getattr(args, "max_history", 10000))
 
-    tracker = MemoryTracker(
+    tracker_class = _load_memory_tracker()
+    tracker = tracker_class(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,
@@ -501,6 +466,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         return 1
 
     command_line = " ".join(sys.argv)
+    run_diagnose = _load_run_diagnose()
     try:
         artifact_dir, exit_code = run_diagnose(
             output=args.output,

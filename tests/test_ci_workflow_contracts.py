@@ -33,6 +33,30 @@ def test_ci_triggers_include_release_dev() -> None:
     assert "branches: [main, release/v0.2-readiness, release/dev]" in content
 
 
+def test_ci_jax_leg_verifies_runtime() -> None:
+    content = _ci_workflow_content()
+    start = content.index("- name: Verify JAX runtime")
+    end = content.index("- name: Run tests", start)
+    runtime_step = content[start:end]
+
+    assert "if: matrix.framework == 'jax'" in runtime_step
+    assert "import jax" in runtime_step
+    assert "import jaxlib" in runtime_step
+    assert "jax.__version__" in runtime_step
+    assert "jaxlib.__version__" in runtime_step
+    assert "devices = jax.devices()" in runtime_step
+    assert "if not devices:" in runtime_step
+    assert "jax.numpy.arange(3) + 1" in runtime_step
+    assert "result.block_until_ready()" in runtime_step
+
+    jax_test_command = re.search(
+        r'python3 -m pytest tests/ -o "python_files=test_jax\*\.py"[^\n]+',
+        content,
+    )
+    assert jax_test_command is not None
+    assert "-ra" in jax_test_command.group(0)
+
+
 def test_ci_wires_memory_regression_gate_job() -> None:
     content = _ci_workflow_content()
     start = content.index("memory-regression-gate:")

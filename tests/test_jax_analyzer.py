@@ -7,7 +7,6 @@ from unittest import mock
 import pytest
 
 pytest.importorskip("numpy")
-pytest.importorskip("jax")
 
 from stormlog.jax.analyzer import (
     MemoryAnalyzer,
@@ -16,6 +15,9 @@ from stormlog.jax.analyzer import (
     _suggest_jax_optimizations,
 )
 from stormlog.jax.profiler import MemorySnapshot, ProfileResult
+from tests.jax_test_helpers import fake_jax_runtime  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 def test_analyzer_init() -> None:
