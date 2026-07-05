@@ -66,13 +66,24 @@ _profiler_lock = threading.Lock()
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-def _iter_training_batches(dataset: Any, source_description: str) -> Iterator[Any]:
+def _try_iter_training_batches(dataset: Any) -> Optional[Iterator[Any]]:
     try:
-        return iter(dataset)
-    except TypeError as exc:
-        raise TypeError(
-            f"{source_description} must be an iterable of training batches"
-        ) from exc
+        return cast(Iterator[Any], iter(dataset))
+    except TypeError:
+        return None
+
+
+def _iter_training_batches(dataset: Any, source_description: str) -> Iterator[Any]:
+    iterator = _try_iter_training_batches(dataset)
+    if iterator is None:
+        raise TypeError(f"{source_description} must be an iterable of training batches")
+    return iterator
+
+
+def _dataset_factory_for(dataset: Any) -> Optional[Callable[[], Any]]:
+    if callable(dataset) and _try_iter_training_batches(dataset) is None:
+        return cast(Callable[[], Any], dataset)
+    return None
 
 
 def _materialize_replay_batches(
@@ -315,9 +326,7 @@ class JAXProfiler:
         if not JAX_AVAILABLE:
             raise ImportError("JAX is required for JAXProfiler.profile_training")
 
-        dataset_factory: Optional[Callable[[], Any]] = (
-            dataset if callable(dataset) else None
-        )
+        dataset_factory = _dataset_factory_for(dataset)
 
         # Convert true single-use iterators only when multiple epochs need
         # replay.  Respect steps_per_epoch so large/infinite streams are not

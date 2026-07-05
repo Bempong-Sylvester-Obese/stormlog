@@ -32,7 +32,9 @@ print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
 
 `JAXProfiler.profile_training` can replay normal re-iterable datasets across
 epochs.  For streaming inputs, pass a zero-argument dataset factory so each
-epoch receives a fresh iterator.
+epoch receives a fresh iterator.  Callable objects that are already iterable
+are iterated directly; wrap them in a zero-argument callable to force factory
+behavior.
 
 ```python
 from stormlog.jax import JAXProfiler

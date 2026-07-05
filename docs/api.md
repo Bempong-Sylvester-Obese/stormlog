@@ -99,7 +99,8 @@ Primary exported symbols:
 `JAXProfiler.profile_training` accepts re-iterable datasets, finite one-shot
 iterators, and zero-argument dataset factories.  Use a factory for streaming
 multi-epoch inputs, and combine large or infinite streams with
-`steps_per_epoch`.
+`steps_per_epoch`.  Callable objects that are already iterable are iterated
+directly; wrap them in a zero-argument callable to force factory behavior.
 
 ## JAX Result Units
 

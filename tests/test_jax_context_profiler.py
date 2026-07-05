@@ -198,6 +198,33 @@ def test_jax_profiler_training_raises_for_empty_later_epoch(
 
 
 @jax_mark
+def test_jax_profiler_training_iterates_callable_iterable_dataset(
+    mock_device: mock.Mock,
+) -> None:
+    class CallableIterable:
+        def __iter__(self) -> Any:
+            return iter([1, 2])
+
+        def __call__(self, value: int) -> list[int]:
+            raise AssertionError("profile_training should iterate this object directly")
+
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            stepped: list[int] = []
+
+            def train_step(batch: int) -> None:
+                stepped.append(batch)
+
+            jp.profile_training(train_step, CallableIterable(), epochs=1)
+
+            assert stepped == [1, 2]
+
+
+@jax_mark
 def test_jax_profiler_training_uses_dataset_factory_per_epoch(
     mock_device: mock.Mock,
 ) -> None:
