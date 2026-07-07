@@ -69,6 +69,7 @@ from .telemetry_classification import (
     is_oom_event,
 )
 from .telemetry_rollups import (
+    ROLLUP_FILENAME,
     RankRollup,
     SessionRollup,
     TelemetryRollupFile,
@@ -95,6 +96,7 @@ SourceKind = Literal[
     "diagnose_bundle",
     "oom_bundle",
 ]
+AttachmentStorage = Literal["reference", "copy"]
 SummaryMetric = Literal[
     "session_count_by_status",
     "peak_allocator_allocated_bytes",
@@ -106,6 +108,10 @@ SummaryMetric = Literal[
     "hidden_memory_gap_growth",
 ]
 SummaryGroupBy = Literal["session", "session-rank", "rank", "status"]
+
+RUN_ENVELOPE_FILENAME = "stormlog_run.json"
+RUN_ENVELOPE_FORMAT = "stormlog.run_envelope"
+RUN_ENVELOPE_SCHEMA_VERSION = 1
 
 _TELEMETRY_FILE_NAME_PARTS = ("event", "events", "track", "telemetry")
 _GAP_ANALYSIS_THRESHOLDS = {
@@ -177,6 +183,147 @@ class CatalogOOMBundle:
             "exception_type": self.exception_type,
             "exception_module": self.exception_module,
         }
+
+
+@dataclass(frozen=True)
+class CatalogRunSessionRef:
+    """Session membership declared by a run envelope."""
+
+    session_id: str
+    job_id: str | None
+    rank: int | None
+    local_rank: int | None
+    world_size: int | None
+    role: str | None
+    source_namespace: str | None
+    source_ref: str | None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "job_id": self.job_id,
+            "rank": self.rank,
+            "local_rank": self.local_rank,
+            "world_size": self.world_size,
+            "role": self.role,
+            "source_namespace": self.source_namespace,
+            "source_ref": self.source_ref,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class CatalogRunAttachment:
+    """Attachment declared by a run envelope."""
+
+    title: str
+    kind: str
+    storage: AttachmentStorage
+    attachment_id: str | None
+    url: str | None
+    path: str | None
+    run_id: str | None
+    session_id: str | None
+    job_id: str | None
+    rank: int | None
+    local_rank: int | None
+    world_size: int | None
+    start_ns: int | None
+    end_ns: int | None
+    created_at_utc: str | None
+    updated_at_utc: str | None
+    source_namespace: str | None
+    source_ref: str | None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "title": self.title,
+            "kind": self.kind,
+            "storage": self.storage,
+            "attachment_id": self.attachment_id,
+            "url": self.url,
+            "path": self.path,
+            "run_id": self.run_id,
+            "session_id": self.session_id,
+            "job_id": self.job_id,
+            "rank": self.rank,
+            "local_rank": self.local_rank,
+            "world_size": self.world_size,
+            "start_ns": self.start_ns,
+            "end_ns": self.end_ns,
+            "created_at_utc": self.created_at_utc,
+            "updated_at_utc": self.updated_at_utc,
+            "source_namespace": self.source_namespace,
+            "source_ref": self.source_ref,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class CatalogRunEnvelope:
+    """Manifest-backed top-level Stormlog run envelope."""
+
+    run_id: str
+    path: Path
+    title: str | None
+    description: str | None
+    job_id: str | None
+    started_at_ns: int | None
+    ended_at_ns: int | None
+    created_at_utc: str | None
+    updated_at_utc: str | None
+    source_namespace: str | None
+    source_ref: str | None
+    tags: tuple[str, ...]
+    sessions: tuple[CatalogRunSessionRef, ...]
+    attachments: tuple[CatalogRunAttachment, ...]
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "path": str(self.path),
+            "title": self.title,
+            "description": self.description,
+            "job_id": self.job_id,
+            "started_at_ns": self.started_at_ns,
+            "ended_at_ns": self.ended_at_ns,
+            "created_at_utc": self.created_at_utc,
+            "updated_at_utc": self.updated_at_utc,
+            "source_namespace": self.source_namespace,
+            "source_ref": self.source_ref,
+            "tags": list(self.tags),
+            "sessions": [session.as_dict() for session in self.sessions],
+            "attachments": [attachment.as_dict() for attachment in self.attachments],
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class RunFilter:
+    """Filters for top-level run envelope rows."""
+
+    run_id: str | None = None
+    session_id: str | None = None
+    job_id: str | None = None
+    rank: int | None = None
+    source_namespace: str | None = None
+    source_ref: str | None = None
+
+
+@dataclass(frozen=True)
+class RunAttachmentFilter:
+    """Filters for run attachment catalog rows."""
+
+    run_id: str | None = None
+    session_id: str | None = None
+    job_id: str | None = None
+    rank: int | None = None
+    kind: str | None = None
+    source_namespace: str | None = None
+    source_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -321,6 +468,138 @@ class OOMBundleRow:
 
 
 @dataclass(frozen=True)
+class RunRow:
+    """Query row describing one explicit or synthesized run envelope."""
+
+    run_id: str
+    explicit: bool
+    title: str | None
+    description: str | None
+    job_id: str | None
+    started_at_ns: int | None
+    ended_at_ns: int | None
+    source_path: str
+    source_kind: str
+    source_namespace: str | None
+    source_ref: str | None
+    session_count: int
+    attachment_count: int
+    sessions: tuple[str, ...]
+    ranks: tuple[int, ...]
+    tags: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "explicit": self.explicit,
+            "title": self.title,
+            "description": self.description,
+            "job_id": self.job_id,
+            "started_at_ns": self.started_at_ns,
+            "ended_at_ns": self.ended_at_ns,
+            "source_path": self.source_path,
+            "source_kind": self.source_kind,
+            "source_namespace": self.source_namespace,
+            "source_ref": self.source_ref,
+            "session_count": self.session_count,
+            "attachment_count": self.attachment_count,
+            "sessions": list(self.sessions),
+            "ranks": list(self.ranks),
+            "tags": list(self.tags),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class RunAttachmentRow:
+    """Query row for local, distributed, or external run evidence."""
+
+    run_id: str
+    title: str
+    kind: str
+    storage: AttachmentStorage
+    attachment_id: str | None
+    url: str | None
+    path: str | None
+    session_id: str | None
+    job_id: str | None
+    rank: int | None
+    local_rank: int | None
+    world_size: int | None
+    start_ns: int | None
+    end_ns: int | None
+    source_path: str
+    source_kind: str
+    source_namespace: str | None
+    source_ref: str | None
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "run_id": self.run_id,
+            "title": self.title,
+            "kind": self.kind,
+            "storage": self.storage,
+            "attachment_id": self.attachment_id,
+            "url": self.url,
+            "path": self.path,
+            "session_id": self.session_id,
+            "job_id": self.job_id,
+            "rank": self.rank,
+            "local_rank": self.local_rank,
+            "world_size": self.world_size,
+            "start_ns": self.start_ns,
+            "end_ns": self.end_ns,
+            "source_path": self.source_path,
+            "source_kind": self.source_kind,
+            "source_namespace": self.source_namespace,
+            "source_ref": self.source_ref,
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True)
+class _RunContext:
+    run_id: str
+    explicit: bool
+    title: str | None
+    description: str | None
+    job_id: str | None
+    started_at_ns: int | None
+    ended_at_ns: int | None
+    source_path: str
+    source_kind: str
+    source_namespace: str | None
+    source_ref: str | None
+    sessions: tuple[SessionRow, ...]
+    tags: tuple[str, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def to_row(self, attachment_count: int) -> RunRow:
+        ranks = sorted({session.rank for session in self.sessions})
+        return RunRow(
+            run_id=self.run_id,
+            explicit=self.explicit,
+            title=self.title,
+            description=self.description,
+            job_id=self.job_id,
+            started_at_ns=self.started_at_ns,
+            ended_at_ns=self.ended_at_ns,
+            source_path=self.source_path,
+            source_kind=self.source_kind,
+            source_namespace=self.source_namespace,
+            source_ref=self.source_ref,
+            session_count=len(self.sessions),
+            attachment_count=attachment_count,
+            sessions=tuple(session.session_id for session in self.sessions),
+            ranks=tuple(ranks),
+            tags=self.tags,
+            metadata=self.metadata,
+        )
+
+
+@dataclass(frozen=True)
 class SummaryRow:
     """Built-in summary result row."""
 
@@ -353,10 +632,12 @@ class ArtifactCatalog:
         self.sources: list[CatalogSource] = []
         self.oom_bundles: list[CatalogOOMBundle] = []
         self.attachments: list[ExternalAttachment] = []
+        self.run_envelopes: list[CatalogRunEnvelope] = []
         self.warnings: list[CatalogWarning] = []
         self._source_keys: set[tuple[Path, SourceKind]] = set()
         self._oom_bundle_paths: set[Path] = set()
         self._attachment_sidecar_paths: set[Path] = set()
+        self._run_envelope_paths: set[Path] = set()
         self._covered_event_paths: set[Path] = set()
         self._discover()
 
@@ -366,6 +647,7 @@ class ArtifactCatalog:
             "sources": [source.as_dict() for source in self.sources],
             "oom_bundles": [bundle.as_dict() for bundle in self.oom_bundles],
             "attachments": [attachment.as_dict() for attachment in self.attachments],
+            "run_envelopes": [envelope.as_dict() for envelope in self.run_envelopes],
             "warnings": [warning.as_dict() for warning in self.warnings],
         }
 
@@ -386,6 +668,7 @@ class ArtifactCatalog:
         self._discover_directory(path)
 
     def _discover_directory(self, directory: Path) -> None:
+        self._discover_run_envelope(directory / RUN_ENVELOPE_FILENAME)
         self._discover_attachment_sidecar(directory / ATTACHMENTS_FILENAME)
         manifest_path = directory / MANIFEST_FILENAME
         manifest_payload = _read_json_object(manifest_path)
@@ -445,12 +728,18 @@ class ArtifactCatalog:
         for attachment_sidecar in sorted(directory.rglob(ATTACHMENTS_FILENAME)):
             self._discover_attachment_sidecar(attachment_sidecar)
 
+        for run_envelope in sorted(directory.rglob(RUN_ENVELOPE_FILENAME)):
+            self._discover_run_envelope(run_envelope)
+
         for candidate in self._discover_candidate_files(directory):
             if candidate in self._covered_event_paths:
                 continue
             self._discover_file(candidate)
 
     def _discover_file(self, path: Path) -> None:
+        if path.name == RUN_ENVELOPE_FILENAME:
+            self._discover_run_envelope(path)
+            return
         if path.name == ATTACHMENTS_FILENAME:
             self._discover_attachment_sidecar(path)
             return
@@ -594,6 +883,23 @@ class ArtifactCatalog:
                 continue
             self.attachments.append(attachment)
 
+    def _discover_run_envelope(self, path: Path) -> None:
+        if not path.exists() or not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved in self._run_envelope_paths:
+            return
+        self._run_envelope_paths.add(resolved)
+        payload = _read_json_object(path)
+        if payload is None:
+            self._warn(path, "run envelope is not a JSON object")
+            return
+        envelope = _run_envelope_from_payload(payload, path)
+        if envelope is None:
+            self._warn(path, "unrecognized run envelope shape")
+            return
+        self.run_envelopes.append(envelope)
+
     def _warn(self, path: Path, message: str) -> None:
         self.warnings.append(CatalogWarning(path=str(path), message=message))
 
@@ -606,6 +912,48 @@ class QueryStore:
         self._loaded_sessions_by_source: dict[
             tuple[Path, SourceKind], list[LoadedTelemetrySession]
         ] = {}
+
+    def list_runs(self, filters: RunFilter | None = None) -> list[RunRow]:
+        """Return explicit run envelopes or synthesized local run rows."""
+        filters = filters or RunFilter()
+        contexts = self._run_contexts()
+        attachments = self._run_attachment_rows_for_contexts(contexts)
+        attachment_counts: dict[str, int] = defaultdict(int)
+        for attachment in attachments:
+            attachment_counts[attachment.run_id] += 1
+        rows = [
+            context.to_row(attachment_counts.get(context.run_id, 0))
+            for context in contexts.values()
+        ]
+        rows = [row for row in rows if _run_matches(row, filters)]
+        rows.sort(
+            key=lambda row: (
+                row.started_at_ns if row.started_at_ns is not None else -1,
+                row.run_id,
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def list_run_attachments(
+        self,
+        filters: RunAttachmentFilter | None = None,
+    ) -> list[RunAttachmentRow]:
+        """Return local, distributed, and external attachments indexed by run."""
+        filters = filters or RunAttachmentFilter()
+        rows = self._run_attachment_rows_for_contexts(self._run_contexts())
+        rows = [row for row in rows if _run_attachment_matches(row, filters)]
+        rows.sort(
+            key=lambda row: (
+                row.run_id,
+                row.session_id or "",
+                row.rank if row.rank is not None else -1,
+                row.kind,
+                row.title,
+                row.source_path,
+            )
+        )
+        return rows
 
     def list_sessions(self, filters: SessionFilter | None = None) -> list[SessionRow]:
         """Return session rows from manifest metadata or loaded flat files."""
@@ -822,6 +1170,224 @@ class QueryStore:
         if metric == "hidden_memory_gap_growth":
             return _summarize_hidden_memory_gap_growth(events, resolved_group_by)
         raise ValueError(f"unsupported summary metric: {metric}")
+
+    def _run_contexts(self) -> dict[str, _RunContext]:
+        sessions = self.list_sessions(SessionFilter())
+        session_by_id = _first_session_by_id(sessions)
+        if self.catalog.run_envelopes:
+            return self._explicit_run_contexts(sessions, session_by_id)
+        return self._implicit_run_contexts(sessions)
+
+    def _explicit_run_contexts(
+        self,
+        sessions: Sequence[SessionRow],
+        session_by_id: Mapping[str, SessionRow],
+    ) -> dict[str, _RunContext]:
+        contexts: dict[str, _RunContext] = {}
+        for envelope in self.catalog.run_envelopes:
+            member_ids = {session.session_id for session in envelope.sessions}
+            members = [
+                session_by_id[session_id]
+                for session_id in member_ids
+                if session_id in session_by_id
+            ]
+            if not members and envelope.job_id is not None:
+                members = [
+                    session for session in sessions if session.job_id == envelope.job_id
+                ]
+            members.sort(
+                key=lambda session: (session.started_at_ns, session.session_id)
+            )
+            contexts[envelope.run_id] = _RunContext(
+                run_id=envelope.run_id,
+                explicit=True,
+                title=envelope.title,
+                description=envelope.description,
+                job_id=envelope.job_id or _common_job_id(members),
+                started_at_ns=(
+                    envelope.started_at_ns
+                    if envelope.started_at_ns is not None
+                    else _min_started_at_ns(members)
+                ),
+                ended_at_ns=(
+                    envelope.ended_at_ns
+                    if envelope.ended_at_ns is not None
+                    else _max_ended_at_ns(members)
+                ),
+                source_path=str(envelope.path),
+                source_kind="run_envelope",
+                source_namespace=envelope.source_namespace,
+                source_ref=envelope.source_ref,
+                sessions=tuple(members),
+                tags=envelope.tags,
+                metadata=envelope.metadata,
+            )
+        return contexts
+
+    def _implicit_run_contexts(
+        self,
+        sessions: Sequence[SessionRow],
+    ) -> dict[str, _RunContext]:
+        grouped: dict[str, list[SessionRow]] = defaultdict(list)
+        for session in sessions:
+            if session.job_id is not None:
+                grouped[f"job:{session.job_id}"].append(session)
+            else:
+                grouped[f"session:{session.session_id}"].append(session)
+
+        contexts: dict[str, _RunContext] = {}
+        for run_id, members in grouped.items():
+            members.sort(
+                key=lambda session: (session.started_at_ns, session.session_id)
+            )
+            job_id = _common_job_id(members)
+            contexts[run_id] = _RunContext(
+                run_id=run_id,
+                explicit=False,
+                title=(
+                    f"Distributed job {job_id}"
+                    if job_id is not None
+                    else f"Session {members[0].session_id}"
+                ),
+                description=None,
+                job_id=job_id,
+                started_at_ns=_min_started_at_ns(members),
+                ended_at_ns=_max_ended_at_ns(members),
+                source_path=members[0].source_path if members else "",
+                source_kind="implicit_run",
+                source_namespace=None,
+                source_ref=None,
+                sessions=tuple(members),
+            )
+        return contexts
+
+    def _run_attachment_rows_for_contexts(
+        self,
+        contexts: Mapping[str, _RunContext],
+    ) -> list[RunAttachmentRow]:
+        session_to_run = _session_to_run_id(contexts)
+        job_to_run = _job_to_run_id(contexts)
+        rows: list[RunAttachmentRow] = []
+
+        rows.extend(self._envelope_attachment_rows(contexts))
+        rows.extend(
+            _sidecar_attachment_rows(
+                self.catalog.attachments, session_to_run, job_to_run
+            )
+        )
+        rows.extend(
+            self._local_source_attachment_rows(contexts, session_to_run, job_to_run)
+        )
+        rows.extend(_oom_attachment_rows(self.catalog.oom_bundles, session_to_run))
+        return rows
+
+    def _envelope_attachment_rows(
+        self,
+        contexts: Mapping[str, _RunContext],
+    ) -> list[RunAttachmentRow]:
+        rows: list[RunAttachmentRow] = []
+        for envelope in self.catalog.run_envelopes:
+            if envelope.run_id not in contexts:
+                continue
+            for attachment in envelope.attachments:
+                run_id = attachment.run_id or envelope.run_id
+                rows.append(
+                    RunAttachmentRow(
+                        run_id=run_id,
+                        title=attachment.title,
+                        kind=attachment.kind,
+                        storage=attachment.storage,
+                        attachment_id=attachment.attachment_id,
+                        url=attachment.url,
+                        path=attachment.path,
+                        session_id=attachment.session_id,
+                        job_id=attachment.job_id or envelope.job_id,
+                        rank=attachment.rank,
+                        local_rank=attachment.local_rank,
+                        world_size=attachment.world_size,
+                        start_ns=attachment.start_ns,
+                        end_ns=attachment.end_ns,
+                        source_path=attachment.url
+                        or attachment.path
+                        or str(envelope.path),
+                        source_kind="run_envelope_attachment",
+                        source_namespace=attachment.source_namespace
+                        or envelope.source_namespace,
+                        source_ref=attachment.source_ref or envelope.source_ref,
+                        metadata=attachment.metadata,
+                    )
+                )
+        return rows
+
+    def _local_source_attachment_rows(
+        self,
+        contexts: Mapping[str, _RunContext],
+        session_to_run: Mapping[str, str],
+        job_to_run: Mapping[str, str],
+    ) -> list[RunAttachmentRow]:
+        rows: list[RunAttachmentRow] = []
+        for source in self.catalog.sources:
+            if source.source_kind == "sink":
+                rows.extend(
+                    self._sink_attachment_rows(source, session_to_run, job_to_run)
+                )
+            elif source.source_kind == "diagnose_bundle":
+                rows.extend(_diagnose_attachment_rows(source, session_to_run))
+            elif source.source_kind in {
+                "telemetry_json",
+                "telemetry_jsonl",
+                "telemetry_csv",
+            }:
+                rows.extend(_flat_telemetry_attachment_rows(source, contexts))
+        return rows
+
+    def _sink_attachment_rows(
+        self,
+        source: CatalogSource,
+        session_to_run: Mapping[str, str],
+        job_to_run: Mapping[str, str],
+    ) -> list[RunAttachmentRow]:
+        manifest = read_telemetry_sink_manifest(source.path)
+        if manifest is None:
+            return []
+        rows: list[RunAttachmentRow] = []
+        for summary in manifest.sessions:
+            run_id = _run_id_for_identity(
+                summary.session_id,
+                summary.job_id,
+                session_to_run,
+                job_to_run,
+            )
+            if run_id is None:
+                continue
+            rows.append(
+                _local_attachment_row(
+                    run_id=run_id,
+                    title="Telemetry sink",
+                    kind="telemetry_sink",
+                    path=str(source.path),
+                    session_id=summary.session_id,
+                    job_id=summary.job_id,
+                    rank=summary.rank,
+                    local_rank=summary.local_rank,
+                    world_size=summary.world_size,
+                    start_ns=summary.started_at_ns,
+                    end_ns=summary.ended_at_ns,
+                    source_kind="sink",
+                    metadata={
+                        "manifest_path": (
+                            str(source.manifest_path)
+                            if source.manifest_path is not None
+                            else None
+                        ),
+                    },
+                )
+            )
+        rows.extend(_sink_segment_attachment_rows(source, manifest, session_to_run))
+        rollup_path = source.path / ROLLUP_FILENAME
+        if rollup_path.exists():
+            rows.extend(_rollup_attachment_rows(source, manifest, session_to_run))
+        return rows
 
     def _session_rows_for_source(
         self,
@@ -1279,7 +1845,157 @@ def _attachment_from_payload(
         updated_at_utc=_string_or_none(payload.get("updated_at_utc")),
         metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
         sidecar_path=str(sidecar_path),
+        run_id=_string_or_none(payload.get("run_id")),
+        storage=_attachment_storage_or_default(payload.get("storage")),
+        source_namespace=_string_or_none(payload.get("source_namespace")),
+        source_ref=_string_or_none(payload.get("source_ref")),
     )
+
+
+def _run_envelope_from_payload(
+    payload: Mapping[str, Any],
+    envelope_path: Path,
+) -> CatalogRunEnvelope | None:
+    if not _is_run_envelope(payload):
+        return None
+    run_id = _string_or_none(payload.get("run_id"))
+    metadata = payload.get("metadata")
+    if run_id is None or not isinstance(metadata, Mapping):
+        return None
+
+    sessions_payload = payload.get("sessions", ())
+    attachments_payload = payload.get("attachments", ())
+    if not _is_optional_sequence(sessions_payload):
+        return None
+    if not _is_optional_sequence(attachments_payload):
+        return None
+
+    sessions = tuple(
+        session
+        for item in sessions_payload or ()
+        if isinstance(item, Mapping)
+        for session in [_run_session_ref_from_payload(item)]
+        if session is not None
+    )
+    attachments = tuple(
+        attachment
+        for item in attachments_payload or ()
+        if isinstance(item, Mapping)
+        for attachment in [_run_attachment_from_payload(item, envelope_path, run_id)]
+        if attachment is not None
+    )
+    tags_payload = payload.get("tags", ())
+    tags = tuple(item for item in tags_payload or () if isinstance(item, str) and item)
+    return CatalogRunEnvelope(
+        run_id=run_id,
+        path=envelope_path,
+        title=_string_or_none(payload.get("title")),
+        description=_string_or_none(payload.get("description")),
+        job_id=_string_or_none(payload.get("job_id")),
+        started_at_ns=_int_or_none(payload.get("started_at_ns")),
+        ended_at_ns=_int_or_none(payload.get("ended_at_ns")),
+        created_at_utc=_string_or_none(payload.get("created_at_utc")),
+        updated_at_utc=_string_or_none(payload.get("updated_at_utc")),
+        source_namespace=_string_or_none(payload.get("source_namespace")),
+        source_ref=_string_or_none(payload.get("source_ref")),
+        tags=tags,
+        sessions=sessions,
+        attachments=attachments,
+        metadata=dict(metadata),
+    )
+
+
+def _run_session_ref_from_payload(
+    payload: Mapping[str, Any],
+) -> CatalogRunSessionRef | None:
+    session_id = _string_or_none(payload.get("session_id"))
+    metadata = payload.get("metadata")
+    if session_id is None:
+        return None
+    return CatalogRunSessionRef(
+        session_id=session_id,
+        job_id=_string_or_none(payload.get("job_id")),
+        rank=_int_or_none(payload.get("rank")),
+        local_rank=_int_or_none(payload.get("local_rank")),
+        world_size=_int_or_none(payload.get("world_size")),
+        role=_string_or_none(payload.get("role")),
+        source_namespace=_string_or_none(payload.get("source_namespace")),
+        source_ref=_string_or_none(payload.get("source_ref")),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+    )
+
+
+def _run_attachment_from_payload(
+    payload: Mapping[str, Any],
+    envelope_path: Path,
+    envelope_run_id: str,
+) -> CatalogRunAttachment | None:
+    title = _string_or_none(payload.get("title"))
+    kind = _string_or_none(payload.get("kind"))
+    storage = _attachment_storage_or_none(payload.get("storage"))
+    if title is None or kind is None or storage is None:
+        return None
+    url = _string_or_none(payload.get("url"))
+    raw_path = _string_or_none(payload.get("path"))
+    if url is None and raw_path is None:
+        return None
+    resolved_path = _resolve_optional_path(raw_path, envelope_path)
+    start_ns = _int_or_none(payload.get("start_ns"))
+    end_ns = _int_or_none(payload.get("end_ns"))
+    if start_ns is not None and end_ns is not None and end_ns < start_ns:
+        return None
+    metadata = payload.get("metadata")
+    return CatalogRunAttachment(
+        title=title,
+        kind=kind,
+        storage=storage,
+        attachment_id=_string_or_none(payload.get("attachment_id")),
+        url=url,
+        path=resolved_path,
+        run_id=_string_or_none(payload.get("run_id")) or envelope_run_id,
+        session_id=_string_or_none(payload.get("session_id")),
+        job_id=_string_or_none(payload.get("job_id")),
+        rank=_int_or_none(payload.get("rank")),
+        local_rank=_int_or_none(payload.get("local_rank")),
+        world_size=_int_or_none(payload.get("world_size")),
+        start_ns=start_ns,
+        end_ns=end_ns,
+        created_at_utc=_string_or_none(payload.get("created_at_utc")),
+        updated_at_utc=_string_or_none(payload.get("updated_at_utc")),
+        source_namespace=_string_or_none(payload.get("source_namespace")),
+        source_ref=_string_or_none(payload.get("source_ref")),
+        metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
+    )
+
+
+def _is_run_envelope(payload: Mapping[str, Any]) -> bool:
+    return (
+        payload.get("schema_version") == RUN_ENVELOPE_SCHEMA_VERSION
+        and payload.get("format") == RUN_ENVELOPE_FORMAT
+    )
+
+
+def _is_optional_sequence(value: Any) -> bool:
+    return value is None or (isinstance(value, Sequence) and not isinstance(value, str))
+
+
+def _resolve_optional_path(raw_path: str | None, source_path: Path) -> str | None:
+    if raw_path is None:
+        return None
+    path = Path(raw_path)
+    if not path.is_absolute():
+        path = source_path.parent / path
+    return str(path.resolve())
+
+
+def _attachment_storage_or_none(value: Any) -> AttachmentStorage | None:
+    if value == "reference" or value == "copy":
+        return cast(AttachmentStorage, value)
+    return None
+
+
+def _attachment_storage_or_default(value: Any) -> AttachmentStorage:
+    return _attachment_storage_or_none(value) or "reference"
 
 
 def _diagnose_session_summary(manifest_path: Path | None) -> SessionSummary | None:
@@ -1474,6 +2190,363 @@ def _count_oom_bundles_by_session(
         if bundle.session_id is not None:
             counts[bundle.session_id] += 1
     return counts
+
+
+def _first_session_by_id(
+    sessions: Sequence[SessionRow],
+) -> dict[str, SessionRow]:
+    rows: dict[str, SessionRow] = {}
+    for session in sessions:
+        rows.setdefault(session.session_id, session)
+    return rows
+
+
+def _common_job_id(sessions: Sequence[SessionRow]) -> str | None:
+    job_ids = {session.job_id for session in sessions if session.job_id is not None}
+    return next(iter(job_ids)) if len(job_ids) == 1 else None
+
+
+def _min_started_at_ns(sessions: Sequence[SessionRow]) -> int | None:
+    if not sessions:
+        return None
+    return min(session.started_at_ns for session in sessions)
+
+
+def _max_ended_at_ns(sessions: Sequence[SessionRow]) -> int | None:
+    if not sessions or any(session.ended_at_ns is None for session in sessions):
+        return None
+    return max(cast(int, session.ended_at_ns) for session in sessions)
+
+
+def _session_to_run_id(
+    contexts: Mapping[str, _RunContext],
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for context in contexts.values():
+        for session in context.sessions:
+            mapping.setdefault(session.session_id, context.run_id)
+    return mapping
+
+
+def _job_to_run_id(
+    contexts: Mapping[str, _RunContext],
+) -> dict[str, str]:
+    mapping: dict[str, str] = {}
+    for context in contexts.values():
+        if context.job_id is not None:
+            mapping.setdefault(context.job_id, context.run_id)
+    return mapping
+
+
+def _run_id_for_identity(
+    session_id: str | None,
+    job_id: str | None,
+    session_to_run: Mapping[str, str],
+    job_to_run: Mapping[str, str],
+) -> str | None:
+    if session_id is not None and session_id in session_to_run:
+        return session_to_run[session_id]
+    if job_id is not None and job_id in job_to_run:
+        return job_to_run[job_id]
+    return None
+
+
+def _sidecar_attachment_rows(
+    attachments: Sequence[ExternalAttachment],
+    session_to_run: Mapping[str, str],
+    job_to_run: Mapping[str, str],
+) -> list[RunAttachmentRow]:
+    rows: list[RunAttachmentRow] = []
+    for attachment in attachments:
+        run_id = attachment.run_id or _run_id_for_identity(
+            attachment.session_id,
+            attachment.job_id,
+            session_to_run,
+            job_to_run,
+        )
+        if run_id is None:
+            continue
+        rows.append(
+            RunAttachmentRow(
+                run_id=run_id,
+                title=attachment.title,
+                kind=attachment.kind,
+                storage=_attachment_storage_or_default(attachment.storage),
+                attachment_id=attachment.attachment_id,
+                url=attachment.url,
+                path=attachment.path,
+                session_id=attachment.session_id,
+                job_id=attachment.job_id,
+                rank=attachment.rank,
+                local_rank=None,
+                world_size=None,
+                start_ns=attachment.start_ns,
+                end_ns=attachment.end_ns,
+                source_path=attachment.url
+                or attachment.path
+                or attachment.sidecar_path,
+                source_kind="attachment_sidecar",
+                source_namespace=attachment.source_namespace,
+                source_ref=attachment.source_ref,
+                metadata=attachment.metadata,
+            )
+        )
+    return rows
+
+
+def _sink_segment_attachment_rows(
+    source: CatalogSource,
+    manifest: TelemetrySinkManifest,
+    session_to_run: Mapping[str, str],
+) -> list[RunAttachmentRow]:
+    rows: list[RunAttachmentRow] = []
+    session_by_id = {summary.session_id: summary for summary in manifest.sessions}
+    for segment in manifest.segments:
+        if segment.session_id is None:
+            continue
+        run_id = session_to_run.get(segment.session_id)
+        if run_id is None:
+            continue
+        summary = session_by_id.get(segment.session_id)
+        rows.append(
+            _local_attachment_row(
+                run_id=run_id,
+                title=segment.filename,
+                kind="telemetry_sink_segment",
+                path=str(source.path / segment.filename),
+                session_id=segment.session_id,
+                job_id=summary.job_id if summary is not None else None,
+                rank=summary.rank if summary is not None else None,
+                local_rank=summary.local_rank if summary is not None else None,
+                world_size=summary.world_size if summary is not None else None,
+                start_ns=summary.started_at_ns if summary is not None else None,
+                end_ns=summary.ended_at_ns if summary is not None else None,
+                source_kind="sink_segment",
+                metadata={
+                    "event_count": segment.event_count,
+                    "size_bytes": segment.size_bytes,
+                    "closed": segment.closed,
+                },
+            )
+        )
+    return rows
+
+
+def _rollup_attachment_rows(
+    source: CatalogSource,
+    manifest: TelemetrySinkManifest,
+    session_to_run: Mapping[str, str],
+) -> list[RunAttachmentRow]:
+    rows: list[RunAttachmentRow] = []
+    rollup_path = source.path / ROLLUP_FILENAME
+    for summary in manifest.sessions:
+        run_id = session_to_run.get(summary.session_id)
+        if run_id is None:
+            continue
+        rows.append(
+            _local_attachment_row(
+                run_id=run_id,
+                title="Telemetry rollups",
+                kind="telemetry_rollup",
+                path=str(rollup_path),
+                session_id=summary.session_id,
+                job_id=summary.job_id,
+                rank=summary.rank,
+                local_rank=summary.local_rank,
+                world_size=summary.world_size,
+                start_ns=summary.started_at_ns,
+                end_ns=summary.ended_at_ns,
+                source_kind="rollup",
+                metadata={
+                    "manifest_session_count": len(manifest.sessions),
+                    "manifest_segment_count": len(manifest.segments),
+                },
+            )
+        )
+    return rows
+
+
+def _diagnose_attachment_rows(
+    source: CatalogSource,
+    session_to_run: Mapping[str, str],
+) -> list[RunAttachmentRow]:
+    summary = _diagnose_session_summary(source.manifest_path)
+    if summary is None:
+        return []
+    run_id = session_to_run.get(summary.session_id)
+    if run_id is None:
+        return []
+    return [
+        _local_attachment_row(
+            run_id=run_id,
+            title="Diagnose bundle",
+            kind="diagnose_bundle",
+            path=str(source.path),
+            session_id=summary.session_id,
+            job_id=summary.job_id,
+            rank=summary.rank,
+            local_rank=summary.local_rank,
+            world_size=summary.world_size,
+            start_ns=summary.started_at_ns,
+            end_ns=summary.ended_at_ns,
+            source_kind="diagnose_bundle",
+            metadata={
+                "manifest_path": (
+                    str(source.manifest_path)
+                    if source.manifest_path is not None
+                    else None
+                ),
+                "session_status": summary.status,
+            },
+        )
+    ]
+
+
+def _flat_telemetry_attachment_rows(
+    source: CatalogSource,
+    contexts: Mapping[str, _RunContext],
+) -> list[RunAttachmentRow]:
+    session_to_run = _session_to_run_id(contexts)
+    rows: list[RunAttachmentRow] = []
+    for context in contexts.values():
+        for session in context.sessions:
+            if session.source_path != str(source.path):
+                continue
+            run_id = session_to_run.get(session.session_id)
+            if run_id is None:
+                continue
+            rows.append(
+                _local_attachment_row(
+                    run_id=run_id,
+                    title=Path(session.source_path).name or "Telemetry file",
+                    kind="telemetry_file",
+                    path=session.source_path,
+                    session_id=session.session_id,
+                    job_id=session.job_id,
+                    rank=session.rank,
+                    local_rank=session.local_rank,
+                    world_size=session.world_size,
+                    start_ns=session.started_at_ns,
+                    end_ns=session.ended_at_ns,
+                    source_kind=session.source_kind,
+                    metadata={"event_count": session.event_count},
+                )
+            )
+    return rows
+
+
+def _oom_attachment_rows(
+    bundles: Sequence[CatalogOOMBundle],
+    session_to_run: Mapping[str, str],
+) -> list[RunAttachmentRow]:
+    rows: list[RunAttachmentRow] = []
+    for bundle in bundles:
+        if bundle.session_id is None:
+            continue
+        run_id = session_to_run.get(bundle.session_id)
+        if run_id is None:
+            continue
+        seen_ns = _datetime_to_ns(_parse_datetime(bundle.created_at_utc))
+        rows.append(
+            _local_attachment_row(
+                run_id=run_id,
+                title="OOM bundle",
+                kind="oom_bundle",
+                path=str(bundle.bundle_path),
+                session_id=bundle.session_id,
+                job_id=None,
+                rank=None,
+                local_rank=None,
+                world_size=None,
+                start_ns=seen_ns,
+                end_ns=seen_ns,
+                source_kind="oom_bundle",
+                metadata=bundle.as_dict(),
+            )
+        )
+    return rows
+
+
+def _local_attachment_row(
+    *,
+    run_id: str,
+    title: str,
+    kind: str,
+    path: str,
+    session_id: str | None,
+    job_id: str | None,
+    rank: int | None,
+    local_rank: int | None,
+    world_size: int | None,
+    start_ns: int | None,
+    end_ns: int | None,
+    source_kind: str,
+    metadata: Mapping[str, Any],
+) -> RunAttachmentRow:
+    return RunAttachmentRow(
+        run_id=run_id,
+        title=title,
+        kind=kind,
+        storage="copy",
+        attachment_id=None,
+        url=None,
+        path=path,
+        session_id=session_id,
+        job_id=job_id,
+        rank=rank,
+        local_rank=local_rank,
+        world_size=world_size,
+        start_ns=start_ns,
+        end_ns=end_ns,
+        source_path=path,
+        source_kind=source_kind,
+        source_namespace="stormlog",
+        source_ref=None,
+        metadata=metadata,
+    )
+
+
+def _run_matches(row: RunRow, filters: RunFilter) -> bool:
+    if filters.run_id is not None and row.run_id != filters.run_id:
+        return False
+    if filters.session_id is not None and filters.session_id not in row.sessions:
+        return False
+    if filters.job_id is not None and row.job_id != filters.job_id:
+        return False
+    if filters.rank is not None and filters.rank not in row.ranks:
+        return False
+    if (
+        filters.source_namespace is not None
+        and row.source_namespace != filters.source_namespace
+    ):
+        return False
+    if filters.source_ref is not None and row.source_ref != filters.source_ref:
+        return False
+    return True
+
+
+def _run_attachment_matches(
+    row: RunAttachmentRow,
+    filters: RunAttachmentFilter,
+) -> bool:
+    if filters.run_id is not None and row.run_id != filters.run_id:
+        return False
+    if filters.session_id is not None and row.session_id != filters.session_id:
+        return False
+    if filters.job_id is not None and row.job_id != filters.job_id:
+        return False
+    if filters.rank is not None and row.rank != filters.rank:
+        return False
+    if filters.kind is not None and row.kind != filters.kind:
+        return False
+    if (
+        filters.source_namespace is not None
+        and row.source_namespace != filters.source_namespace
+    ):
+        return False
+    if filters.source_ref is not None and row.source_ref != filters.source_ref:
+        return False
+    return True
 
 
 def _session_matches(row: SessionRow, filters: SessionFilter) -> bool:
