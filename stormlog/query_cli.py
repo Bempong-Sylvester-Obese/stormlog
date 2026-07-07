@@ -38,7 +38,38 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     try:
-        if args.command == "sessions":
+        if args.command == "runs":
+            rows = [
+                row.as_dict()
+                for row in store.list_runs(
+                    query_api.RunFilter(
+                        run_id=args.run_id,
+                        session_id=args.session_id,
+                        job_id=args.job_id,
+                        rank=args.rank,
+                        source_namespace=args.source_namespace,
+                        source_ref=args.source_ref,
+                    )
+                )
+            ]
+            _emit_rows(rows, output_mode, _RUN_COLUMNS)
+        elif args.command == "attachments":
+            rows = [
+                row.as_dict()
+                for row in store.list_run_attachments(
+                    query_api.RunAttachmentFilter(
+                        run_id=args.run_id,
+                        session_id=args.session_id,
+                        job_id=args.job_id,
+                        rank=args.rank,
+                        kind=args.kind,
+                        source_namespace=args.source_namespace,
+                        source_ref=args.source_ref,
+                    )
+                )
+            ]
+            _emit_rows(rows, output_mode, _ATTACHMENT_COLUMNS)
+        elif args.command == "sessions":
             rows = [
                 row.as_dict()
                 for row in store.list_sessions(
@@ -154,6 +185,30 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Query local Stormlog telemetry sessions and artifact bundles.",
     )
     subparsers = parser.add_subparsers(dest="command", help="Query targets")
+
+    runs = subparsers.add_parser("runs", help="List run envelopes")
+    _add_paths(runs)
+    _add_output_flags(runs, include_csv=True)
+    runs.add_argument("--run-id")
+    runs.add_argument("--session-id", "--session", dest="session_id")
+    runs.add_argument("--job-id")
+    runs.add_argument("--rank", type=int)
+    runs.add_argument("--source-namespace")
+    runs.add_argument("--source-ref")
+
+    attachments = subparsers.add_parser(
+        "attachments",
+        help="List run-indexed local and external attachments",
+    )
+    _add_paths(attachments)
+    _add_output_flags(attachments, include_csv=True)
+    attachments.add_argument("--run-id")
+    attachments.add_argument("--session-id", "--session", dest="session_id")
+    attachments.add_argument("--job-id")
+    attachments.add_argument("--rank", type=int)
+    attachments.add_argument("--kind")
+    attachments.add_argument("--source-namespace")
+    attachments.add_argument("--source-ref")
 
     sessions = subparsers.add_parser("sessions", help="List artifact sessions")
     _add_paths(sessions)
@@ -372,6 +427,37 @@ def _label(column: str) -> str:
     return column.replace("_", " ").title()
 
 
+_RUN_COLUMNS = (
+    "run_id",
+    "explicit",
+    "title",
+    "job_id",
+    "started_at_ns",
+    "ended_at_ns",
+    "session_count",
+    "attachment_count",
+    "source_kind",
+    "source_path",
+    "source_namespace",
+    "source_ref",
+    "sessions",
+    "ranks",
+)
+_ATTACHMENT_COLUMNS = (
+    "run_id",
+    "kind",
+    "title",
+    "storage",
+    "session_id",
+    "job_id",
+    "rank",
+    "source_kind",
+    "source_path",
+    "source_namespace",
+    "source_ref",
+    "url",
+    "path",
+)
 _SESSION_COLUMNS = (
     "session_id",
     "status",
