@@ -52,6 +52,10 @@
           "type": "string",
           "minLength": 1
         },
+        "run_id": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
         "session_id": {
           "type": ["string", "null"],
           "minLength": 1
@@ -77,6 +81,18 @@
         },
         "updated_at_utc": {
           "type": ["string", "null"]
+        },
+        "storage": {
+          "type": ["string", "null"],
+          "enum": ["reference", "copy", null]
+        },
+        "source_namespace": {
+          "type": ["string", "null"],
+          "minLength": 1
+        },
+        "source_ref": {
+          "type": ["string", "null"],
+          "minLength": 1
         },
         "metadata": {
           "type": "object"
