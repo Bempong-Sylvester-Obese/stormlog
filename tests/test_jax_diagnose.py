@@ -41,13 +41,17 @@ def test_run_timeline_capture_zero_duration() -> None:
 
 @jax_mark
 def test_run_timeline_capture_positive_duration() -> None:
-    """Verify run_timeline_capture collects some samples."""
+    """Verify a real capture distinguishes usable and unavailable metrics."""
     # Use a small interval to ensure at least one sample
     timeline = run_timeline_capture(0, 0.2, 0.05)
-    assert len(timeline["timestamps"]) > 0
-    assert len(timeline["allocated"]) > 0
-    assert len(timeline["reserved"]) > 0
-    assert len(timeline["allocated"]) == len(timeline["reserved"])
+    if timeline["device_memory_available"]:
+        assert len(timeline["timestamps"]) > 0
+        assert len(timeline["allocated"]) > 0
+        assert len(timeline["reserved"]) > 0
+        assert len(timeline["allocated"]) == len(timeline["reserved"])
+    else:
+        assert timeline["timestamps"] == []
+        assert timeline["allocated"] == []
 
 
 @jax_mark

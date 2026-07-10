@@ -42,6 +42,14 @@ def test_cmd_info_verbose(capsys: Any) -> None:
 
 
 @jax_mark
+@mock.patch("stormlog.jax.cli.cmd_monitor", return_value=0)
+@mock.patch("sys.argv", ["jaxmemprof", "monitor", "--device", "cpu", "--duration", "0"])
+def test_monitor_accepts_named_device_selector(mock_monitor: Any) -> None:
+    assert main() == 0
+    assert mock_monitor.call_args.args[0].device == "cpu"
+
+
+@jax_mark
 def test_cmd_monitor_args() -> None:
     """Verify monitor command arguments."""
     import argparse

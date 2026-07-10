@@ -96,6 +96,8 @@ Tracker exports may include backend capability hints under `metadata`:
 - `supports_device_total`
 - `supports_device_free`
 - `sampling_source`
+- `device_memory_available`
+- `device_memory_unavailable_reason`
 
 ## Collector health metadata
 

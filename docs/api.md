@@ -96,6 +96,11 @@ Primary exported symbols:
 - `profile_function`
 - `profile_context`
 
+JAX snapshots and tracking results retain numeric fields for compatibility and
+also expose `device_memory_available`, `memory_source`, and an unavailable
+reason. Consumers must use those capability fields before interpreting a zero
+device-memory value as a measurement.
+
 `JAXProfiler.profile_training` accepts re-iterable datasets, finite one-shot
 iterators, and zero-argument dataset factories.  Use a factory for streaming
 multi-epoch inputs, and combine large or infinite streams with

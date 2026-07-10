@@ -1,5 +1,6 @@
 """Tests for JAX visualizer."""
 
+import json
 from typing import Any
 from unittest import mock
 
@@ -92,3 +93,25 @@ def test_plot_function_comparison(mock_plt: Any, tmp_path: Any) -> None:
 def test_plot_function_comparison_empty() -> None:
     viz = MemoryVisualizer()
     viz.plot_function_comparison({})
+
+
+def test_export_data_omits_unavailable_device_samples(tmp_path: Any) -> None:
+    viz = MemoryVisualizer()
+    snapshots = [
+        MemorySnapshot(1, "measured", 100, 100, 0, 0, {}),
+        MemorySnapshot(
+            2,
+            "unavailable",
+            0,
+            100,
+            0,
+            0,
+            {},
+            device_memory_available=False,
+        ),
+    ]
+    output = tmp_path / "timeline.json"
+    viz.export_data(
+        ProfileResult(0, 2, 100, 100, 100, snapshots, {}), str(output), "json"
+    )
+    assert len(json.loads(output.read_text())) == 1

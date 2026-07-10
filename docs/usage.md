@@ -86,8 +86,8 @@ tfmemprof info
 tfmemprof diagnose --duration 0 --output /tmp/tf_diag
 
 jaxmemprof info
-jaxmemprof track --duration 2 --interval 0.5 --output /tmp/jaxmemprof_track.json --format json
-jaxmemprof analyze /tmp/jaxmemprof_track.json --format txt --output /tmp/jaxmemprof_analysis.txt
+jaxmemprof monitor --duration 2 --interval 0.5 --output /tmp/jaxmemprof_monitor.json
+jaxmemprof analyze --input /tmp/jaxmemprof_monitor.json --detect-leaks --optimize --report /tmp/jaxmemprof_analysis.txt
 jaxmemprof diagnose --duration 0 --output /tmp/jax_diag
 ```
 
@@ -223,7 +223,9 @@ print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
 print(f"Snapshots captured: {len(results.snapshots)}")
 ```
 
-For CPU-only JAX execution, the profiler will automatically adapt to the `cpu` backend.
+For CPU-only JAX execution, select `--device cpu` from the CLI. Device-memory
+metrics are emitted only when the selected runtime exposes JAX allocator stats;
+otherwise Stormlog reports an explicit unavailable state and separate process RSS.
 
 ### JAX OOM Flight Recorder and Graph Visualization
 

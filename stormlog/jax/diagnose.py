@@ -112,7 +112,12 @@ def run_timeline_capture(
     allocated (bytes), reserved (bytes).
     """
     if duration_seconds <= 0:
-        return {"timestamps": [], "allocated": [], "reserved": []}
+        return {
+            "timestamps": [],
+            "allocated": [],
+            "reserved": [],
+            "device_memory_available": False,
+        }
 
     try:
         tracker = MemoryTracker(
@@ -125,6 +130,19 @@ def run_timeline_capture(
             time.sleep(duration_seconds)
         finally:
             result = tracker.stop_tracking()
+
+        memory_available = bool(getattr(result, "device_memory_available", True))
+        if not memory_available:
+            return {
+                "timestamps": [],
+                "allocated": [],
+                "reserved": [],
+                "device_memory_available": False,
+                "device_memory_unavailable_reason": getattr(
+                    result, "device_memory_unavailable_reason", None
+                ),
+                "process_memory_bytes": getattr(result, "process_memory_bytes", None),
+            }
 
         # Try to reconstruct timeline with actual reserved bytes from telemetry events
         timestamps = []
@@ -145,9 +163,15 @@ def run_timeline_capture(
             "timestamps": timestamps,
             "allocated": allocated,
             "reserved": reserved,
+            "device_memory_available": True,
         }
     except Exception:
-        return {"timestamps": [], "allocated": [], "reserved": []}
+        return {
+            "timestamps": [],
+            "allocated": [],
+            "reserved": [],
+            "device_memory_available": False,
+        }
 
 
 def _suggest_jax_optimizations(utilization_ratio: float) -> List[str]:

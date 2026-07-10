@@ -39,6 +39,19 @@ def test_run_tracking_iteration_failure() -> None:
         assert tracker._collector_health.status == COLLECTOR_HEALTH_UNHEALTHY
 
 
+def test_unavailable_device_memory_does_not_emit_zero_sample() -> None:
+    tracker = MemoryTracker()
+    tracker._device_memory_available = False
+    tracker._device_memory_unavailable_reason = "backend has no allocator stats"
+
+    tracker._run_tracking_iteration()
+
+    result = tracker.get_tracking_results()
+    assert result.memory_usage == []
+    assert result.device_memory_available is False
+    assert result.memory_source == "unavailable"
+
+
 def test_tracking_loop_exception() -> None:
     tracker = MemoryTracker(enable_logging=True)
     tracker._stop_event = mock.Mock()

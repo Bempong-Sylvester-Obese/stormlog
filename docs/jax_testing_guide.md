@@ -47,7 +47,12 @@ jaxmemprof analyze --input jax_monitor.json --detect-leaks --optimize --report j
 jaxmemprof diagnose --duration 0 --output ./jax_diag
 ```
 
-For CPU-backed JAX or when the accelerator backend is unavailable, `jaxmemprof` will automatically fallback to CPU mode. You can explicitly force it with `--device cpu`.
+`--device` accepts a local-device index (for example `0`) or `cpu`, `gpu`,
+`tpu`, or `metal`. Stormlog reports device allocations only when the selected
+backend exposes JAX `memory_stats()` with `bytes_in_use`. When it does not,
+tracking remains available for diagnostics but labels device memory as
+unavailable and reports process RSS separately; it never treats unavailable
+device memory as zero use.
 
 ## Recommended validation sequence
 
@@ -71,6 +76,13 @@ jaxmemprof info
 ```
 
 If the CLI outputs that JAX is running on CPU, you'll need to install the specific `jax` variants for your hardware (e.g., `jax[cuda12]`, `jax[tpu]`).
+
+### Device memory is unavailable
+
+Some runtimes, including experimental Metal configurations, do not expose the
+allocator counters required for device-memory sampling. `jaxmemprof info` shows
+the backend and capability state. Use the generated pprof/OOM artifacts for
+allocation attribution, or select a backend that exposes `memory_stats()`.
 
 ### Plot export fails
 

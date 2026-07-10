@@ -34,6 +34,11 @@ def test_detect_jax_backend_exception() -> None:
         assert detect_jax_backend() == "cpu"
 
 
+def test_detect_jax_backend_normalizes_metal() -> None:
+    with mock.patch("stormlog.jax.utils.jax.default_backend", return_value="METAL"):
+        assert detect_jax_backend() == "metal"
+
+
 def test_get_device_info_valid() -> None:
     device_mock = mock.Mock()
     device_mock.device_kind = "gpu"
