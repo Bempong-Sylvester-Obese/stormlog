@@ -2,18 +2,18 @@ import gzip
 from pathlib import Path
 from typing import Any, Dict, List
 
-try:
-    from . import profile_pb2
-except ImportError:
-    raise ImportError(
-        "Could not import profile_pb2. Please run: \n"
-        "curl -sO https://raw.githubusercontent.com/google/pprof/master/proto/profile.proto && "
-        "python -m grpc_tools.protoc -I. --python_out=. profile.proto"
-    ) from None
-
 
 def parse_jax_memory_profile(file_path: str) -> Dict[str, Any]:
     """Parse a JAX .prof (gzipped pprof protobuf) using the official protobuf schema."""
+    try:
+        from . import profile_pb2
+    except ImportError as exc:
+        raise ImportError(
+            "JAX memory profile parsing requires protobuf>=6.31.1 for the "
+            "bundled profile schema. Install stormlog[jax] in a compatible "
+            "environment."
+        ) from exc
+
     path = Path(file_path)
     try:
         with gzip.open(path, "rb") as f:

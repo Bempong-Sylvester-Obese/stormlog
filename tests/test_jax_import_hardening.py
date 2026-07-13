@@ -58,3 +58,46 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
 
     assert completed.returncode == 0, completed.stderr
     assert "ok" in completed.stdout
+
+
+def test_pprof_parser_defers_schema_import_and_preserves_failure_cause() -> None:
+    code = textwrap.dedent(
+        """
+        import importlib
+        import importlib.abc
+        import sys
+
+        class BlockProfileSchema(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "stormlog.jax.profile_pb2":
+                    raise ImportError("incompatible protobuf runtime")
+                return None
+
+        sys.meta_path.insert(0, BlockProfileSchema())
+
+        parser = importlib.import_module("stormlog.jax.pprof_parser")
+
+        try:
+            parser.parse_jax_memory_profile("unused.prof")
+        except ImportError as exc:
+            assert "protobuf>=6.31.1" in str(exc)
+            assert isinstance(exc.__cause__, ImportError)
+            assert "incompatible protobuf runtime" in str(exc.__cause__)
+            assert "grpc_tools.protoc" not in str(exc)
+        else:
+            raise AssertionError("Expected the incompatible schema import to fail")
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
