@@ -532,7 +532,10 @@ class MemoryAnalyzer:
         for func_name, times in function_times.items():
             if len(times) >= self.thresholds["min_calls_for_analysis"]:
                 # Coefficient of variation
-                cv = statistics.stdev(times) / statistics.mean(times)
+                mean_time = statistics.mean(times)
+                if mean_time <= 0:
+                    continue
+                cv = statistics.stdev(times) / mean_time
                 if cv > 0.5:  # High variance
                     high_variance_functions.append((func_name, cv))
 
