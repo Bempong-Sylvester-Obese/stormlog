@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from pathlib import Path
 from typing import Any, cast
 
+import pytest
+
 import stormlog.attributed_viz as attributed_viz
 import stormlog.cuda_native_debug as native_debug
 from stormlog.jax.attributed_viz import render_jax_attributed_html
-from stormlog.jax.pprof_parser import parse_jax_memory_profile
 
 
 def _extract_embedded_payload(html: str) -> dict[str, Any]:
@@ -484,6 +486,13 @@ def test_render_attributed_wandb_preview_labels_snapshot_only_view() -> None:
 
 
 def test_jax_parser_renderer_keeps_root_to_leaf_order() -> None:
+    try:
+        importlib.import_module("stormlog.jax.profile_pb2")
+    except ImportError as exc:
+        pytest.skip(f"JAX pprof schema is unavailable: {exc}")
+
+    from stormlog.jax.pprof_parser import parse_jax_memory_profile
+
     fixture_path = Path(__file__).parent / "fixtures" / "jax" / "root_caller_leaf.prof"
     profile_data = parse_jax_memory_profile(str(fixture_path))
     html = render_jax_attributed_html(profile_data, output_path="")
