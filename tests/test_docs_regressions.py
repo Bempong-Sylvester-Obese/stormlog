@@ -74,12 +74,17 @@ _BANNED_DOC_SNIPPETS = {
     "docs/cli.md": [
         "python -m stormlog.cli",
         "python -m stormlog.tensorflow.cli",
+        "JAX device allocation fields are only emitted",
     ],
     "docs/installation.md": [
         "There is no top-level `import stormlog` module in the current package layout.",
     ],
     "docs/api.md": [
         "There is no top-level `stormlog` module today.",
+        "JAX snapshots and tracking results retain numeric fields",
+    ],
+    "docs/jax_testing_guide.md": [
+        "it never treats unavailable",
     ],
     "docs/tui.md": [
         "tui-distributed-diagnostics-workflow.svg",
@@ -113,6 +118,7 @@ _REQUIRED_DOC_SNIPPETS = {
         "**Pip users** should use this CLI-only sequence instead:",
         "`--device /CPU:0`",
         "stormlog infer profile",
+        "JAX memory sample events are emitted only",
     ],
     "docs/inference.md": [
         "stormlog infer profile",
@@ -155,6 +161,18 @@ _REQUIRED_DOC_SNIPPETS = {
     "docs/usage.md": [
         "The `examples/` package is not included in the PyPI distribution.",
         "stormlog[torch]",
+        'JAXMemoryProfiler(device_index="cpu")',
+        "if results.device_memory_available:",
+    ],
+    "docs/api.md": [
+        "`TrackingResult` additionally exposes",
+    ],
+    "docs/jax_testing_guide.md": [
+        "if results.device_memory_available:",
+        "`jaxmemprof diagnose --duration 0` skips timeline capture",
+    ],
+    "docs/telemetry_schema.md": [
+        "`stormlog.jax.memory_tracker`",
     ],
 }
 

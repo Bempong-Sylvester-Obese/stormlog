@@ -31,8 +31,14 @@ with profiler.profile_context("training"):
     y.block_until_ready()
 
 results = profiler.get_results()
-print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
-print(f"Memory growth rate: {results.memory_growth_rate:.2f} MB/s")
+if results.device_memory_available:
+    print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+    print(f"Memory growth rate: {results.memory_growth_rate:.2f} MB/s")
+else:
+    print(
+        "Device memory unavailable: "
+        f"{results.device_memory_unavailable_reason}"
+    )
 print(f"Snapshots captured: {len(results.snapshots)}")
 ```
 
@@ -50,9 +56,14 @@ jaxmemprof diagnose --duration 0 --output ./jax_diag
 `--device` accepts a local-device index (for example `0`) or `cpu`, `gpu`,
 `tpu`, or `metal`. Stormlog reports device allocations only when the selected
 backend exposes JAX `memory_stats()` with `bytes_in_use`. When it does not,
-tracking remains available for diagnostics but labels device memory as
-unavailable and reports process RSS separately; it never treats unavailable
-device memory as zero use.
+monitor and track results set `device_memory_available` to `false`, suppress
+sample events, and report process RSS separately. Numeric device-memory fields
+remain present for compatibility and must not be interpreted as measurements
+when the capability flag is false.
+
+`jaxmemprof diagnose --duration 0` skips timeline capture. In that quick path,
+inspect `environment.json` for `memory_stats_available`; process RSS is not
+captured. Use a positive duration when you need timeline diagnostics.
 
 ## Recommended validation sequence
 

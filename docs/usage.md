@@ -219,13 +219,22 @@ with profiler.profile_context("training"):
     y.block_until_ready()
 
 results = profiler.get_results()
-print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+if results.device_memory_available:
+    print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+else:
+    print(
+        "Device memory unavailable: "
+        f"{results.device_memory_unavailable_reason}"
+    )
 print(f"Snapshots captured: {len(results.snapshots)}")
 ```
 
-For CPU-only JAX execution, select `--device cpu` from the CLI. Device-memory
-metrics are emitted only when the selected runtime exposes JAX allocator stats;
-otherwise Stormlog reports an explicit unavailable state and separate process RSS.
+For CPU-only JAX profiling, initialize
+`JAXMemoryProfiler(device_index="cpu")`; from the CLI, use `--device cpu`.
+Device-memory metrics are available only when the selected runtime exposes JAX
+allocator stats. Check `device_memory_available` before reading profiler
+metrics. Monitor and track exports report process RSS separately when device
+memory is unavailable.
 
 ### JAX OOM Flight Recorder and Graph Visualization
 

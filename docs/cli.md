@@ -513,10 +513,12 @@ jaxmemprof monitor --interval 0.5 --duration 30 --device cpu --output jax_monito
 jaxmemprof track --interval 0.5 --device cpu --output jax_track.json
 ```
 
-JAX device allocation fields are only emitted when the selected backend exposes
+JAX memory sample events are emitted only when the selected backend exposes
 `memory_stats().bytes_in_use`. On runtimes without allocator counters,
-`jaxmemprof` marks device memory unavailable, suppresses synthetic zero samples,
-and reports process RSS separately for diagnostics.
+`jaxmemprof` marks device memory unavailable and suppresses sample events.
+Monitor and track results report process RSS separately. Collector status events
+retain the numeric allocator fields required by the telemetry schema, but mark
+those fields as partial in `metadata` rather than presenting them as samples.
 
 ### Track JAX memory usage
 

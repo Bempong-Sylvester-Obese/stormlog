@@ -96,10 +96,12 @@ Primary exported symbols:
 - `profile_function`
 - `profile_context`
 
-JAX snapshots and tracking results retain numeric fields for compatibility and
-also expose `device_memory_available`, `memory_source`, and an unavailable
-reason. Consumers must use those capability fields before interpreting a zero
-device-memory value as a measurement.
+JAX snapshots and profile results retain numeric fields for compatibility.
+`MemorySnapshot` and `ProfileResult` expose `device_memory_available` and
+`device_memory_unavailable_reason`. `TrackingResult` additionally exposes
+`memory_source` and `process_memory_bytes`. Consumers must check
+`device_memory_available` before interpreting a numeric device-memory value as
+a measurement.
 
 `JAXProfiler.profile_training` accepts re-iterable datasets, finite one-shot
 iterators, and zero-argument dataset factories.  Use a factory for streaming

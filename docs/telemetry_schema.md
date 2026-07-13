@@ -87,6 +87,7 @@ New exports always emit these fields. For single-process runs, the defaults are:
 - `stormlog.mps_tracker`
 - `stormlog.cpu_tracker`
 - `stormlog.tensorflow.memory_tracker`
+- `stormlog.jax.memory_tracker`
 
 ## Backend capability metadata
 
@@ -98,6 +99,11 @@ Tracker exports may include backend capability hints under `metadata`:
 - `sampling_source`
 - `device_memory_available`
 - `device_memory_unavailable_reason`
+
+The JAX tracker sets `device_memory_available` to `false` when the selected
+backend does not expose allocator counters. Collector status events may retain
+numeric allocator fields for schema compatibility; `collector_partial_fields`
+identifies fields that are not current device-memory measurements.
 
 ## Collector health metadata
 
