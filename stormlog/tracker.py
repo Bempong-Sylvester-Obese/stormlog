@@ -1159,6 +1159,9 @@ class MemoryTracker:
         Returns:
             Dictionary with timeline data
         """
+        if interval <= 0:
+            raise ValueError("interval must be > 0")
+
         with self._events_lock:
             events_snapshot = list(self.events)
 
@@ -1167,29 +1170,28 @@ class MemoryTracker:
 
         # Group events by time intervals
         start_time = events_snapshot[0].timestamp
-        end_time = events_snapshot[-1].timestamp
 
         timestamps = []
         allocated_values = []
         reserved_values = []
 
-        current_time = start_time
-        while current_time <= end_time:
-            # Find events in this interval
-            interval_events = [
-                e
-                for e in events_snapshot
-                if current_time <= e.timestamp < current_time + interval
-            ]
+        current_bucket = 0
+        last_event = events_snapshot[0]
+        for event in events_snapshot[1:]:
+            bucket = int((event.timestamp - start_time) // interval)
+            if bucket == current_bucket:
+                last_event = event
+                continue
 
-            if interval_events:
-                # Use the last event in the interval
-                last_event = interval_events[-1]
-                timestamps.append(current_time)
-                allocated_values.append(last_event.memory_allocated)
-                reserved_values.append(last_event.memory_reserved)
+            timestamps.append(start_time + current_bucket * interval)
+            allocated_values.append(last_event.memory_allocated)
+            reserved_values.append(last_event.memory_reserved)
+            current_bucket = bucket
+            last_event = event
 
-            current_time += interval
+        timestamps.append(start_time + current_bucket * interval)
+        allocated_values.append(last_event.memory_allocated)
+        reserved_values.append(last_event.memory_reserved)
 
         return {
             "timestamps": timestamps,
