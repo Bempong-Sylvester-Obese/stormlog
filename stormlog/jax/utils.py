@@ -159,11 +159,11 @@ def detect_jax_backend() -> str:
         return "cpu"
 
 
-def get_device_info(device_index: int = 0) -> Dict[str, Any]:
+def get_device_info(device_index: Union[int, str] = 0) -> Dict[str, Any]:
     """Return device kind, platform, and live memory statistics.
 
     Args:
-        device_index: Index into ``jax.local_devices()`` (default 0).
+        device_index: Local device index or named JAX backend selector.
 
     Returns:
         Dictionary with keys ``kind``, ``platform``, ``device_id``,
@@ -184,28 +184,13 @@ def get_device_info(device_index: int = 0) -> Dict[str, Any]:
         }
 
     try:
-        devices = _cached_local_devices()
-        if device_index >= len(devices):
-            return {
-                "kind": "unknown",
-                "platform": detect_jax_backend(),
-                "device_id": device_index,
-                "process_index": 0,
-                "memory_stats": {},
-                "memory_stats_available": False,
-                "memory_stats_error": "Device index out of range",
-                "client": None,
-                "error": f"Device index {device_index} out of range "
-                f"(found {len(devices)} devices)",
-            }
-
-        device = devices[device_index]
+        device, resolved_index = resolve_jax_device(device_index)
         capability = get_device_memory_capability(device)
 
         return {
             "kind": str(getattr(device, "device_kind", "unknown")),
             "platform": str(device.platform),
-            "device_id": getattr(device, "id", device_index),
+            "device_id": getattr(device, "id", resolved_index),
             "process_index": getattr(device, "process_index", 0),
             **capability,
             "client": str(getattr(device, "client", None)),

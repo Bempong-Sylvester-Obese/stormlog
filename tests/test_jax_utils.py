@@ -56,6 +56,26 @@ def test_get_device_info_valid() -> None:
         assert info["memory_stats"] == {"bytes_in_use": 100}
 
 
+@pytest.mark.parametrize("selector", ["0", "gpu"])
+def test_get_device_info_accepts_cli_selectors(selector: str) -> None:
+    device_mock = mock.Mock()
+    device_mock.device_kind = "gpu"
+    device_mock.platform = "gpu"
+    device_mock.id = 0
+    device_mock.process_index = 0
+    device_mock.client = "client"
+    device_mock.memory_stats.return_value = {"bytes_in_use": 100}
+
+    with mock.patch(
+        "stormlog.jax.utils.resolve_jax_device", return_value=(device_mock, 0)
+    ) as mock_resolve:
+        info = get_device_info(selector)
+
+    mock_resolve.assert_called_once_with(selector)
+    assert info["kind"] == "gpu"
+    assert info["memory_stats_available"] is True
+
+
 def test_get_device_info_out_of_range() -> None:
     with mock.patch("stormlog.jax.utils._cached_local_devices", return_value=[]):
         info = get_device_info(0)

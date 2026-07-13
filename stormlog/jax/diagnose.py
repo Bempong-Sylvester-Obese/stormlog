@@ -5,7 +5,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from stormlog.derived_fields import compute_event_fields
 from stormlog.session import (
@@ -92,7 +92,7 @@ def _write_manifest(
         json.dump(manifest, f, indent=2, default=_default_str)
 
 
-def collect_environment(device_index: int = 0) -> Dict[str, Any]:
+def collect_environment(device_index: Union[int, str] = 0) -> Dict[str, Any]:
     """Collect system, JAX backend, and device environment details."""
     env: Dict[str, Any] = {}
     env["system"] = get_system_info()
@@ -104,7 +104,7 @@ def collect_environment(device_index: int = 0) -> Dict[str, Any]:
 
 
 def run_timeline_capture(
-    device_index: int, duration_seconds: float, interval: float
+    device_index: Union[int, str], duration_seconds: float, interval: float
 ) -> Dict[str, Any]:
     """Capture a timeline of memory metrics by running the tracker briefly.
 
@@ -201,7 +201,7 @@ def _suggest_jax_optimizations(utilization_ratio: float) -> List[str]:
 
 
 def build_diagnostic_summary(
-    device_index: int = 0,
+    device_index: Union[int, str] = 0,
 ) -> Tuple[Dict[str, Any], bool]:
     """Build diagnostic summary and risk flags from current state.
 
@@ -273,7 +273,7 @@ def build_diagnostic_summary(
 
 def run_diagnose(
     output: Optional[str],
-    device_index: int,
+    device_index: Union[int, str],
     duration: float,
     interval: float,
     command_line: str,
