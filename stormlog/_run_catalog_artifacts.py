@@ -1,4 +1,4 @@
-"""Projection of discovered artifacts into run attachment query rows."""
+"""Internal projection of artifacts into run attachment query rows."""
 
 from __future__ import annotations
 
@@ -7,9 +7,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .correlation import ExternalAttachment
-from .run_catalog_context import build_identity_index, run_id_for_identity
-from .run_catalog_models import (
+from ._run_catalog_context import build_identity_index, run_id_for_identity
+from ._run_catalog_models import (
     CatalogRunEnvelope,
     CatalogSourceLike,
     OOMBundleLike,
@@ -18,7 +17,8 @@ from .run_catalog_models import (
     RunIdentityIndex,
     SessionRowLike,
 )
-from .run_catalog_parser import attachment_storage_or_default
+from ._run_catalog_parser import attachment_storage_or_default
+from .correlation import ExternalAttachment
 from .session import SessionSummary
 from .telemetry_rollups import ROLLUP_FILENAME
 from .telemetry_sink import TelemetrySinkManifest

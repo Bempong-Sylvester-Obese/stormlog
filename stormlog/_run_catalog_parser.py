@@ -1,4 +1,4 @@
-"""Strict parsing for the Stormlog run envelope v1 schema."""
+"""Internal strict parsing for the Stormlog run envelope v1 schema."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
 
-from .run_catalog_models import (
+from ._run_catalog_models import (
     RUN_ENVELOPE_FORMAT,
     RUN_ENVELOPE_SCHEMA_VERSION,
     AttachmentStorage,

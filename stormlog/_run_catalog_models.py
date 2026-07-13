@@ -1,4 +1,4 @@
-"""Data contracts for run envelope and attachment catalog queries."""
+"""Internal data contracts for run envelope and attachment catalog queries."""
 
 from __future__ import annotations
 

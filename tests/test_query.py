@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import stormlog.query as query_api
+import stormlog.run_catalog as run_catalog_api
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -15,6 +16,21 @@ from stormlog.session import (
     session_summary_to_dict,
 )
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
+
+
+def test_query_is_canonical_export_surface_for_public_run_contracts() -> None:
+    public_types = {
+        "CatalogRunEnvelope",
+        "RunAttachmentFilter",
+        "RunAttachmentRow",
+        "RunFilter",
+        "RunRow",
+    }
+
+    assert public_types <= set(query_api.__all__)
+    assert public_types.isdisjoint(run_catalog_api.__all__)
+    for name in public_types:
+        assert getattr(run_catalog_api, name) is getattr(query_api, name)
 
 
 def _event_record(

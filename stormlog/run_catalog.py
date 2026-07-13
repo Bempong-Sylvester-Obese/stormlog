@@ -1,6 +1,7 @@
 """Stable public facade for run envelope and attachment catalog helpers."""
 
-from .run_catalog_artifacts import (
+from . import _run_catalog_models as _models
+from ._run_catalog_artifacts import (
     diagnose_attachment_rows,
     envelope_attachment_rows,
     flat_telemetry_attachment_rows,
@@ -11,51 +12,47 @@ from .run_catalog_artifacts import (
     sink_attachment_rows,
     sink_segment_attachment_rows,
 )
-from .run_catalog_context import (
+from ._run_catalog_context import (
     build_identity_index,
     build_run_contexts,
     run_attachment_matches,
     run_id_for_identity,
     run_matches,
 )
-from .run_catalog_models import (
+from ._run_catalog_models import (
     RUN_ENVELOPE_FILENAME,
     RUN_ENVELOPE_FORMAT,
     RUN_ENVELOPE_SCHEMA_VERSION,
     AttachmentStorage,
     CatalogRunAttachment,
-    CatalogRunEnvelope,
     CatalogRunSessionRef,
-    RunAttachmentFilter,
-    RunAttachmentRow,
     RunContext,
-    RunFilter,
     RunIdentityConflict,
     RunIdentityIndex,
-    RunRow,
 )
-from .run_catalog_parser import (
+from ._run_catalog_parser import (
     attachment_storage_or_default,
     attachment_storage_or_none,
     is_run_envelope,
     run_envelope_from_payload,
 )
 
+CatalogRunEnvelope = _models.CatalogRunEnvelope
+RunAttachmentFilter = _models.RunAttachmentFilter
+RunAttachmentRow = _models.RunAttachmentRow
+RunFilter = _models.RunFilter
+RunRow = _models.RunRow
+
 __all__ = [
     "AttachmentStorage",
     "CatalogRunAttachment",
-    "CatalogRunEnvelope",
     "CatalogRunSessionRef",
     "RUN_ENVELOPE_FILENAME",
     "RUN_ENVELOPE_FORMAT",
     "RUN_ENVELOPE_SCHEMA_VERSION",
-    "RunAttachmentFilter",
-    "RunAttachmentRow",
     "RunContext",
-    "RunFilter",
     "RunIdentityConflict",
     "RunIdentityIndex",
-    "RunRow",
     "attachment_storage_or_default",
     "attachment_storage_or_none",
     "build_identity_index",

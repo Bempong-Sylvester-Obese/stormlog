@@ -1,4 +1,4 @@
-"""Run synthesis, identity policy, and filtering for artifact catalogs."""
+"""Internal run synthesis, identity policy, and catalog filtering."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from typing import cast
 
-from .run_catalog_models import (
+from ._run_catalog_models import (
     CatalogRunEnvelope,
     RunAttachmentFilter,
     RunAttachmentRow,
