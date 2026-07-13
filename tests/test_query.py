@@ -580,6 +580,43 @@ def test_list_runs_includes_implicit_contexts_for_uncovered_mixed_roots(
     assert implicit.sessions == ("session-uncovered",)
 
 
+def test_duplicate_run_envelope_ids_reject_every_conflicting_envelope(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    _write_run_envelope(first, run_id="run-duplicate", session_id="session-a")
+    _write_run_envelope(second, run_id="run-duplicate", session_id="session-b")
+    _write_json_events(
+        tmp_path / "session_a_track.json",
+        [_event_record(session_id="session-a", timestamp_ns=100)],
+    )
+    _write_json_events(
+        tmp_path / "session_b_track.json",
+        [_event_record(session_id="session-b", timestamp_ns=200)],
+    )
+
+    store = query_api.open([tmp_path])
+
+    assert store.catalog.run_envelopes == []
+    assert all(row.explicit is False for row in store.list_runs())
+    assert not any(
+        row.source_kind == "run_envelope_attachment"
+        for row in store.list_run_attachments()
+    )
+    duplicate_warnings = [
+        warning
+        for warning in store.catalog.warnings
+        if "duplicate run envelope run_id 'run-duplicate'" in warning.message
+    ]
+    assert {warning.path for warning in duplicate_warnings} == {
+        str(first / "stormlog_run.json"),
+        str(second / "stormlog_run.json"),
+    }
+
+
 def test_list_runs_groups_implicit_distributed_sessions_by_job_id(
     tmp_path: Path,
 ) -> None:
@@ -850,6 +887,77 @@ def test_run_envelope_rejects_null_arrays_and_invalid_entry_metadata(
     assert store.catalog.run_envelopes == []
     messages = [warning.message for warning in store.catalog.warnings]
     assert messages.count("unrecognized run envelope shape") == 2
+
+
+def test_run_envelope_runtime_parser_enforces_complete_v1_schema(
+    tmp_path: Path,
+) -> None:
+    invalid_payloads = [
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-invalid-tag",
+            "tags": ["valid", 1],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-duplicate-tag",
+            "tags": ["duplicate", "duplicate"],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-float-time",
+            "started_at_ns": 1.5,
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-negative-rank",
+            "sessions": [{"session_id": "session-a", "rank": -1, "metadata": {}}],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-zero-world-size",
+            "attachments": [
+                {
+                    "title": "Trace",
+                    "kind": "profiler_trace",
+                    "storage": "copy",
+                    "path": "trace.json",
+                    "world_size": 0,
+                    "metadata": {},
+                }
+            ],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-extra-property",
+            "unexpected": True,
+            "metadata": {},
+        },
+    ]
+    for index, payload in enumerate(invalid_payloads):
+        directory = tmp_path / f"invalid_{index}"
+        directory.mkdir()
+        (directory / "stormlog_run.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+    store = query_api.open([tmp_path])
+
+    assert store.catalog.run_envelopes == []
+    messages = [warning.message for warning in store.catalog.warnings]
+    assert messages.count("unrecognized run envelope shape") == len(invalid_payloads)
 
 
 def test_list_sessions_discovers_sink_manifest_file(tmp_path: Path) -> None:

@@ -382,6 +382,8 @@ class ArtifactCatalog:
         self._oom_bundle_paths: set[Path] = set()
         self._attachment_sidecar_paths: set[Path] = set()
         self._run_envelope_paths: set[Path] = set()
+        self._run_envelope_by_id: dict[str, CatalogRunEnvelope] = {}
+        self._duplicate_run_ids: set[str] = set()
         self._covered_event_paths: set[Path] = set()
         self._discover()
 
@@ -642,7 +644,21 @@ class ArtifactCatalog:
         if envelope is None:
             self._warn(path, "unrecognized run envelope shape")
             return
+        if envelope.run_id in self._duplicate_run_ids:
+            self._warn_duplicate_run_id(path, envelope.run_id)
+            return
+        existing = self._run_envelope_by_id.pop(envelope.run_id, None)
+        if existing is not None:
+            self.run_envelopes.remove(existing)
+            self._duplicate_run_ids.add(envelope.run_id)
+            self._warn_duplicate_run_id(existing.path, envelope.run_id)
+            self._warn_duplicate_run_id(path, envelope.run_id)
+            return
+        self._run_envelope_by_id[envelope.run_id] = envelope
         self.run_envelopes.append(envelope)
+
+    def _warn_duplicate_run_id(self, path: Path, run_id: str) -> None:
+        self._warn(path, f"duplicate run envelope run_id {run_id!r}")
 
     def _warn(self, path: Path, message: str) -> None:
         self.warnings.append(CatalogWarning(path=str(path), message=message))

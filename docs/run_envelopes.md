@@ -72,9 +72,15 @@ fetch them.
 
 ## Discovery Rules
 
-Explicit envelopes win when present. If a directory contains one or more
-`stormlog_run.json` files, `stormlog.query` lists those explicit runs and uses
-their session membership for run attachment indexing.
+Explicit envelopes define runs for the sessions they cover. Sessions that are
+not covered by any accepted envelope still produce implicit runs, so mixed
+artifact roots remain complete.
+
+Every discovered envelope must have a unique `run_id`. If multiple envelope
+files declare the same identifier, Stormlog rejects all of those conflicting
+envelopes with catalog warnings. Their telemetry sessions remain discoverable
+through implicit runs, but attachments from the rejected envelopes are not
+indexed.
 
 When no explicit envelope exists, Stormlog synthesizes run rows from sessions:
 
