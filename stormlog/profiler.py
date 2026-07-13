@@ -307,7 +307,7 @@ class GPUMemoryProfiler:
             name: Name for the profiled context
 
         Yields:
-            ProfileResult after the context exits
+            None. The completed ProfileResult is appended to ``results`` after exit.
         """
         torch.cuda.reset_peak_memory_stats(self.device)
         memory_before = self._take_snapshot(f"before_{name}")
