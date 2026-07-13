@@ -92,6 +92,20 @@ class _NoOpThread:
         _ = timeout
 
 
+class _JoinRecordingThread:
+    def __init__(self) -> None:
+        self.join_timeout: float | None = -1.0
+        self.alive = True
+
+    def join(self, timeout: float | None = None) -> None:
+        self.join_timeout = timeout
+        if timeout is None:
+            self.alive = False
+
+    def is_alive(self) -> bool:
+        return self.alive
+
+
 class _SequencedStopEvent:
     def __init__(self, waits: list[bool]) -> None:
         self._waits = deque(waits)
@@ -498,6 +512,24 @@ def test_memory_tracker_read_apis_snapshot_events_under_lock(
             reader = partial(tracker.get_alerts, last_n=1)
 
         _assert_reader_snapshots_events_under_lock(tracker, reader)
+
+
+def test_stop_tracking_waits_for_worker_before_recording_stop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    worker = _JoinRecordingThread()
+    tracker.is_tracking = True
+    tracker._tracking_thread = cast(Any, worker)
+
+    tracker.stop_tracking()
+
+    assert worker.join_timeout is None
+    assert worker.is_alive() is False
+    assert tracker.get_events()[-1].event_type == "stop"
 
 
 def test_memory_tracker_disables_failing_sink_and_keeps_tracking(
