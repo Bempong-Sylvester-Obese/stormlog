@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import cast
 
 import matplotlib
+import plotly.graph_objects as go
 import pytest
 
 matplotlib.use("Agg")
@@ -71,3 +73,18 @@ def test_csv_export_rejects_empty_data(tmp_path: Path) -> None:
             format="csv",
             save_path=str(tmp_path / "profile"),
         )
+
+
+def test_memory_timeline_sorts_combined_data_by_timestamp() -> None:
+    figure = cast(
+        go.Figure,
+        MemoryVisualizer().plot_memory_timeline(
+            results=[_make_result()],
+            snapshots=[_make_snapshot(float(index)) for index in range(5)],
+            interactive=True,
+        ),
+    )
+
+    timestamps = list(figure.data[0].x)
+
+    assert timestamps == sorted(timestamps)
