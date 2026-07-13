@@ -606,9 +606,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
         def memory_growth_rate(self) -> float:
             if len(self.memory_usage) < 2 or not data.get("duration"):
                 return 0.0
-            return (float(self.memory_usage[-1]) - float(self.memory_usage[0])) / float(
-                data["duration"]
-            )
+            memory_growth_mb = (
+                float(self.memory_usage[-1]) - float(self.memory_usage[0])
+            ) / (1024.0 * 1024.0)
+            return memory_growth_mb / float(data["duration"])
 
     wrapper = ResultWrapper(data)
 

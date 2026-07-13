@@ -1,6 +1,7 @@
 """Tests for targeting missing lines in JAX CLI coverage."""
 
 import argparse
+import json
 from contextlib import nullcontext
 from types import SimpleNamespace
 from typing import Any, cast
@@ -68,6 +69,30 @@ def test_cmd_analyze_success_no_plot(capsys: Any, tmp_path: Any) -> None:
     ):
 
         assert cli.cmd_analyze(args) == 0
+
+
+def test_cmd_analyze_reports_memory_growth_in_mb_per_second(tmp_path: Any) -> None:
+    input_path = tmp_path / "tracking.json"
+    input_path.write_text(
+        json.dumps(
+            {
+                "duration": 10.0,
+                "memory_usage": [0, 1024 * 1024],
+                "timestamps": [0.0, 10.0],
+            }
+        ),
+        encoding="utf-8",
+    )
+    args = argparse.Namespace(input=str(input_path), optimize=True)
+
+    with mock.patch(
+        "stormlog.jax.analyzer.MemoryAnalyzer.score_optimization",
+        return_value={"overall_score": 10.0},
+    ) as mock_score:
+        assert cli.cmd_analyze(args) == 0
+
+    result = mock_score.call_args.args[0]
+    assert result.memory_growth_rate == pytest.approx(0.1)
 
 
 def test_cmd_diagnose_bad_args(capsys: Any) -> None:
