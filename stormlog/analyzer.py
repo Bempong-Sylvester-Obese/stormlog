@@ -108,7 +108,7 @@ class MemoryAnalyzer:
 
         # Analysis thresholds
         self.thresholds = {
-            "memory_leak_ratio": 0.1,  # 10% memory growth indicates potential leak
+            "memory_leak_ratio": 0.7,  # Growth in most calls indicates potential leak
             "fragmentation_ratio": 0.3,  # 30% fragmentation is concerning
             "inefficient_allocation_ratio": 0.5,  # 50% waste in allocations
             "slow_function_percentile": 0.9,  # Top 10% slowest functions
