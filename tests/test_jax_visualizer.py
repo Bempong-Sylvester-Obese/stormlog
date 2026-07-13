@@ -115,3 +115,41 @@ def test_export_data_omits_unavailable_device_samples(tmp_path: Any) -> None:
         ProfileResult(0, 2, 100, 100, 100, snapshots, {}), str(output), "json"
     )
     assert len(json.loads(output.read_text())) == 1
+
+
+def test_dashboard_uses_modern_dash_runner() -> None:
+    results = mock.Mock()
+    results.snapshots = []
+
+    with (
+        mock.patch("stormlog.jax.visualizer.PLOTLY_AVAILABLE", True),
+        mock.patch("stormlog.jax.visualizer.dash", create=True) as mock_dash,
+        mock.patch("stormlog.jax.visualizer.go", create=True),
+        mock.patch("stormlog.jax.visualizer.dcc", create=True),
+        mock.patch("stormlog.jax.visualizer.html", create=True),
+    ):
+        app = mock_dash.Dash.return_value
+        MemoryVisualizer().create_interactive_dashboard(results, port=9000)
+
+    app.run.assert_called_once_with(debug=False, port=9000, host="127.0.0.1")
+    app.run_server.assert_not_called()
+
+
+def test_dashboard_supports_dash_2_runner() -> None:
+    results = mock.Mock()
+    results.snapshots = []
+    legacy_app = mock.Mock(spec=["layout", "run_server"])
+
+    with (
+        mock.patch("stormlog.jax.visualizer.PLOTLY_AVAILABLE", True),
+        mock.patch("stormlog.jax.visualizer.dash", create=True) as mock_dash,
+        mock.patch("stormlog.jax.visualizer.go", create=True),
+        mock.patch("stormlog.jax.visualizer.dcc", create=True),
+        mock.patch("stormlog.jax.visualizer.html", create=True),
+    ):
+        mock_dash.Dash.return_value = legacy_app
+        MemoryVisualizer().create_interactive_dashboard(results, port=9000)
+
+    legacy_app.run_server.assert_called_once_with(
+        debug=False, port=9000, host="127.0.0.1"
+    )

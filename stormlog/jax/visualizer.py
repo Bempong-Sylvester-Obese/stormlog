@@ -233,7 +233,10 @@ class MemoryVisualizer:
         app.layout = html.Div(
             [html.H1("JAX Stormlog Dashboard"), dcc.Graph(figure=figure)]
         )
-        app.run_server(debug=False, port=port, host="127.0.0.1")
+        run_dashboard = getattr(app, "run", None)
+        if run_dashboard is None:
+            run_dashboard = app.run_server
+        run_dashboard(debug=False, port=port, host="127.0.0.1")
 
     @staticmethod
     def _rows(results: Any) -> List[Dict[str, float]]:
