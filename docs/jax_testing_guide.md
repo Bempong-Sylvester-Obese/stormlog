@@ -92,8 +92,11 @@ If the CLI outputs that JAX is running on CPU, you'll need to install the specif
 
 Some runtimes, including experimental Metal configurations, do not expose the
 allocator counters required for device-memory sampling. `jaxmemprof info` shows
-the backend and capability state. Use the generated pprof/OOM artifacts for
-allocation attribution, or select a backend that exposes `memory_stats()`.
+the backend and capability state. If the runtime exposes
+`jax.profiler.save_device_memory_profile`, `jaxmemprof track --profile` saves a
+pprof artifact on a clean stop, while `--oom-flight-recorder` attempts the same
+capture after a recognized OOM. Select a backend that exposes `memory_stats()`
+when you need live device-memory samples.
 
 ### Plot export fails
 

@@ -64,6 +64,8 @@ _BANNED_DOC_SNIPPETS = {
         "from gpumemprof import CPUMemoryTracker, MemoryTracker",
         "python -m stormlog.cli",
         "python -m stormlog.tensorflow.cli",
+        "interactive WebAssembly graph viewer",
+        "no Go, `protoc`, or Graphviz installation required",
     ],
     "README.md": [
         "gpu-profiler-overview.gif",
@@ -85,6 +87,7 @@ _BANNED_DOC_SNIPPETS = {
     ],
     "docs/jax_testing_guide.md": [
         "it never treats unavailable",
+        "Use the generated pprof/OOM artifacts",
     ],
     "docs/tui.md": [
         "tui-distributed-diagnostics-workflow.svg",
@@ -163,6 +166,8 @@ _REQUIRED_DOC_SNIPPETS = {
         "stormlog[torch]",
         'JAXMemoryProfiler(device_index="cpu")',
         "if results.device_memory_available:",
+        "requires the Graphviz `dot` executable at generation time",
+        "--oom-flight-recorder",
     ],
     "docs/api.md": [
         "`TrackingResult` additionally exposes",
@@ -170,6 +175,8 @@ _REQUIRED_DOC_SNIPPETS = {
     "docs/jax_testing_guide.md": [
         "if results.device_memory_available:",
         "`jaxmemprof diagnose --duration 0` skips timeline capture",
+        "`jaxmemprof track --profile`",
+        "`--oom-flight-recorder`",
     ],
     "docs/telemetry_schema.md": [
         "`stormlog.jax.memory_tracker`",

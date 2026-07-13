@@ -238,13 +238,32 @@ memory is unavailable.
 
 ### JAX OOM Flight Recorder and Graph Visualization
 
-When tracking JAX execution over time, you can enable the OOM flight recorder to capture detailed XLA device memory profiles (`.prof` files) upon an Out-Of-Memory crash.
+Enable the OOM flight recorder when a tracked workload may raise an OOM:
 
-Stormlog automatically parses this dump and generates a completely standalone, interactive WebAssembly graph viewer (`jax-device-memory-graph.html`) right next to the `.prof` file in the `oom_dumps` directory.
+```bash
+jaxmemprof track \
+  --oom-flight-recorder \
+  --oom-dump-dir ./oom_dumps \
+  --output jax_track.json
+```
+
+After a recognized OOM, Stormlog attempts to save an XLA device-memory profile
+when the runtime exposes `jax.profiler.save_device_memory_profile`. If profile
+capture and protobuf parsing succeed, Stormlog writes
+`jax-device-memory-graph.html` beside the `.prof` file.
+
+The HTML file is self-contained after generation. Creating its directed graph
+requires the Graphviz `dot` executable at generation time. Without Graphviz,
+the file still includes the allocation table and summary, while the graph tab
+shows a dependency message.
 
 You can view the resulting diagnostic graph in two ways:
-1. **Dependency-free HTML:** Simply open the `jax-device-memory-graph.html` file in your web browser to see an interactive Directed Graph of the call stack (no Go, `protoc`, or Graphviz installation required).
-2. **Official Go Tool:** If you prefer the standard Go toolchain, you can run `go tool pprof -http=:8080 <path_to_.prof>`.
+
+1. **Stormlog HTML:** Open `jax-device-memory-graph.html` in a browser. The
+   browser does not need Go, `protoc`, or Graphviz after Stormlog has generated
+   the file.
+2. **Official Go Tool:** If you prefer the standard Go toolchain, run
+   `go tool pprof -http=:8080 <path_to_.prof>`.
 
 ## CPU-only workflow
 
