@@ -595,15 +595,21 @@ class MemoryTracker:
 
     def _run_tracking_iteration(self) -> None:
         current_time = time.time()
-        if not self._device_memory_available:
-            self._set_collector_health(
-                status=COLLECTOR_HEALTH_UNHEALTHY,
-                telemetry_partial=True,
-                last_error=self._device_memory_unavailable_reason,
-            )
-            return
         if not self._retry_collection_due(current_time):
             return
+        if not self._device_memory_available:
+            capability = get_device_memory_capability(self._device)
+            self._device_memory_available = bool(capability["memory_stats_available"])
+            self._device_memory_unavailable_reason = capability["memory_stats_error"]
+            if not self._device_memory_available:
+                self._transition_to_failure(
+                    current_time,
+                    RuntimeError(self._device_memory_unavailable_reason),
+                )
+                return
+            stats = capability["memory_stats"]
+            if "bytes_limit" in stats:
+                self._device_bytes_limit = int(stats["bytes_limit"])
 
         try:
             current_memory = self._get_current_memory_bytes()
