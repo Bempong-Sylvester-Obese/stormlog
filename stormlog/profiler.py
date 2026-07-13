@@ -98,6 +98,7 @@ class GPUMemoryProfiler:
         track_tensors: bool = False,
         track_cpu_memory: bool = True,
         collect_stack_traces: bool = False,
+        max_snapshots: int = 10_000,
     ):
         """
         Initialize the Stormlog.
@@ -109,11 +110,16 @@ class GPUMemoryProfiler:
                 all GC-tracked Python objects.
             track_cpu_memory: Whether to track CPU memory usage
             collect_stack_traces: Whether to collect stack traces for operations
+            max_snapshots: Maximum monitoring snapshots retained in memory
         """
+        if max_snapshots <= 0:
+            raise ValueError("max_snapshots must be >= 1")
+
         self.device = self._setup_device(device)
         self.track_tensors = track_tensors
         self.track_cpu_memory = track_cpu_memory
         self.collect_stack_traces = collect_stack_traces
+        self.max_snapshots = max_snapshots
 
         self.results: List[ProfileResult] = []
         self.snapshots: List[MemorySnapshot] = []
@@ -402,6 +408,8 @@ class GPUMemoryProfiler:
         while self._monitoring:
             snapshot = self._take_snapshot("monitor")
             self.snapshots.append(snapshot)
+            if len(self.snapshots) > self.max_snapshots:
+                self.snapshots.pop(0)
             time.sleep(self._monitor_interval)
 
     def get_summary(self) -> Dict[str, Any]:
