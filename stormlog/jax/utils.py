@@ -38,6 +38,74 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def normalize_jax_backend(backend: str) -> str:
+    """Return Stormlog's stable name for a JAX runtime backend."""
+    normalized = backend.strip().lower()
+    if normalized in {"gpu", "cuda", "rocm"}:
+        return "gpu"
+    if normalized in {"metal", "mps"}:
+        return "metal"
+    if normalized in {"cpu", "tpu"}:
+        return normalized
+    return "unknown"
+
+
+def get_device_memory_capability(device: Any) -> Dict[str, Any]:
+    """Describe whether *device* exposes usable JAX allocator statistics."""
+    try:
+        raw_stats = device.memory_stats()
+    except Exception as exc:
+        return {
+            "memory_stats_available": False,
+            "memory_stats": {},
+            "memory_stats_error": str(exc),
+        }
+    if not raw_stats or "bytes_in_use" not in raw_stats:
+        return {
+            "memory_stats_available": False,
+            "memory_stats": dict(raw_stats or {}),
+            "memory_stats_error": "JAX device does not expose bytes_in_use",
+        }
+    return {
+        "memory_stats_available": True,
+        "memory_stats": dict(raw_stats),
+        "memory_stats_error": None,
+    }
+
+
+def resolve_jax_device(selector: Union[int, str] = 0) -> tuple[Any, int]:
+    """Resolve a local-device index or a named JAX backend selector.
+
+    Named selectors (``cpu``, ``gpu``, ``tpu``, and ``metal``) select the
+    first device exposed by that backend. Numeric selectors preserve the
+    historical local-device-index API.
+    """
+    if not JAX_AVAILABLE:
+        raise ImportError(
+            "JAX not available. Install with `pip install 'stormlog[jax]'`."
+        )
+    if isinstance(selector, int) or str(selector).isdigit():
+        index = int(selector)
+        devices = _cached_local_devices()
+        if index < 0 or index >= len(devices):
+            raise ValueError(
+                f"JAX device index {index} is out of range (found {len(devices)})"
+            )
+        return devices[index], index
+
+    backend = normalize_jax_backend(str(selector))
+    if backend == "unknown":
+        raise ValueError("JAX device must be an index or one of cpu, gpu, tpu, metal")
+    try:
+        devices = tuple(jax.devices(backend=backend))
+    except Exception as exc:
+        raise ValueError(f"JAX backend {backend!r} is unavailable: {exc}") from exc
+    if not devices:
+        raise ValueError(f"JAX backend {backend!r} has no devices")
+    device = devices[0]
+    return device, int(getattr(device, "id", 0))
+
+
 def _device_zero(device: Any) -> Any:
     """Create a scalar zero on a device using JAX's runtime-supported keyword."""
 
@@ -71,14 +139,14 @@ _cpu_warning_logged = False
 def detect_jax_backend() -> str:
     """Return the active JAX backend name.
 
-    Returns one of 'gpu', 'tpu', or 'cpu'. Returns 'cpu'
+    Returns one of 'gpu', 'metal', 'tpu', 'cpu', or 'unknown'. Returns 'cpu'
     as a fallback if JAX is not installed or backend detection fails.
     """
     global _cpu_warning_logged
     if not JAX_AVAILABLE:
         return "cpu"
     try:
-        backend = str(jax.default_backend())
+        backend = normalize_jax_backend(str(jax.default_backend()))
         if backend == "cpu" and not _cpu_warning_logged:
             logger.info(
                 "JAX is running on CPU. Please download specific JAX types "
@@ -91,11 +159,11 @@ def detect_jax_backend() -> str:
         return "cpu"
 
 
-def get_device_info(device_index: int = 0) -> Dict[str, Any]:
+def get_device_info(device_index: Union[int, str] = 0) -> Dict[str, Any]:
     """Return device kind, platform, and live memory statistics.
 
     Args:
-        device_index: Index into ``jax.local_devices()`` (default 0).
+        device_index: Local device index or named JAX backend selector.
 
     Returns:
         Dictionary with keys ``kind``, ``platform``, ``device_id``,
@@ -109,41 +177,22 @@ def get_device_info(device_index: int = 0) -> Dict[str, Any]:
             "device_id": 0,
             "process_index": 0,
             "memory_stats": {},
+            "memory_stats_available": False,
+            "memory_stats_error": "JAX not available",
             "client": None,
             "error": "JAX not available",
         }
 
     try:
-        devices = _cached_local_devices()
-        if device_index >= len(devices):
-            return {
-                "kind": "unknown",
-                "platform": detect_jax_backend(),
-                "device_id": device_index,
-                "process_index": 0,
-                "memory_stats": {},
-                "client": None,
-                "error": f"Device index {device_index} out of range "
-                f"(found {len(devices)} devices)",
-            }
-
-        device = devices[device_index]
-        memory_stats: Dict[str, Any] = {}
-        try:
-            raw_stats = device.memory_stats()
-            if raw_stats is not None:
-                memory_stats = dict(raw_stats)
-        except Exception as exc:
-            logger.debug(
-                "Could not read memory_stats for device %d: %s", device_index, exc
-            )
+        device, resolved_index = resolve_jax_device(device_index)
+        capability = get_device_memory_capability(device)
 
         return {
             "kind": str(getattr(device, "device_kind", "unknown")),
             "platform": str(device.platform),
-            "device_id": getattr(device, "id", device_index),
+            "device_id": getattr(device, "id", resolved_index),
             "process_index": getattr(device, "process_index", 0),
-            "memory_stats": memory_stats,
+            **capability,
             "client": str(getattr(device, "client", None)),
         }
     except Exception as exc:
@@ -154,6 +203,8 @@ def get_device_info(device_index: int = 0) -> Dict[str, Any]:
             "device_id": device_index,
             "process_index": 0,
             "memory_stats": {},
+            "memory_stats_available": False,
+            "memory_stats_error": str(exc),
             "client": None,
             "error": str(exc),
         }
@@ -165,9 +216,24 @@ def get_backend_info() -> Dict[str, Any]:
     Returns a dictionary with the JAX runtime backend classification
     and platform details.
     """
+    raw_backend = "cpu"
+    if JAX_AVAILABLE:
+        try:
+            raw_backend = str(jax.default_backend())
+        except Exception:
+            pass
+    runtime_backend = normalize_jax_backend(raw_backend)
+    is_apple_silicon = platform.system() == "Darwin" and platform.machine().lower() in {
+        "arm64",
+        "aarch64",
+    }
     info: Dict[str, Any] = {
-        "runtime_backend": detect_jax_backend(),
+        "runtime_backend": runtime_backend,
+        "raw_runtime_backend": raw_backend,
         "jax_available": JAX_AVAILABLE,
+        "is_gpu_build": runtime_backend in {"gpu", "metal"},
+        "is_apple_silicon": is_apple_silicon,
+        "jax_metal_active": runtime_backend == "metal",
         "device_count": 0,
         "devices": [],
     }
@@ -263,6 +329,7 @@ def validate_jax_environment() -> Dict[str, Any]:
         "jax_available": JAX_AVAILABLE,
         "gpu_available": False,
         "tpu_available": False,
+        "metal_available": False,
         "version_compatible": False,
         "issues": issues,
     }
@@ -295,6 +362,9 @@ def validate_jax_environment() -> Dict[str, Any]:
 
         if backend == "gpu":
             validation["gpu_available"] = True
+        elif backend == "metal":
+            validation["gpu_available"] = True
+            validation["metal_available"] = True
         elif backend == "tpu":
             validation["tpu_available"] = True
         elif backend == "cpu":

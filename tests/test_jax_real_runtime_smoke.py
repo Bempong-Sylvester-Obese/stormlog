@@ -27,3 +27,8 @@ def test_stormlog_jax_real_runtime_smoke() -> None:
 
     assert result.tolist() == [1, 2, 3]
     assert results.function_profiles["real_jax_cpu_op"]["calls"] == 1
+    if results.device_memory_available:
+        assert results.peak_memory_bytes >= 0
+    else:
+        assert results.peak_memory_bytes == 0
+        assert results.device_memory_unavailable_reason

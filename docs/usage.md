@@ -86,8 +86,8 @@ tfmemprof info
 tfmemprof diagnose --duration 0 --output /tmp/tf_diag
 
 jaxmemprof info
-jaxmemprof track --duration 2 --interval 0.5 --output /tmp/jaxmemprof_track.json --format json
-jaxmemprof analyze /tmp/jaxmemprof_track.json --format txt --output /tmp/jaxmemprof_analysis.txt
+jaxmemprof monitor --duration 2 --interval 0.5 --output /tmp/jaxmemprof_monitor.json
+jaxmemprof analyze --input /tmp/jaxmemprof_monitor.json --detect-leaks --optimize --report /tmp/jaxmemprof_analysis.txt
 jaxmemprof diagnose --duration 0 --output /tmp/jax_diag
 ```
 
@@ -219,21 +219,51 @@ with profiler.profile_context("training"):
     y.block_until_ready()
 
 results = profiler.get_results()
-print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+if results.device_memory_available:
+    print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+else:
+    print(
+        "Device memory unavailable: "
+        f"{results.device_memory_unavailable_reason}"
+    )
 print(f"Snapshots captured: {len(results.snapshots)}")
 ```
 
-For CPU-only JAX execution, the profiler will automatically adapt to the `cpu` backend.
+For CPU-only JAX profiling, initialize
+`JAXMemoryProfiler(device_index="cpu")`; from the CLI, use `--device cpu`.
+Device-memory metrics are available only when the selected runtime exposes JAX
+allocator stats. Check `device_memory_available` before reading profiler
+metrics. Monitor and track exports report process RSS separately when device
+memory is unavailable.
 
 ### JAX OOM Flight Recorder and Graph Visualization
 
-When tracking JAX execution over time, you can enable the OOM flight recorder to capture detailed XLA device memory profiles (`.prof` files) upon an Out-Of-Memory crash.
+Enable the OOM flight recorder when a tracked workload may raise an OOM:
 
-Stormlog automatically parses this dump and generates a completely standalone, interactive WebAssembly graph viewer (`jax-device-memory-graph.html`) right next to the `.prof` file in the `oom_dumps` directory.
+```bash
+jaxmemprof track \
+  --oom-flight-recorder \
+  --oom-dump-dir ./oom_dumps \
+  --output jax_track.json
+```
+
+After a recognized OOM, Stormlog attempts to save an XLA device-memory profile
+when the runtime exposes `jax.profiler.save_device_memory_profile`. If profile
+capture and protobuf parsing succeed, Stormlog writes
+`jax-device-memory-graph.html` beside the `.prof` file.
+
+The HTML file is self-contained after generation. Creating its directed graph
+requires the Graphviz `dot` executable at generation time. Without Graphviz,
+the file still includes the allocation table and summary, while the graph tab
+shows a dependency message.
 
 You can view the resulting diagnostic graph in two ways:
-1. **Dependency-free HTML:** Simply open the `jax-device-memory-graph.html` file in your web browser to see an interactive Directed Graph of the call stack (no Go, `protoc`, or Graphviz installation required).
-2. **Official Go Tool:** If you prefer the standard Go toolchain, you can run `go tool pprof -http=:8080 <path_to_.prof>`.
+
+1. **Stormlog HTML:** Open `jax-device-memory-graph.html` in a browser. The
+   browser does not need Go, `protoc`, or Graphviz after Stormlog has generated
+   the file.
+2. **Official Go Tool:** If you prefer the standard Go toolchain, run
+   `go tool pprof -http=:8080 <path_to_.prof>`.
 
 ## CPU-only workflow
 

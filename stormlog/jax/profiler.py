@@ -20,11 +20,12 @@ from typing import (
     List,
     Optional,
     TypeVar,
+    Union,
     cast,
 )
 
 from .jax_env import configure_jax_logging
-from .utils import _device_zero
+from .utils import _device_zero, get_device_memory_capability, resolve_jax_device
 
 configure_jax_logging()
 
@@ -69,6 +70,8 @@ class MemorySnapshot:
     device_memory_reserved_bytes: int = 0
     memory_stats: Dict[str, Any] = field(default_factory=dict)
     operation_name: Optional[str] = None
+    device_memory_available: bool = True
+    device_memory_unavailable_reason: Optional[str] = None
 
     def __post_init__(self) -> None:
         if self.device_memory_bytes < 0:
@@ -102,6 +105,8 @@ class ProfileResult:
     min_memory_bytes: int
     snapshots: List[MemorySnapshot] = field(default_factory=list)
     function_profiles: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    device_memory_available: bool = False
+    device_memory_unavailable_reason: Optional[str] = None
 
     @property
     def duration(self) -> float:
@@ -159,13 +164,15 @@ class JAXMemoryProfiler:
         result = profiler.get_results()
     """
 
-    def __init__(self, device_index: int = 0) -> None:
+    def __init__(
+        self, device_index: Union[int, str] = 0, *, device: Any = None
+    ) -> None:
         if not JAX_AVAILABLE:
             raise ImportError(
                 "JAX not available. Install with `pip install 'stormlog[jax]'`."
             )
 
-        self._device_index = device_index
+        self._device_index = int(device_index) if isinstance(device_index, int) else 0
         self._device: Any = None
         self._lock = threading.Lock()
 
@@ -179,9 +186,15 @@ class JAXMemoryProfiler:
         self._end_time: Optional[float] = None
 
         try:
-            devices = jax.local_devices()
-            if device_index < len(devices):
-                self._device = devices[device_index]
+            if device is not None:
+                self._device = device
+                self._device_index = int(getattr(device, "id", device_index))
+            elif isinstance(device_index, int):
+                devices = jax.local_devices()
+                if 0 <= device_index < len(devices):
+                    self._device = devices[device_index]
+            else:
+                self._device, self._device_index = resolve_jax_device(device_index)
         except Exception as exc:
             logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
 
@@ -213,6 +226,8 @@ class JAXMemoryProfiler:
         device_bytes = 0
         reserved_bytes = 0
         memory_stats: Dict[str, Any] = {}
+        device_memory_available = False
+        unavailable_reason: Optional[str] = "No JAX device was selected"
 
         if self._device is not None:
             try:
@@ -227,15 +242,18 @@ class JAXMemoryProfiler:
                     self._sync_sentinel.block_until_ready()
                 else:
                     _device_zero(self._device).block_until_ready()
-                raw = self._device.memory_stats()
-                if raw is not None:
-                    memory_stats = dict(raw)
+                capability = get_device_memory_capability(self._device)
+                memory_stats = capability["memory_stats"]
+                device_memory_available = bool(capability["memory_stats_available"])
+                unavailable_reason = capability["memory_stats_error"]
+                if device_memory_available:
                     device_bytes = int(memory_stats.get("bytes_in_use", 0))
                     reserved_bytes = int(
                         memory_stats.get("bytes_reserved", device_bytes)
                     )
             except Exception as exc:
                 logger.debug("Snapshot memory_stats failed: %s", exc)
+                unavailable_reason = str(exc)
 
         cpu_bytes = 0
         if PSUTIL_AVAILABLE and psutil is not None:
@@ -253,6 +271,8 @@ class JAXMemoryProfiler:
             device_id=self._device_index,
             memory_stats=memory_stats,
             operation_name=operation_name,
+            device_memory_available=device_memory_available,
+            device_memory_unavailable_reason=unavailable_reason,
         )
 
         with self._lock:
@@ -300,7 +320,14 @@ class JAXMemoryProfiler:
                         operation_name=profiled_name,
                     )
 
-                    delta = after.device_memory_bytes - before.device_memory_bytes
+                    memory_available = (
+                        before.device_memory_available and after.device_memory_available
+                    )
+                    delta = (
+                        after.device_memory_bytes - before.device_memory_bytes
+                        if memory_available
+                        else 0
+                    )
                     peak = max(
                         before.device_memory_bytes,
                         after.device_memory_bytes,
@@ -315,6 +342,7 @@ class JAXMemoryProfiler:
                                 "peak_memory_bytes": 0,
                                 "total_memory_delta": 0,
                                 "last_memory_delta": 0,
+                                "device_memory_available": memory_available,
                             },
                         )
                         entry["calls"] += 1
@@ -324,6 +352,7 @@ class JAXMemoryProfiler:
                         )
                         entry["total_memory_delta"] += delta
                         entry["last_memory_delta"] = delta
+                        entry["device_memory_available"] = memory_available
 
                 return result
 
@@ -354,7 +383,14 @@ class JAXMemoryProfiler:
         finally:
             elapsed = time.monotonic() - start
             after = self.capture_snapshot(f"{name}_after", operation_name=name)
-            delta = after.device_memory_bytes - before.device_memory_bytes
+            memory_available = (
+                before.device_memory_available and after.device_memory_available
+            )
+            delta = (
+                after.device_memory_bytes - before.device_memory_bytes
+                if memory_available
+                else 0
+            )
             peak = max(
                 before.device_memory_bytes,
                 after.device_memory_bytes,
@@ -369,6 +405,7 @@ class JAXMemoryProfiler:
                         "peak_memory_bytes": 0,
                         "total_memory_delta": 0,
                         "last_memory_delta": 0,
+                        "device_memory_available": memory_available,
                     },
                 )
                 entry["calls"] += 1
@@ -376,6 +413,7 @@ class JAXMemoryProfiler:
                 entry["peak_memory_bytes"] = max(entry["peak_memory_bytes"], peak)
                 entry["total_memory_delta"] += delta
                 entry["last_memory_delta"] = delta
+                entry["device_memory_available"] = memory_available
 
     # -- Continuous profiling ----------------------------------------------
 
@@ -427,15 +465,30 @@ class JAXMemoryProfiler:
                 function_profiles=profiles,
             )
 
-        memories = [s.device_memory_bytes for s in snapshots]
+        memory_available = all(
+            snapshot.device_memory_available for snapshot in snapshots
+        )
+        unavailable_reason = next(
+            (
+                snapshot.device_memory_unavailable_reason
+                for snapshot in snapshots
+                if not snapshot.device_memory_available
+            ),
+            None,
+        )
+        memories = (
+            [s.device_memory_bytes for s in snapshots] if memory_available else []
+        )
         return ProfileResult(
             start_time=snapshots[0].timestamp,
             end_time=snapshots[-1].timestamp,
-            peak_memory_bytes=max(memories),
-            average_memory_bytes=int(sum(memories) / len(memories)),
-            min_memory_bytes=min(memories),
+            peak_memory_bytes=max(memories) if memories else 0,
+            average_memory_bytes=int(sum(memories) / len(memories)) if memories else 0,
+            min_memory_bytes=min(memories) if memories else 0,
             snapshots=snapshots,
             function_profiles=profiles,
+            device_memory_available=memory_available,
+            device_memory_unavailable_reason=unavailable_reason,
         )
 
     def reset(self) -> None:

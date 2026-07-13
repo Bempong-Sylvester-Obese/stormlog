@@ -505,12 +505,20 @@ jaxmemprof monitor --interval 0.5 --duration 30 --output jax_monitor.json
 jaxmemprof monitor --interval 0.5 --duration 30 --device gpu --output jax_monitor_gpu.json
 ```
 
-For CPU-only JAX execution or when accelerators are unavailable, use `--device cpu`:
+`--device` accepts a local-device index or the named `cpu`, `gpu`, `tpu`, and
+`metal` backends. For CPU-only execution, use `--device cpu`:
 
 ```bash
 jaxmemprof monitor --interval 0.5 --duration 30 --device cpu --output jax_monitor.json
 jaxmemprof track --interval 0.5 --device cpu --output jax_track.json
 ```
+
+JAX memory sample events are emitted only when the selected backend exposes
+`memory_stats().bytes_in_use`. On runtimes without allocator counters,
+`jaxmemprof` marks device memory unavailable and suppresses sample events.
+Monitor and track results report process RSS separately. Collector status events
+retain the numeric allocator fields required by the telemetry schema, but mark
+those fields as partial in `metadata` rather than presenting them as samples.
 
 ### Track JAX memory usage
 

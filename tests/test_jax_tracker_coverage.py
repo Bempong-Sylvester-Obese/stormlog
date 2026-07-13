@@ -39,6 +39,41 @@ def test_run_tracking_iteration_failure() -> None:
         assert tracker._collector_health.status == COLLECTOR_HEALTH_UNHEALTHY
 
 
+def test_unavailable_device_memory_does_not_emit_zero_sample() -> None:
+    tracker = MemoryTracker()
+    tracker._device_memory_available = False
+    tracker._device_memory_unavailable_reason = "backend has no allocator stats"
+
+    tracker._run_tracking_iteration()
+
+    result = tracker.get_tracking_results()
+    assert result.memory_usage == []
+    assert result.device_memory_available is False
+    assert result.memory_source == "unavailable"
+
+
+def test_transient_initial_memory_stats_failure_recovers() -> None:
+    device = mock.Mock()
+    device.memory_stats.side_effect = [
+        RuntimeError("runtime warming up"),
+        {"bytes_in_use": 1024, "bytes_limit": 8192},
+        {"bytes_in_use": 2048, "bytes_limit": 8192},
+    ]
+
+    with mock.patch("stormlog.jax.tracker.jax.local_devices", return_value=[device]):
+        tracker = MemoryTracker()
+
+    assert tracker._device_memory_available is False
+
+    tracker._run_tracking_iteration()
+
+    result = tracker.get_tracking_results()
+    assert device.memory_stats.call_count == 3
+    assert result.memory_usage == [2048]
+    assert result.device_memory_available is True
+    assert tracker._collector_health.status == COLLECTOR_HEALTH_HEALTHY
+
+
 def test_tracking_loop_exception() -> None:
     tracker = MemoryTracker(enable_logging=True)
     tracker._stop_event = mock.Mock()
