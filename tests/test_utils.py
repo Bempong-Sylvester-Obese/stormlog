@@ -10,6 +10,10 @@ import stormlog.tensorflow.utils as tfmemprof_utils
 import stormlog.utils as gpumemprof_utils
 
 
+def test_format_bytes_preserves_negative_sign_and_scales_magnitude() -> None:
+    assert gpumemprof_utils.format_bytes(-3 * 1024**3) == "-3.00 GB"
+
+
 def test_get_system_info_contains_expected_keys() -> None:
     system_info = gpumemprof_utils.get_system_info()
 

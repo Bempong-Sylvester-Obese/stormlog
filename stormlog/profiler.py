@@ -95,23 +95,31 @@ class GPUMemoryProfiler:
     def __init__(
         self,
         device: Union[str, int, torch.device, None] = None,
-        track_tensors: bool = True,
+        track_tensors: bool = False,
         track_cpu_memory: bool = True,
         collect_stack_traces: bool = False,
+        max_snapshots: int = 10_000,
     ):
         """
         Initialize the Stormlog.
 
         Args:
             device: GPU device to profile (None for auto-detection)
-            track_tensors: Whether to track tensor creation/deletion
+            track_tensors: Whether to estimate net changes in GC-visible CUDA
+                tensor counts. Disabled by default because each estimate scans
+                all GC-tracked Python objects.
             track_cpu_memory: Whether to track CPU memory usage
             collect_stack_traces: Whether to collect stack traces for operations
+            max_snapshots: Maximum monitoring snapshots retained in memory
         """
+        if max_snapshots <= 0:
+            raise ValueError("max_snapshots must be >= 1")
+
         self.device = self._setup_device(device)
         self.track_tensors = track_tensors
         self.track_cpu_memory = track_cpu_memory
         self.collect_stack_traces = collect_stack_traces
+        self.max_snapshots = max_snapshots
 
         self.results: List[ProfileResult] = []
         self.snapshots: List[MemorySnapshot] = []
@@ -307,7 +315,7 @@ class GPUMemoryProfiler:
             name: Name for the profiled context
 
         Yields:
-            ProfileResult after the context exits
+            None. The completed ProfileResult is appended to ``results`` after exit.
         """
         torch.cuda.reset_peak_memory_stats(self.device)
         memory_before = self._take_snapshot(f"before_{name}")
@@ -400,6 +408,8 @@ class GPUMemoryProfiler:
         while self._monitoring:
             snapshot = self._take_snapshot("monitor")
             self.snapshots.append(snapshot)
+            if len(self.snapshots) > self.max_snapshots:
+                self.snapshots.pop(0)
             time.sleep(self._monitor_interval)
 
     def get_summary(self) -> Dict[str, Any]:
@@ -468,22 +478,10 @@ class GPUMemoryProfiler:
 
 
 class TensorTracker:
-    """Tracks tensor creation and deletion for memory profiling."""
-
-    def __init__(self) -> None:
-        self._tensor_count = 0
-        self._setup_hooks()
-
-    def _setup_hooks(self) -> None:
-        """Setup hooks to track tensor lifecycle."""
-        # Note: This is a simplified version. Full implementation would require
-        # more sophisticated tensor tracking using PyTorch's autograd hooks
-        pass
+    """Estimates the number of GC-visible CUDA tensor objects."""
 
     def count_tensors(self) -> int:
-        """Count current number of tracked tensors."""
-        # Simplified implementation - count all tensors in CUDA memory
-        gc.collect()
+        """Count CUDA tensors found by scanning GC-tracked Python objects."""
 
         tensor_count = 0
         for obj in gc.get_objects():

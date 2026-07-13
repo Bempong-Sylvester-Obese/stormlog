@@ -238,13 +238,22 @@ Each attachment includes:
 - `kind`
 - `attachment_id` for stable lifecycle-managed sidecars
 - `url` or `path`
+- optional `run_id`
 - `session_id`, `job_id`, and `rank` when known
 - `start_ns` and `end_ns` when the attachment is time-bounded
 - `created_at_utc` and `updated_at_utc`
+- `storage` (`reference` or `copy`) when the producer knows whether the file was
+  copied into the local artifact set
+- optional `source_namespace` and `source_ref` for integration navigation
 - `metadata`
 
 Relative `path` values resolve against the sidecar directory. Stormlog records
 remote URLs but does not fetch them during local correlation.
+
+Run-level grouping is described by `stormlog_run.json`, whose schema is
+`docs/schemas/stormlog_run_envelope_v1.schema.json`. See
+[Run Envelopes](run_envelopes.md) for the distinction between sessions and
+top-level run envelopes.
 
 ## Analyzer phase attribution payloads
 

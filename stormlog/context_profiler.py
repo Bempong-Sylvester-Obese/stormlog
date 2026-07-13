@@ -107,7 +107,7 @@ def profile_context(
         profiler: Custom profiler instance to use
 
     Yields:
-        ProfileResult after the context exits
+        GPUMemoryProfiler instance used to profile the block
 
     Example:
         with profile_context("model_forward") as prof:

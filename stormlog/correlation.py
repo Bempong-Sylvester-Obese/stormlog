@@ -122,6 +122,10 @@ class ExternalAttachment:
     updated_at_utc: str | None
     metadata: Mapping[str, Any]
     sidecar_path: str
+    run_id: str | None = None
+    storage: str | None = None
+    source_namespace: str | None = None
+    source_ref: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """Serialize the attachment row to a JSON-safe dictionary."""
@@ -131,6 +135,7 @@ class ExternalAttachment:
             "attachment_id": self.attachment_id,
             "url": self.url,
             "path": self.path,
+            "run_id": self.run_id,
             "session_id": self.session_id,
             "job_id": self.job_id,
             "rank": self.rank,
@@ -138,6 +143,9 @@ class ExternalAttachment:
             "end_ns": self.end_ns,
             "created_at_utc": self.created_at_utc,
             "updated_at_utc": self.updated_at_utc,
+            "storage": self.storage,
+            "source_namespace": self.source_namespace,
+            "source_ref": self.source_ref,
             "metadata": dict(self.metadata),
             "sidecar_path": self.sidecar_path,
         }

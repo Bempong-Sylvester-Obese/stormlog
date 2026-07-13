@@ -7,6 +7,11 @@ does not change `TelemetryEvent v3`; instead, the query layer projects telemetry
 markers, rollups, OOM bundles, diagnose manifests, and external attachments into
 one evidence list around an investigation anchor.
 
+For broader navigation, `stormlog query runs` and `stormlog query attachments`
+provide a run-centric catalog. Correlation remains the timestamp or record
+pivot; run envelopes answer which sessions and artifacts belong to the same
+top-level investigation.
+
 ## Minimum Contract
 
 A trustworthy correlation row needs enough identity, time, and provenance to let
@@ -93,3 +98,7 @@ must provide either `url` or `path`, and should provide identifiers and time
 bounds whenever possible. `attachment_id` is optional but recommended for
 sidecars that are updated over time because it gives correlation output a stable
 evidence identity.
+
+Sidecars may also include `run_id`, `storage`, `source_namespace`, and
+`source_ref`. Those fields are used by the run attachment catalog and remain
+optional for existing correlation sidecars.
