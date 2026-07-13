@@ -1,3 +1,4 @@
+import inspect
 import subprocess
 import sys
 import textwrap
@@ -84,22 +85,27 @@ def test_profile_function_decorator_executes_once_and_returns_result() -> None:
     assert profiler.seen_name == "custom_profile_name"
 
 
-def test_tensor_tracker_count_tensors_does_not_call_empty_cache(
+def test_gpu_profiler_disables_tensor_scanning_by_default() -> None:
+    parameter = inspect.signature(GPUMemoryProfiler.__init__).parameters[
+        "track_tensors"
+    ]
+
+    assert parameter.default is False
+
+
+def test_tensor_tracker_count_tensors_does_not_force_memory_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracker = TensorTracker()
-    state = {"called": False}
 
     def fail_if_called() -> None:
-        state["called"] = True
-        raise AssertionError("count_tensors should not call torch.cuda.empty_cache()")
+        raise AssertionError("count_tensors should not force memory cleanup")
 
-    monkeypatch.setattr(profiler_module.gc, "collect", lambda: 0)
+    monkeypatch.setattr(profiler_module.gc, "collect", fail_if_called)
     monkeypatch.setattr(profiler_module.gc, "get_objects", lambda: [])
     monkeypatch.setattr(profiler_module.torch.cuda, "empty_cache", fail_if_called)
 
     assert tracker.count_tensors() == 0
-    assert state["called"] is False
 
 
 class _ExceptionPathHarness:

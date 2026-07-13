@@ -95,7 +95,7 @@ class GPUMemoryProfiler:
     def __init__(
         self,
         device: Union[str, int, torch.device, None] = None,
-        track_tensors: bool = True,
+        track_tensors: bool = False,
         track_cpu_memory: bool = True,
         collect_stack_traces: bool = False,
     ):
@@ -104,7 +104,9 @@ class GPUMemoryProfiler:
 
         Args:
             device: GPU device to profile (None for auto-detection)
-            track_tensors: Whether to track tensor creation/deletion
+            track_tensors: Whether to estimate net changes in GC-visible CUDA
+                tensor counts. Disabled by default because each estimate scans
+                all GC-tracked Python objects.
             track_cpu_memory: Whether to track CPU memory usage
             collect_stack_traces: Whether to collect stack traces for operations
         """
@@ -468,22 +470,10 @@ class GPUMemoryProfiler:
 
 
 class TensorTracker:
-    """Tracks tensor creation and deletion for memory profiling."""
-
-    def __init__(self) -> None:
-        self._tensor_count = 0
-        self._setup_hooks()
-
-    def _setup_hooks(self) -> None:
-        """Setup hooks to track tensor lifecycle."""
-        # Note: This is a simplified version. Full implementation would require
-        # more sophisticated tensor tracking using PyTorch's autograd hooks
-        pass
+    """Estimates the number of GC-visible CUDA tensor objects."""
 
     def count_tensors(self) -> int:
-        """Count current number of tracked tensors."""
-        # Simplified implementation - count all tensors in CUDA memory
-        gc.collect()
+        """Count CUDA tensors found by scanning GC-tracked Python objects."""
 
         tensor_count = 0
         for obj in gc.get_objects():
