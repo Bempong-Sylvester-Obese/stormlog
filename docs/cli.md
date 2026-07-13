@@ -290,6 +290,30 @@ The query surface is local-first and file-backed. It reads sink manifests and
 bundle manifests before loading raw events, so listing sessions or OOM bundles
 does not require parsing every JSONL segment in a large sink directory.
 
+List top-level runs:
+
+```bash
+stormlog query runs ./artifacts --json
+stormlog query runs ./distributed_runs --job-id train-42 --table
+```
+
+When `stormlog_run.json` exists, this command lists explicit run envelopes.
+Without an envelope, Stormlog synthesizes runs from sessions: rank-local
+sessions with the same non-null `job_id` become one distributed run, while
+sessions without `job_id` stay separate.
+
+List run-indexed attachments:
+
+```bash
+stormlog query attachments ./artifacts --run-id run-train-42 --table
+stormlog query attachments ./artifacts --source-namespace wandb --json
+stormlog query attachments ./live_sink --kind telemetry_sink_segment --csv
+```
+
+Attachments include local telemetry artifacts, OOM and diagnose bundles, rollup
+sidecars, `stormlog_attachments.json` entries, and external references declared
+by a run envelope.
+
 List sessions:
 
 ```bash
@@ -360,7 +384,8 @@ Supported output formats:
 
 - `--table`: readable table output, used by default
 - `--json`: machine-readable rows
-- `--csv`: row-query exports for `sessions`, `events`, and `ooms`
+- `--csv`: row-query exports for `runs`, `attachments`, `sessions`, `events`,
+  and `ooms`
 
 The Python API behind the CLI is available as:
 
@@ -368,6 +393,8 @@ The Python API behind the CLI is available as:
 import stormlog.query
 
 store = stormlog.query.open(["./live_sink", "./oom_dumps"])
+runs = store.list_runs()
+attachments = store.list_run_attachments()
 sessions = store.list_sessions()
 events = store.query_events()
 ooms = store.list_oom_bundles()
