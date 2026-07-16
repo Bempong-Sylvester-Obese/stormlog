@@ -4,7 +4,7 @@ import gc
 import logging
 import threading
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional, Union
@@ -122,7 +122,7 @@ class GPUMemoryProfiler:
         self.max_snapshots = max_snapshots
 
         self.results: List[ProfileResult] = []
-        self.snapshots: List[MemorySnapshot] = []
+        self.snapshots: deque[MemorySnapshot] = deque(maxlen=max_snapshots)
         self.function_stats: Dict[str, List[ProfileResult]] = defaultdict(list)
 
         self._monitoring = False
@@ -408,8 +408,6 @@ class GPUMemoryProfiler:
         while self._monitoring:
             snapshot = self._take_snapshot("monitor")
             self.snapshots.append(snapshot)
-            if len(self.snapshots) > self.max_snapshots:
-                self.snapshots.pop(0)
             time.sleep(self._monitor_interval)
 
     def get_summary(self) -> Dict[str, Any]:

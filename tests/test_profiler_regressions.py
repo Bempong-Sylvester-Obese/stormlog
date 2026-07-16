@@ -2,7 +2,7 @@ import inspect
 import subprocess
 import sys
 import textwrap
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 import pytest
@@ -113,12 +113,33 @@ def test_gpu_profiler_rejects_non_positive_snapshot_limit() -> None:
         GPUMemoryProfiler(max_snapshots=0)
 
 
+def test_gpu_profiler_uses_bounded_snapshot_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = MemorySnapshot(
+        timestamp=0.0,
+        allocated_memory=0,
+        reserved_memory=0,
+        max_memory_allocated=0,
+        max_memory_reserved=0,
+        active_memory=0,
+        inactive_memory=0,
+        cpu_memory=0,
+    )
+    monkeypatch.setattr(GPUMemoryProfiler, "_setup_device", lambda *_: object())
+    monkeypatch.setattr(GPUMemoryProfiler, "_take_snapshot", lambda *_: snapshot)
+
+    profiler = GPUMemoryProfiler(max_snapshots=3)
+
+    assert profiler.snapshots.maxlen == 3
+
+
 def test_monitoring_retains_only_latest_snapshots(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     profiler = object.__new__(GPUMemoryProfiler)
-    profiler.snapshots = []
     profiler.max_snapshots = 3
+    profiler.snapshots = deque(maxlen=profiler.max_snapshots)
     profiler._monitor_interval = 0.0
     profiler._monitoring = True
     next_timestamp = 0

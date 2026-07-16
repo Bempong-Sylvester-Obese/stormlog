@@ -690,7 +690,7 @@ def cmd_monitor(args: argparse.Namespace) -> None:
 
             visualizer = MemoryVisualizer(profiler)
             output_path = visualizer.export_data(
-                snapshots=profiler.snapshots,
+                snapshots=list(profiler.snapshots),
                 format=args.format,
                 save_path=Path(args.output).stem,
             )

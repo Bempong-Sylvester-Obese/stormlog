@@ -67,7 +67,7 @@ class MemoryVisualizer:
         if results is None and self.profiler:
             results = self.profiler.results
         if snapshots is None and self.profiler:
-            snapshots = self.profiler.snapshots
+            snapshots = list(self.profiler.snapshots)
 
         if not results and not snapshots:
             raise ValueError("No data available for plotting")
@@ -105,7 +105,13 @@ class MemoryVisualizer:
             raise ValueError("No timestamp data available")
 
         timeline_points = sorted(
-            zip(timestamps, allocated_memory, reserved_memory, labels),
+            zip(
+                timestamps,
+                allocated_memory,
+                reserved_memory,
+                labels,
+                strict=True,
+            ),
             key=lambda point: point[0],
         )
         timestamps = [point[0] for point in timeline_points]
@@ -641,7 +647,7 @@ class MemoryVisualizer:
         if results is None and self.profiler:
             results = self.profiler.results
         if snapshots is None and self.profiler:
-            snapshots = self.profiler.snapshots
+            snapshots = list(self.profiler.snapshots)
 
         # Create subplot grid
         fig = make_subplots(
@@ -755,7 +761,7 @@ class MemoryVisualizer:
         if results is None and self.profiler:
             results = self.profiler.results
         if snapshots is None and self.profiler:
-            snapshots = self.profiler.snapshots
+            snapshots = list(self.profiler.snapshots)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
