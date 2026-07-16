@@ -196,7 +196,7 @@ class JAXMemoryProfiler:
             else:
                 self._device, self._device_index = resolve_jax_device(device_index)
         except Exception as exc:
-            logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
+            logger.debug("Could not resolve JAX device %s: %s", device_index, exc)
 
         # Cache a scalar sentinel for sync barriers
         self._sync_sentinel: Any = None

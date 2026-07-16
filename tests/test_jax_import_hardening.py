@@ -101,3 +101,55 @@ def test_pprof_parser_defers_schema_import_and_preserves_failure_cause() -> None
 
     assert completed.returncode == 0, completed.stderr
     assert "ok" in completed.stdout
+
+
+def test_pprof_parser_wraps_protobuf_runtime_version_error() -> None:
+    code = textwrap.dedent(
+        """
+        import importlib
+        import importlib.abc
+        import sys
+        import types
+
+        runtime_version = types.ModuleType("google.protobuf.runtime_version")
+
+        class VersionError(Exception):
+            pass
+
+        VersionError.__module__ = "google.protobuf.runtime_version"
+        runtime_version.VersionError = VersionError
+        sys.modules["google.protobuf.runtime_version"] = runtime_version
+
+        class BlockProfileSchema(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "stormlog.jax.profile_pb2":
+                    raise VersionError("generated/runtime version mismatch")
+                return None
+
+        sys.meta_path.insert(0, BlockProfileSchema())
+
+        parser = importlib.import_module("stormlog.jax.pprof_parser")
+
+        try:
+            parser.parse_jax_memory_profile("unused.prof")
+        except ImportError as exc:
+            assert "protobuf>=6.31.1" in str(exc)
+            assert isinstance(exc.__cause__, VersionError)
+            assert "generated/runtime version mismatch" in str(exc.__cause__)
+        else:
+            raise AssertionError("Expected a wrapped protobuf VersionError")
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout

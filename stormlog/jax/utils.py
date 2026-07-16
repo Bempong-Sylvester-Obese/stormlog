@@ -167,8 +167,9 @@ def get_device_info(device_index: Union[int, str] = 0) -> Dict[str, Any]:
 
     Returns:
         Dictionary with keys ``kind``, ``platform``, ``device_id``,
-        ``process_index``, ``memory_stats`` (raw dict from
-        ``device.memory_stats()``), and ``client``.
+        ``process_index``, ``memory_stats`` (device statistics normalized to a
+        dictionary), ``memory_stats_available``, ``memory_stats_error``, and
+        ``client``.
     """
     if not JAX_AVAILABLE:
         return {
@@ -220,8 +221,8 @@ def get_backend_info() -> Dict[str, Any]:
     if JAX_AVAILABLE:
         try:
             raw_backend = str(jax.default_backend())
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.debug("Could not determine raw JAX backend: %s", exc)
     runtime_backend = normalize_jax_backend(raw_backend)
     is_apple_silicon = platform.system() == "Darwin" and platform.machine().lower() in {
         "arm64",
@@ -376,6 +377,8 @@ def validate_jax_environment() -> Dict[str, Any]:
                 )
             else:
                 issues.append("No JAX devices found")
+        else:
+            issues.append(f"Unrecognized JAX backend: {backend}")
     except Exception as exc:
         issues.append(f"Error checking device availability: {exc}")
 

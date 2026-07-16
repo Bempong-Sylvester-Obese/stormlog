@@ -1,5 +1,6 @@
 """Tests for JAX utils module."""
 
+import logging
 from unittest import mock
 
 import pytest
@@ -56,7 +57,7 @@ def test_get_device_info_valid() -> None:
         assert info["memory_stats"] == {"bytes_in_use": 100}
 
 
-@pytest.mark.parametrize("selector", ["0", "gpu"])
+@pytest.mark.parametrize("selector", ["0", "gpu"])  # type: ignore[misc, unused-ignore]
 def test_get_device_info_accepts_cli_selectors(selector: str) -> None:
     device_mock = mock.Mock()
     device_mock.device_kind = "gpu"
@@ -109,6 +110,22 @@ def test_get_backend_info_exception() -> None:
     ):
         info = get_backend_info()
         assert info["device_count"] == 0
+
+
+def test_get_backend_info_logs_backend_detection_failure(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        mock.patch(
+            "stormlog.jax.utils.jax.default_backend",
+            side_effect=RuntimeError("backend unavailable"),
+        ),
+        caplog.at_level(logging.DEBUG, logger="stormlog.jax.utils"),
+    ):
+        info = get_backend_info()
+
+    assert info["raw_runtime_backend"] == "cpu"
+    assert "Could not determine raw JAX backend: backend unavailable" in caplog.text
 
 
 def test_get_system_info() -> None:
@@ -177,6 +194,19 @@ def test_validate_jax_environment_tpu() -> None:
         val = validate_jax_environment()
         assert val["tpu_available"] is True
         assert val["version_compatible"] is True
+
+
+def test_validate_jax_environment_reports_unknown_backend() -> None:
+    with (
+        mock.patch("stormlog.jax.utils.jax.__version__", "0.4.20"),
+        mock.patch("stormlog.jax.utils.detect_jax_backend", return_value="unknown"),
+        mock.patch(
+            "stormlog.jax.utils._cached_local_devices", return_value=[mock.Mock()]
+        ),
+    ):
+        val = validate_jax_environment()
+
+    assert "Unrecognized JAX backend: unknown" in val["issues"]
 
 
 def test_jax_not_available() -> None:

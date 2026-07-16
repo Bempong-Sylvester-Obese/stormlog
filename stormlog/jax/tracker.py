@@ -212,7 +212,7 @@ class MemoryTracker:
             if self._device_memory_available and "bytes_limit" in stats:
                 self._device_bytes_limit = int(stats["bytes_limit"])
         except Exception as exc:
-            logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
+            logger.debug("Could not resolve JAX device %s: %s", device_index, exc)
 
         # Cache a scalar sentinel for sync barriers — avoids re-allocating
         # a device array on every sample.

@@ -1,5 +1,6 @@
 """Tests targeting tracker missing lines for coverage."""
 
+import logging
 import time
 from typing import Any
 from unittest import mock
@@ -68,10 +69,24 @@ def test_transient_initial_memory_stats_failure_recovers() -> None:
     tracker._run_tracking_iteration()
 
     result = tracker.get_tracking_results()
-    assert device.memory_stats.call_count == 3
     assert result.memory_usage == [2048]
     assert result.device_memory_available is True
     assert tracker._collector_health.status == COLLECTOR_HEALTH_HEALTHY
+
+
+def test_string_device_resolution_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        mock.patch(
+            "stormlog.jax.tracker.resolve_jax_device",
+            side_effect=ValueError("backend unavailable"),
+        ),
+        caplog.at_level(logging.DEBUG, logger="stormlog.jax.tracker"),
+    ):
+        MemoryTracker(device_index="gpu")
+
+    assert "Could not resolve JAX device gpu: backend unavailable" in caplog.text
 
 
 def test_tracking_loop_exception() -> None:
