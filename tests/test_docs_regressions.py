@@ -100,6 +100,9 @@ _BANNED_DOC_SNIPPETS = {
 }
 
 _REQUIRED_DOC_SNIPPETS = {
+    "CHANGELOG.md": [
+        "Callers that need tensor counts must now pass `track_tensors=True`",
+    ],
     "docs/index.md": [
         "## Important: Pip vs Source Checkout",
         "The `examples/` package is **not** included.",

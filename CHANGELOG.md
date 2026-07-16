@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Stabilize benchmark harness defaults (`--iterations 200`) and align benchmark/testing documentation to this baseline.
 - Expand TUI CLI/Playbook guidance and quick actions to highlight diagnose, OOM scenario, and capability matrix workflows.
 - Refresh release-facing docs (`README`, examples guides, `RELEASE_CHECKLIST`, `PROJECT_STATUS`) for v0.2 launch readiness.
+- Breaking change: PyTorch tensor tracking is now disabled by default to avoid full-GC scans during profiling. Callers that need tensor counts must now pass `track_tensors=True`.
 
 ### Deprecated
 
