@@ -62,13 +62,14 @@ def format_bytes(bytes_value: int, precision: int = 2) -> str:
 
     units = ["B", "KB", "MB", "GB", "TB", "PB"]
     unit_index = 0
-    size = float(bytes_value)
+    sign = "-" if bytes_value < 0 else ""
+    size = float(abs(bytes_value))
 
     while size >= 1024.0 and unit_index < len(units) - 1:
         size /= 1024.0
         unit_index += 1
 
-    return f"{size:.{precision}f} {units[unit_index]}"
+    return f"{sign}{size:.{precision}f} {units[unit_index]}"
 
 
 def convert_bytes(value: Union[int, float], from_unit: str, to_unit: str) -> float:

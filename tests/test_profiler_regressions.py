@@ -1,7 +1,8 @@
+import inspect
 import subprocess
 import sys
 import textwrap
-from collections import defaultdict
+from collections import defaultdict, deque
 from typing import Any
 
 import pytest
@@ -84,22 +85,89 @@ def test_profile_function_decorator_executes_once_and_returns_result() -> None:
     assert profiler.seen_name == "custom_profile_name"
 
 
-def test_tensor_tracker_count_tensors_does_not_call_empty_cache(
+def test_gpu_profiler_disables_tensor_scanning_by_default() -> None:
+    parameter = inspect.signature(GPUMemoryProfiler.__init__).parameters[
+        "track_tensors"
+    ]
+
+    assert parameter.default is False
+
+
+def test_tensor_tracker_count_tensors_does_not_force_memory_cleanup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracker = TensorTracker()
-    state = {"called": False}
 
     def fail_if_called() -> None:
-        state["called"] = True
-        raise AssertionError("count_tensors should not call torch.cuda.empty_cache()")
+        raise AssertionError("count_tensors should not force memory cleanup")
 
-    monkeypatch.setattr(profiler_module.gc, "collect", lambda: 0)
+    monkeypatch.setattr(profiler_module.gc, "collect", fail_if_called)
     monkeypatch.setattr(profiler_module.gc, "get_objects", lambda: [])
     monkeypatch.setattr(profiler_module.torch.cuda, "empty_cache", fail_if_called)
 
     assert tracker.count_tensors() == 0
-    assert state["called"] is False
+
+
+def test_gpu_profiler_rejects_non_positive_snapshot_limit() -> None:
+    with pytest.raises(ValueError, match="max_snapshots must be >= 1"):
+        GPUMemoryProfiler(max_snapshots=0)
+
+
+def test_gpu_profiler_uses_bounded_snapshot_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    snapshot = MemorySnapshot(
+        timestamp=0.0,
+        allocated_memory=0,
+        reserved_memory=0,
+        max_memory_allocated=0,
+        max_memory_reserved=0,
+        active_memory=0,
+        inactive_memory=0,
+        cpu_memory=0,
+    )
+    monkeypatch.setattr(GPUMemoryProfiler, "_setup_device", lambda *_: object())
+    monkeypatch.setattr(GPUMemoryProfiler, "_take_snapshot", lambda *_: snapshot)
+
+    profiler = GPUMemoryProfiler(max_snapshots=3)
+
+    assert profiler.snapshots.maxlen == 3
+
+
+def test_monitoring_retains_only_latest_snapshots(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profiler = object.__new__(GPUMemoryProfiler)
+    profiler.max_snapshots = 3
+    profiler.snapshots = deque(maxlen=profiler.max_snapshots)
+    profiler._monitor_interval = 0.0
+    profiler._monitoring = True
+    next_timestamp = 0
+
+    def take_snapshot(operation: str) -> MemorySnapshot:
+        nonlocal next_timestamp
+        snapshot = MemorySnapshot(
+            timestamp=float(next_timestamp),
+            allocated_memory=0,
+            reserved_memory=0,
+            max_memory_allocated=0,
+            max_memory_reserved=0,
+            active_memory=0,
+            inactive_memory=0,
+            cpu_memory=0,
+            operation=operation,
+        )
+        next_timestamp += 1
+        if next_timestamp == 5:
+            profiler._monitoring = False
+        return snapshot
+
+    monkeypatch.setattr(profiler, "_take_snapshot", take_snapshot)
+    monkeypatch.setattr(profiler_module.time, "sleep", lambda _: None)
+
+    profiler._monitor_memory()
+
+    assert [snapshot.timestamp for snapshot in profiler.snapshots] == [2.0, 3.0, 4.0]
 
 
 class _ExceptionPathHarness:

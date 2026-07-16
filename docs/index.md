@@ -50,6 +50,7 @@ benchmark_harness
 telemetry_schema
 telemetry_projection
 query_layer
+run_envelopes
 issue_fingerprinting
 correlation
 pytorch_testing_guide

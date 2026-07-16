@@ -1,14 +1,14 @@
 """JAX Stormlog CLI"""
 
+from __future__ import annotations
+
 import argparse
 import json
 import logging
 import sys
 import time
-from contextlib import nullcontext
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict
 
 from stormlog.telemetry import telemetry_event_from_record, telemetry_event_to_dict
 from stormlog.telemetry_sink import TelemetrySinkConfig
@@ -51,59 +51,22 @@ except ImportError:
     JAX_AVAILABLE = False
     jax = None
 
-if JAX_AVAILABLE:
-    from .diagnose import run_diagnose
+if TYPE_CHECKING:
     from .tracker import MemoryTracker
-else:
 
-    @dataclass
-    class _UnavailableTrackingResult:
-        peak_memory_bytes: int = 0
-        average_memory_bytes: int = 0
-        duration: float = 0.0
-        memory_usage: list[int] = field(default_factory=list)
-        timestamps: list[float] = field(default_factory=list)
-        alert_count: int = 0
-        telemetry_events: list[dict[str, Any]] = field(default_factory=list)
-        device_memory_profile_path: Optional[str] = None
 
-    class MemoryTracker:  # type: ignore[no-redef]
-        oom_buffer_size = 0
-        last_oom_dump_path: Optional[str] = None
+def _load_memory_tracker() -> type[MemoryTracker]:
+    """Load the JAX tracker only after a command confirms JAX is available."""
+    from .tracker import MemoryTracker
 
-        def __init__(self, *_args: Any, **_kwargs: Any) -> None:
-            pass
+    return MemoryTracker
 
-        def add_alert_callback(self, _callback: Any) -> None:
-            pass
 
-        def start_tracking(self) -> None:
-            raise ImportError("JAX not available")
+def _load_run_diagnose() -> Callable[..., tuple[Path, int]]:
+    """Load the diagnose entry point only for a guarded diagnose command."""
+    from .diagnose import run_diagnose
 
-        def stop_tracking(self) -> _UnavailableTrackingResult:
-            return _UnavailableTrackingResult()
-
-        def get_current_memory(self) -> float:
-            return 0.0
-
-        def get_statistics(self) -> dict[str, Any]:
-            return {"total_events": 0, "peak_memory_mb": 0.0}
-
-        def capture_oom(self, *_args: Any, **_kwargs: Any) -> Any:
-            return nullcontext()
-
-        def get_session_summary(self) -> None:
-            return None
-
-    def run_diagnose(
-        output: Optional[str],
-        device_index: int,
-        duration: float,
-        interval: float,
-        command_line: str,
-    ) -> tuple[Path, int]:
-        _ = (output, device_index, duration, interval, command_line)
-        raise ImportError("JAX not available")
+    return run_diagnose
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -167,6 +130,22 @@ def _warn_wandb_export_failure(command_name: str, exc: Exception) -> None:
     print(f"Warning: {command_name} W&B export skipped: {exc}", file=sys.stderr)
 
 
+def _tracking_memory_capability(results: Any) -> Dict[str, Any]:
+    """Return JSON-safe capability fields for current and legacy results."""
+    available = getattr(results, "device_memory_available", True)
+    source = getattr(results, "memory_source", "jax_device_stats")
+    reason = getattr(results, "device_memory_unavailable_reason", None)
+    process_memory = getattr(results, "process_memory_bytes", None)
+    return {
+        "device_memory_available": available if isinstance(available, bool) else True,
+        "memory_source": source if isinstance(source, str) else "jax_device_stats",
+        "device_memory_unavailable_reason": reason if isinstance(reason, str) else None,
+        "process_memory_bytes": (
+            process_memory if isinstance(process_memory, int) else None
+        ),
+    }
+
+
 def cmd_info(args: argparse.Namespace) -> int:
     """Display system and device information."""
     print("JAX Stormlog - System Information")
@@ -189,9 +168,10 @@ def cmd_info(args: argparse.Namespace) -> int:
     print("\nJAX Backend Information:")
     print("-" * 30)
     print(f"Runtime Backend: {backend_info.get('runtime_backend', 'Unknown')}")
-    print(f"Is XLA GPU Build: {backend_info.get('is_gpu_build', False)}")
+    print(f"Raw JAX Backend: {backend_info.get('raw_runtime_backend', 'Unknown')}")
+    print(f"Accelerator Runtime: {backend_info.get('is_gpu_build', False)}")
     print(f"Is Apple Silicon: {backend_info.get('is_apple_silicon', False)}")
-    print(f"JAX Metal Installed: {backend_info.get('jax_metal_installed', False)}")
+    print(f"JAX Metal Active: {backend_info.get('jax_metal_active', False)}")
     print(f"Available Devices: {device_count}")
 
     if device_count > 0:
@@ -204,6 +184,13 @@ def cmd_info(args: argparse.Namespace) -> int:
             print(f"\nDevice {i}:")
             print(f"  Name: {device_info.get('kind', 'Unknown')}")
             stats = device_info.get("memory_stats", {})
+            if not device_info.get("memory_stats_available", False):
+                print("  Device Memory: unavailable")
+                print(
+                    "  Reason: "
+                    f"{device_info.get('memory_stats_error', 'not exposed by this backend')}"
+                )
+                continue
 
             allocated_bytes = stats.get("bytes_in_use", 0)
             reserved_bytes = stats.get("bytes_reserved")
@@ -238,7 +225,8 @@ def cmd_monitor(args: argparse.Namespace) -> int:
     print("Press Ctrl+C to stop\n")
 
     max_history = int(getattr(args, "max_history", 10000))
-    tracker = MemoryTracker(
+    tracker_class = _load_memory_tracker()
+    tracker = tracker_class(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,
@@ -276,8 +264,18 @@ def cmd_monitor(args: argparse.Namespace) -> int:
 
         print("\nMonitoring Results:")
         print("-" * 20)
-        print(f"Peak Memory: {results.peak_memory_bytes / (1024 * 1024):.1f} MB")
-        print(f"Average Memory: {results.average_memory_bytes / (1024 * 1024):.1f} MB")
+        capability = _tracking_memory_capability(results)
+        device_memory_available = capability["device_memory_available"]
+        if device_memory_available:
+            print(f"Peak Memory: {results.peak_memory_bytes / (1024 * 1024):.1f} MB")
+            print(
+                f"Average Memory: {results.average_memory_bytes / (1024 * 1024):.1f} MB"
+            )
+        else:
+            print("Device Memory: unavailable")
+            print(
+                f"Process RSS: {(capability['process_memory_bytes'] or 0) / (1024 * 1024):.1f} MB"
+            )
         print(f"Duration: {results.duration:.1f} seconds")
         print(f"Samples Collected: {len(results.memory_usage)}")
         dropped_samples = getattr(results, "history_dropped_samples", 0)
@@ -303,6 +301,7 @@ def cmd_monitor(args: argparse.Namespace) -> int:
                 "history_dropped_samples": getattr(
                     results, "history_dropped_samples", 0
                 ),
+                **capability,
             }
 
             output_path = Path(args.output)
@@ -337,7 +336,8 @@ def cmd_track(args: argparse.Namespace) -> int:
     oom_max_total_mb = int(getattr(args, "oom_max_total_mb", 256))
     max_history = int(getattr(args, "max_history", 10000))
 
-    tracker = MemoryTracker(
+    tracker_class = _load_memory_tracker()
+    tracker = tracker_class(
         sampling_interval=args.interval,
         alert_threshold_mb=args.threshold,
         device_index=args.device,
@@ -402,6 +402,7 @@ def cmd_track(args: argparse.Namespace) -> int:
 
         if args.output:
             sampling_interval_ms = int(round(args.interval * 1000))
+            capability = _tracking_memory_capability(results)
             output_data = {
                 "peak_memory": results.peak_memory_bytes / (1024 * 1024),
                 "average_memory": results.average_memory_bytes / (1024 * 1024),
@@ -428,6 +429,7 @@ def cmd_track(args: argparse.Namespace) -> int:
                     results, "history_retained_alerts", 0
                 ),
                 "history_dropped_alerts": getattr(results, "history_dropped_alerts", 0),
+                **capability,
             }
 
             output_path = Path(args.output)
@@ -438,9 +440,14 @@ def cmd_track(args: argparse.Namespace) -> int:
             print(f"Results saved to {args.output}")
 
         final_stats = tracker.get_statistics()
-        print(
-            f"\nTracking completed. Peak memory: {results.peak_memory_bytes / (1024 * 1024):.1f} MB"
-        )
+        if _tracking_memory_capability(results)["device_memory_available"]:
+            print(
+                f"\nTracking completed. Peak memory: {results.peak_memory_bytes / (1024 * 1024):.1f} MB"
+            )
+        else:
+            print(
+                "\nTracking completed. Device memory was unavailable on this backend."
+            )
         dropped_samples = int(final_stats.get("history_dropped_samples", 0))
         dropped_events = int(final_stats.get("history_dropped_events", 0))
         if dropped_samples or dropped_events:
@@ -456,7 +463,7 @@ def cmd_track(args: argparse.Namespace) -> int:
         if final_stats.get("collector_last_error"):
             print(f"Last collector error: {final_stats.get('collector_last_error')}")
 
-        if results.device_memory_profile_path:
+        if getattr(results, "device_memory_profile_path", None):
             print(
                 f"Device memory profile saved to: {results.device_memory_profile_path}"
             )
@@ -501,6 +508,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         return 1
 
     command_line = " ".join(sys.argv)
+    run_diagnose = _load_run_diagnose()
     try:
         artifact_dir, exit_code = run_diagnose(
             output=args.output,
@@ -574,26 +582,48 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     print(f"Analyzing JAX tracking results: {args.input}")
     print("=" * 50)
-    print(f"Peak Memory: {data.get('peak_memory', 0.0):.2f} MB")
-    print(f"Average Memory: {data.get('average_memory', 0.0):.2f} MB")
+    memory_available = data.get("device_memory_available", True)
+    if memory_available:
+        print(f"Peak Memory: {data.get('peak_memory', 0.0):.2f} MB")
+        print(f"Average Memory: {data.get('average_memory', 0.0):.2f} MB")
+    else:
+        print("Device Memory: unavailable")
+        print(
+            f"Reason: {data.get('device_memory_unavailable_reason', 'not exposed by backend')}"
+        )
     print(f"Duration: {data.get('duration', 0.0):.2f} seconds")
     print(f"Alerts Triggered: {data.get('alerts', 0)}")
 
-    if args.plot:
+    class ResultWrapper:
+        def __init__(self, d: Dict[str, Any]) -> None:
+            self.memory_usage = d.get("memory_usage", [])
+            self.timestamps = d.get("timestamps", [])
+            self.peak_memory_mb = d.get("peak_memory", 0.0)
+            self.average_memory_mb = d.get("average_memory", 0.0)
+            self.snapshots: list[Any] = []
+
+        @property
+        def memory_growth_rate(self) -> float:
+            if len(self.memory_usage) < 2 or not data.get("duration"):
+                return 0.0
+            memory_growth_mb = (
+                float(self.memory_usage[-1]) - float(self.memory_usage[0])
+            ) / (1024.0 * 1024.0)
+            return memory_growth_mb / float(data["duration"])
+
+    wrapper = ResultWrapper(data)
+
+    if (
+        getattr(args, "plot", None) or getattr(args, "visualize", False)
+    ) and memory_available:
         from .visualizer import MemoryVisualizer
 
         visualizer = MemoryVisualizer()
 
-        # Wrap data in a simple object for the visualizer
-        class ResultWrapper:
-            def __init__(self, d: Dict[str, Any]):
-                self.memory_usage = d.get("memory_usage", [])
-                self.timestamps = d.get("timestamps", [])
+        plot = getattr(args, "plot", None)
+        plot_name = plot if isinstance(plot, str) else "memory_timeline.png"
 
-        wrapper = ResultWrapper(data)
-        plot_name = args.plot if isinstance(args.plot, str) else "memory_timeline.png"
-
-        if args.output:
+        if getattr(args, "output", None):
             output_dir = Path(args.output)
             output_dir.mkdir(parents=True, exist_ok=True)
             plot_path = str(output_dir / plot_name)
@@ -602,6 +632,25 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
         visualizer.plot_memory_timeline(wrapper, save_path=plot_path)
         print(f"Memory timeline plot saved to {plot_path}")
+
+    if getattr(args, "detect_leaks", False) and memory_available:
+        from .analyzer import MemoryAnalyzer
+
+        findings = MemoryAnalyzer().detect_memory_leaks(wrapper)
+        print(f"Potential memory leaks: {len(findings)}")
+    if getattr(args, "optimize", False) and memory_available:
+        from .analyzer import MemoryAnalyzer
+
+        score = MemoryAnalyzer().score_optimization(wrapper)
+        print(f"Optimization score: {score['overall_score']:.1f}/10")
+    if getattr(args, "report", None):
+        report = [
+            "JAX Stormlog Analysis",
+            f"Duration: {data.get('duration', 0):.2f} seconds",
+        ]
+        report.append("Device memory available: " + str(memory_available))
+        Path(args.report).write_text("\n".join(report) + "\n", encoding="utf-8")
+        print(f"Analysis report saved to {args.report}")
 
     return 0
 
@@ -646,9 +695,8 @@ Cookbook:
     )
     monitor_parser.add_argument(
         "--device",
-        type=int,
-        default=0,
-        help="JAX device index to monitor (default: 0)",
+        default="0",
+        help="JAX device index or backend: cpu, gpu, tpu, metal (default: 0)",
     )
     monitor_parser.add_argument("--output", help="Output file for results")
     monitor_parser.add_argument(
@@ -674,9 +722,8 @@ Cookbook:
     )
     track_parser.add_argument(
         "--device",
-        type=int,
-        default=0,
-        help="JAX device index to monitor (default: 0)",
+        default="0",
+        help="JAX device index or backend: cpu, gpu, tpu, metal (default: 0)",
     )
     track_parser.add_argument(
         "--profile",
@@ -786,9 +833,8 @@ Cookbook:
     )
     diagnose_parser.add_argument(
         "--device",
-        type=int,
-        default=0,
-        help="JAX device index to monitor (default: 0)",
+        default="0",
+        help="JAX device index or backend: cpu, gpu, tpu, metal (default: 0)",
     )
     diagnose_parser.add_argument(
         "--duration",
@@ -811,6 +857,10 @@ Cookbook:
     analyze_parser.add_argument(
         "--input", required=True, help="Input JSON file with tracking results"
     )
+    analyze_parser.add_argument("--detect-leaks", action="store_true")
+    analyze_parser.add_argument("--optimize", action="store_true")
+    analyze_parser.add_argument("--visualize", action="store_true")
+    analyze_parser.add_argument("--report", help="Write a text analysis report")
     analyze_parser.add_argument(
         "--output",
         type=str,

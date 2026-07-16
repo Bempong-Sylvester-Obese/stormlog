@@ -1,14 +1,17 @@
 """Tests for JAX visualizer."""
 
+import json
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.profiler import MemorySnapshot, ProfileResult
 from stormlog.jax.visualizer import MemoryVisualizer
+from tests.jax_test_helpers import fake_jax_runtime  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 def test_visualizer_init() -> None:
@@ -32,7 +35,7 @@ def test_plot_memory_timeline_matplotlib(mock_plt: Any) -> None:
     mock_plt.show.assert_called_once()
 
 
-@mock.patch("stormlog.jax.visualizer.go")
+@mock.patch("stormlog.jax.visualizer.go", create=True)
 def test_plot_memory_timeline_plotly(mock_go: Any) -> None:
     # Set PLOTLY_AVAILABLE to True for the test
     with mock.patch("stormlog.jax.visualizer.PLOTLY_AVAILABLE", True):
@@ -91,3 +94,72 @@ def test_plot_function_comparison(mock_plt: Any, tmp_path: Any) -> None:
 def test_plot_function_comparison_empty() -> None:
     viz = MemoryVisualizer()
     viz.plot_function_comparison({})
+
+
+def test_export_data_omits_unavailable_device_samples(tmp_path: Any) -> None:
+    viz = MemoryVisualizer()
+    snapshots = [
+        MemorySnapshot(1, "measured", 100, 100, 0, 0, {}),
+        MemorySnapshot(
+            2,
+            "unavailable",
+            0,
+            100,
+            0,
+            0,
+            {},
+            device_memory_available=False,
+        ),
+    ]
+    output = tmp_path / "timeline.json"
+    viz.export_data(
+        ProfileResult(0, 2, 100, 100, 100, snapshots, {}), str(output), "json"
+    )
+    assert len(json.loads(output.read_text())) == 1
+
+
+def test_export_data_rejects_mismatched_fallback_timeline_lengths(
+    tmp_path: Any,
+) -> None:
+    results = SimpleNamespace(timestamps=[1.0, 2.0], memory_usage=[1024])
+
+    with pytest.raises(ValueError):
+        MemoryVisualizer().export_data(results, str(tmp_path / "timeline.json"), "json")
+
+
+def test_dashboard_uses_modern_dash_runner() -> None:
+    results = mock.Mock()
+    results.snapshots = []
+
+    with (
+        mock.patch("stormlog.jax.visualizer.PLOTLY_AVAILABLE", True),
+        mock.patch("stormlog.jax.visualizer.dash", create=True) as mock_dash,
+        mock.patch("stormlog.jax.visualizer.go", create=True),
+        mock.patch("stormlog.jax.visualizer.dcc", create=True),
+        mock.patch("stormlog.jax.visualizer.html", create=True),
+    ):
+        app = mock_dash.Dash.return_value
+        MemoryVisualizer().create_interactive_dashboard(results, port=9000)
+
+    app.run.assert_called_once_with(debug=False, port=9000, host="127.0.0.1")
+    app.run_server.assert_not_called()
+
+
+def test_dashboard_supports_dash_2_runner() -> None:
+    results = mock.Mock()
+    results.snapshots = []
+    legacy_app = mock.Mock(spec=["layout", "run_server"])
+
+    with (
+        mock.patch("stormlog.jax.visualizer.PLOTLY_AVAILABLE", True),
+        mock.patch("stormlog.jax.visualizer.dash", create=True) as mock_dash,
+        mock.patch("stormlog.jax.visualizer.go", create=True),
+        mock.patch("stormlog.jax.visualizer.dcc", create=True),
+        mock.patch("stormlog.jax.visualizer.html", create=True),
+    ):
+        mock_dash.Dash.return_value = legacy_app
+        MemoryVisualizer().create_interactive_dashboard(results, port=9000)
+
+    legacy_app.run_server.assert_called_once_with(
+        debug=False, port=9000, host="127.0.0.1"
+    )

@@ -26,7 +26,7 @@ jobs:
                       framework: tensorflow
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -48,8 +48,26 @@ jobs:
                   elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
                       pip install tensorflow-cpu==2.15.0
                   elif [ "${{ matrix.framework }}" = "jax" ]; then
-                      pip install jax==0.4.20 jaxlib==0.4.20 'numpy<2.0.0'
+                      pip install jax==0.4.20 jaxlib==0.4.20 'numpy<2.0.0' 'protobuf>=6.31.1'
                   fi
+
+            - name: Verify JAX runtime
+              if: matrix.framework == 'jax'
+              run: |
+                  python3 - <<'PY'
+                  import jax
+                  import jaxlib
+
+                  print(f"jax={jax.__version__}")
+                  print(f"jaxlib={jaxlib.__version__}")
+                  devices = jax.devices()
+                  if not devices:
+                      raise RuntimeError("JAX initialized without any devices")
+                  result = jax.numpy.arange(3) + 1
+                  result.block_until_ready()
+                  print(f"devices={devices}")
+                  print(f"result={result}")
+                  PY
 
             - name: Run tests
               run: |
@@ -58,11 +76,11 @@ jobs:
                   elif [ "${{ matrix.framework }}" = "tensorflow" ]; then
                       python3 -m pytest tests/ -o "python_files=test_tf*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
                   elif [ "${{ matrix.framework }}" = "jax" ]; then
-                      python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
+                      python3 -m pytest tests/ -o "python_files=test_jax*.py" -v -ra -m "not tui_pilot and not tui_snapshot and not tui_pty" --cov=stormlog --cov-report=xml
                   fi
 
             - name: Upload coverage to Codecov
-              uses: codecov/codecov-action@57e3a136b779b570ffcdbf80b3bdc90e7fab3de2 # v6.0.0
+              uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
               with:
                   file: ./coverage.xml
                   flags: unittests
@@ -75,7 +93,7 @@ jobs:
             contents: read
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -102,7 +120,7 @@ jobs:
             contents: read
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -132,7 +150,7 @@ jobs:
                 python-version: ["3.10"]
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -171,7 +189,7 @@ jobs:
             contents: read
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -196,7 +214,7 @@ jobs:
             contents: read
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -223,7 +241,7 @@ jobs:
         needs: [test, lint, workflow-audit, docs]
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -258,7 +276,7 @@ jobs:
             contents: read
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -301,7 +319,7 @@ jobs:
             contents: read
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 
@@ -396,7 +414,7 @@ jobs:
         needs: [test, lint, docs]
 
         steps:
-            - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+            - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
               with:
                   persist-credentials: false
 

@@ -96,6 +96,27 @@ Primary exported symbols:
 - `profile_function`
 - `profile_context`
 
+JAX snapshots and profile results retain numeric fields for compatibility.
+`MemorySnapshot` and `ProfileResult` expose `device_memory_available` and
+`device_memory_unavailable_reason`. `TrackingResult` additionally exposes
+`memory_source` and `process_memory_bytes`. Consumers must check
+`device_memory_available` before interpreting a numeric device-memory value as
+a measurement.
+
+`JAXProfiler.profile_training` accepts re-iterable datasets, finite one-shot
+iterators, and zero-argument dataset factories.  Use a factory for streaming
+multi-epoch inputs, and combine large or infinite streams with
+`steps_per_epoch`.  Callable objects that are already iterable are iterated
+directly; wrap them in a zero-argument callable to force factory behavior.
+
+## JAX Result Units
+
+`stormlog.jax.profiler.ProfileResult.memory_growth_rate` reports memory growth
+in MB/second.
+
+Stormlog versions before `0.3.6` reported this property in bytes/second;
+`0.3.6` and later report MB/second.
+
 ## Usage Paths
 
 For task-oriented guidance:

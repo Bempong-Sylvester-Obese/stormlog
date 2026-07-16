@@ -31,7 +31,14 @@ with profiler.profile_context("training"):
     y.block_until_ready()
 
 results = profiler.get_results()
-print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+if results.device_memory_available:
+    print(f"Peak memory: {results.peak_memory_mb:.2f} MB")
+    print(f"Memory growth rate: {results.memory_growth_rate:.2f} MB/s")
+else:
+    print(
+        "Device memory unavailable: "
+        f"{results.device_memory_unavailable_reason}"
+    )
 print(f"Snapshots captured: {len(results.snapshots)}")
 ```
 
@@ -46,7 +53,17 @@ jaxmemprof analyze --input jax_monitor.json --detect-leaks --optimize --report j
 jaxmemprof diagnose --duration 0 --output ./jax_diag
 ```
 
-For CPU-backed JAX or when the accelerator backend is unavailable, `jaxmemprof` will automatically fallback to CPU mode. You can explicitly force it with `--device cpu`.
+`--device` accepts a local-device index (for example `0`) or `cpu`, `gpu`,
+`tpu`, or `metal`. Stormlog reports device allocations only when the selected
+backend exposes JAX `memory_stats()` with `bytes_in_use`. When it does not,
+monitor and track results set `device_memory_available` to `false`, suppress
+sample events, and report process RSS separately. Numeric device-memory fields
+remain present for compatibility and must not be interpreted as measurements
+when the capability flag is false.
+
+`jaxmemprof diagnose --duration 0` skips timeline capture. In that quick path,
+inspect `environment.json` for `memory_stats_available`; process RSS is not
+captured. Use a positive duration when you need timeline diagnostics.
 
 ## Recommended validation sequence
 
@@ -70,6 +87,16 @@ jaxmemprof info
 ```
 
 If the CLI outputs that JAX is running on CPU, you'll need to install the specific `jax` variants for your hardware (e.g., `jax[cuda12]`, `jax[tpu]`).
+
+### Device memory is unavailable
+
+Some runtimes, including experimental Metal configurations, do not expose the
+allocator counters required for device-memory sampling. `jaxmemprof info` shows
+the backend and capability state. If the runtime exposes
+`jax.profiler.save_device_memory_profile`, `jaxmemprof track --profile` saves a
+pprof artifact on a clean stop, while `--oom-flight-recorder` attempts the same
+capture after a recognized OOM. Select a backend that exposes `memory_stats()`
+when you need live device-memory samples.
 
 ### Plot export fails
 

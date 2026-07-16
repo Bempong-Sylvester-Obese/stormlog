@@ -3,17 +3,21 @@
 from typing import Any
 from unittest import mock
 
-import pytest
-
-pytest.importorskip("jax")
 import numpy as np
+import pytest
 
 from stormlog.jax.context_profiler import (
     JAXProfiler,
     ProfiledFunction,
 )
 from stormlog.jax.profiler import JAXMemoryProfiler
-from tests.jax_test_helpers import jax_fixture, jax_mark
+from tests.jax_test_helpers import (  # noqa: F401
+    fake_jax_runtime,
+    jax_fixture,
+    jax_mark,
+)
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_fixture
@@ -102,6 +106,194 @@ def test_jax_profiler_training_streams_single_epoch_generator(
                 "yield_3",
                 "step_3",
             ]
+
+
+@jax_mark
+def test_jax_profiler_training_replays_multi_epoch_generator(
+    mock_device: mock.Mock,
+) -> None:
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            events: list[str] = []
+
+            def dataset() -> Any:
+                for batch in [1, 2]:
+                    events.append(f"yield_{batch}")
+                    yield batch
+
+            def train_step(batch: int) -> None:
+                events.append(f"step_{batch}")
+
+            jp.profile_training(train_step, dataset(), epochs=2)
+
+            assert events == [
+                "yield_1",
+                "yield_2",
+                "step_1",
+                "step_2",
+                "step_1",
+                "step_2",
+            ]
+
+
+@jax_mark
+def test_jax_profiler_training_does_not_preiterate_reiterable_dataset(
+    mock_device: mock.Mock,
+) -> None:
+    class ReiterableDataset:
+        def __init__(self) -> None:
+            self.iter_calls = 0
+
+        def __iter__(self) -> Any:
+            self.iter_calls += 1
+            return iter([1, 2])
+
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            profiler = JAXProfiler(device_index=0)
+            dataset = ReiterableDataset()
+
+            profiler.profile_training(lambda batch: None, dataset, epochs=2)
+
+    assert dataset.iter_calls == 2
+
+
+@jax_mark
+def test_jax_profiler_training_caps_generator_replay_snapshot(
+    mock_device: mock.Mock,
+) -> None:
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            yielded: list[int] = []
+            stepped: list[int] = []
+
+            def dataset() -> Any:
+                batch = 0
+                while True:
+                    yielded.append(batch)
+                    yield batch
+                    batch += 1
+
+            def train_step(batch: int) -> None:
+                stepped.append(batch)
+
+            jp.profile_training(train_step, dataset(), epochs=2, steps_per_epoch=2)
+
+            assert yielded == [0, 1]
+            assert stepped == [0, 1, 0, 1]
+
+
+@jax_mark
+def test_jax_profiler_training_raises_for_empty_later_epoch(
+    mock_device: mock.Mock,
+) -> None:
+    class DrainingIterable:
+        def __init__(self) -> None:
+            self._batches = iter([1, 2])
+
+        def __iter__(self) -> Any:
+            return self._batches
+
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            stepped: list[int] = []
+
+            def train_step(batch: int) -> None:
+                stepped.append(batch)
+
+            with pytest.raises(ValueError, match="epoch 0"):
+                jp.profile_training(train_step, DrainingIterable(), epochs=2)
+
+            assert stepped == [1, 2]
+
+
+@jax_mark
+def test_jax_profiler_training_iterates_callable_iterable_dataset(
+    mock_device: mock.Mock,
+) -> None:
+    class CallableIterable:
+        def __iter__(self) -> Any:
+            return iter([1, 2])
+
+        def __call__(self, value: int) -> list[int]:
+            raise AssertionError("profile_training should iterate this object directly")
+
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            stepped: list[int] = []
+
+            def train_step(batch: int) -> None:
+                stepped.append(batch)
+
+            jp.profile_training(train_step, CallableIterable(), epochs=1)
+
+            assert stepped == [1, 2]
+
+
+@jax_mark
+def test_jax_profiler_training_uses_dataset_factory_per_epoch(
+    mock_device: mock.Mock,
+) -> None:
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+            factory_calls: list[int] = []
+            stepped: list[int] = []
+
+            def dataset_factory() -> list[int]:
+                factory_calls.append(len(factory_calls))
+                return [1, 2]
+
+            def train_step(batch: int) -> None:
+                stepped.append(batch)
+
+            jp.profile_training(train_step, dataset_factory, epochs=3)
+
+            assert factory_calls == [0, 1, 2]
+            assert stepped == [1, 2, 1, 2, 1, 2]
+
+
+@jax_mark
+def test_jax_profiler_training_rejects_non_iterable_factory_result(
+    mock_device: mock.Mock,
+) -> None:
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            jp = JAXProfiler(device_index=0)
+
+            def train_step(batch: int) -> None:
+                pass
+
+            def dataset_factory() -> int:
+                return 1
+
+            with pytest.raises(TypeError, match="dataset factory result"):
+                jp.profile_training(train_step, dataset_factory, epochs=1)
 
 
 @jax_mark

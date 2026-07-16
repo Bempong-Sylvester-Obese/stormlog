@@ -1,12 +1,11 @@
 """Tests for JAX memory profiler."""
 
+import logging
 import time
 from typing import Any, Generator
 from unittest import mock
 
 import pytest
-
-pytest.importorskip("jax")
 
 from stormlog.jax.profiler import (
     JAXMemoryProfiler,
@@ -17,7 +16,13 @@ from stormlog.jax.profiler import (
     get_global_profiler,
     get_profile_summaries,
 )
-from tests.jax_test_helpers import jax_fixture, jax_mark
+from tests.jax_test_helpers import (  # noqa: F401
+    fake_jax_runtime,
+    jax_fixture,
+    jax_mark,
+)
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 @jax_fixture
@@ -132,6 +137,22 @@ def test_get_results_empty(profiler: Any) -> None:
     assert res.peak_memory_bytes == 0
     assert res.average_memory_bytes == 0
     assert len(res.snapshots) == 0
+
+
+@jax_mark
+def test_string_device_resolution_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        mock.patch(
+            "stormlog.jax.profiler.resolve_jax_device",
+            side_effect=ValueError("backend unavailable"),
+        ),
+        caplog.at_level(logging.DEBUG, logger="stormlog.jax.profiler"),
+    ):
+        JAXMemoryProfiler(device_index="gpu")
+
+    assert "Could not resolve JAX device gpu: backend unavailable" in caplog.text
 
 
 @jax_mark

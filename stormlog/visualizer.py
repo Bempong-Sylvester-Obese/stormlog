@@ -67,7 +67,7 @@ class MemoryVisualizer:
         if results is None and self.profiler:
             results = self.profiler.results
         if snapshots is None and self.profiler:
-            snapshots = self.profiler.snapshots
+            snapshots = list(self.profiler.snapshots)
 
         if not results and not snapshots:
             raise ValueError("No data available for plotting")
@@ -104,8 +104,23 @@ class MemoryVisualizer:
         if not timestamps:
             raise ValueError("No timestamp data available")
 
+        timeline_points = sorted(
+            zip(
+                timestamps,
+                allocated_memory,
+                reserved_memory,
+                labels,
+                strict=True,
+            ),
+            key=lambda point: point[0],
+        )
+        timestamps = [point[0] for point in timeline_points]
+        allocated_memory = [point[1] for point in timeline_points]
+        reserved_memory = [point[2] for point in timeline_points]
+        labels = [point[3] for point in timeline_points]
+
         # Convert to relative time (seconds from start)
-        start_time = min(timestamps)
+        start_time = timestamps[0]
         relative_times = [(t - start_time) for t in timestamps]
 
         if interactive:
@@ -632,7 +647,7 @@ class MemoryVisualizer:
         if results is None and self.profiler:
             results = self.profiler.results
         if snapshots is None and self.profiler:
-            snapshots = self.profiler.snapshots
+            snapshots = list(self.profiler.snapshots)
 
         # Create subplot grid
         fig = make_subplots(
@@ -737,7 +752,7 @@ class MemoryVisualizer:
         Args:
             results: List of ProfileResults to export
             snapshots: List of MemorySnapshots to export
-            format: Export format ('csv', 'json', 'excel')
+            format: Export format ('csv', 'json')
             save_path: Base path for saved files
 
         Returns:
@@ -746,7 +761,7 @@ class MemoryVisualizer:
         if results is None and self.profiler:
             results = self.profiler.results
         if snapshots is None and self.profiler:
-            snapshots = self.profiler.snapshots
+            snapshots = list(self.profiler.snapshots)
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
@@ -792,7 +807,11 @@ class MemoryVisualizer:
                 snapshots_path = f"{save_path}_snapshots_{timestamp}.csv"
                 snapshots_df.to_csv(snapshots_path, index=False)
 
-            return f"{save_path}_{timestamp}.csv"
+            if results:
+                return results_path
+            if snapshots:
+                return snapshots_path
+            raise ValueError("No data available for CSV export")
 
         elif format == "json":
             import json

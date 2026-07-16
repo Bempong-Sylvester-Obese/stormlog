@@ -476,12 +476,42 @@ class TestCPUMemoryTracker:
         tracker = CPUMemoryTracker()
         tracker._add_event("a", 0, "ev1")
         tracker._add_event("b", 0, "ev2")
+        tracker._add_event("c", 0, "ev3")
 
-        timeline = tracker.get_memory_timeline()
-        assert len(timeline["timestamps"]) == 2
-        assert len(timeline["allocated"]) == 2
-        assert len(timeline["reserved"]) == 2
-        assert timeline["allocated"] == timeline["reserved"]
+        tracker.events[0].timestamp = 10.0
+        tracker.events[0].memory_allocated = 100
+        tracker.events[0].memory_reserved = 110
+        tracker.events[1].timestamp = 10.2
+        tracker.events[1].memory_allocated = 200
+        tracker.events[1].memory_reserved = 220
+        tracker.events[2].timestamp = 11.1
+        tracker.events[2].memory_allocated = 300
+        tracker.events[2].memory_reserved = 330
+
+        timeline = tracker.get_memory_timeline(interval=0.5)
+        assert timeline == {
+            "timestamps": [10.0, 11.0],
+            "allocated": [200.0, 300.0],
+            "reserved": [220.0, 330.0],
+        }
+
+        coarse_timeline = tracker.get_memory_timeline(interval=2.0)
+        assert coarse_timeline == {
+            "timestamps": [10.0],
+            "allocated": [300.0],
+            "reserved": [330.0],
+        }
+
+    @pytest.mark.parametrize("interval", [0.0, -1.0])
+    @patch("stormlog.cpu_profiler.psutil.Process")
+    def test_get_memory_timeline_rejects_nonpositive_interval(
+        self, mock_cls: Any, interval: float
+    ) -> None:
+        mock_cls.return_value = _make_mock_process()
+        tracker = CPUMemoryTracker()
+
+        with pytest.raises(ValueError, match="interval must be > 0"):
+            tracker.get_memory_timeline(interval=interval)
 
     @patch("stormlog.cpu_profiler.psutil.Process")
     def test_export_events_csv(self, mock_cls: Any, tmp_path: Path) -> None:

@@ -660,18 +660,42 @@ class CPUMemoryTracker:
         }
 
     def get_memory_timeline(self, interval: float = 1.0) -> Dict[str, List[float]]:
+        if interval <= 0:
+            raise ValueError("interval must be > 0")
+
         with self._events_lock:
             events_snapshot = list(self.events)
 
         if not events_snapshot:
             return {"timestamps": [], "allocated": [], "reserved": []}
 
-        timestamps = [event.timestamp for event in events_snapshot]
-        allocated = [float(event.memory_allocated) for event in events_snapshot]
+        start_time = events_snapshot[0].timestamp
+        timestamps: List[float] = []
+        allocated: List[float] = []
+        reserved: List[float] = []
+
+        current_bucket = 0
+        last_event = events_snapshot[0]
+        for event in events_snapshot[1:]:
+            bucket = int((event.timestamp - start_time) // interval)
+            if bucket == current_bucket:
+                last_event = event
+                continue
+
+            timestamps.append(start_time + current_bucket * interval)
+            allocated.append(float(last_event.memory_allocated))
+            reserved.append(float(last_event.memory_reserved))
+            current_bucket = bucket
+            last_event = event
+
+        timestamps.append(start_time + current_bucket * interval)
+        allocated.append(float(last_event.memory_allocated))
+        reserved.append(float(last_event.memory_reserved))
+
         return {
             "timestamps": timestamps,
             "allocated": allocated,
-            "reserved": allocated,
+            "reserved": reserved,
         }
 
     def clear_events(self) -> None:

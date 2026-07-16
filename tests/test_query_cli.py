@@ -51,6 +51,34 @@ def _write_json_events(path: Path, records: list[dict[str, Any]]) -> None:
     path.write_text(json.dumps(records), encoding="utf-8")
 
 
+def _write_attachment_sidecar(path: Path) -> None:
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.attachments",
+                "attachments": [
+                    {
+                        "attachment_id": "wandb-run",
+                        "title": "W&B run",
+                        "kind": "experiment",
+                        "url": "https://wandb.ai/example/project/runs/run-a",
+                        "run_id": "run-sidecar",
+                        "session_id": "session-cli",
+                        "job_id": "job-a",
+                        "rank": 0,
+                        "storage": "reference",
+                        "source_namespace": "wandb",
+                        "source_ref": "example/project/run-a",
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
 def test_query_sessions_json_output(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -62,6 +90,71 @@ def test_query_sessions_json_output(
     payload = json.loads(capsys.readouterr().out)
     assert payload[0]["session_id"] == "session-cli"
     assert payload[0]["source_kind"] == "telemetry_json"
+
+
+def test_query_runs_json_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _write_json_events(
+        tmp_path / "rank0_track.json",
+        [_event_record(session_id="session-r0", timestamp_ns=1, rank=0)],
+    )
+    _write_json_events(
+        tmp_path / "rank1_track.json",
+        [_event_record(session_id="session-r1", timestamp_ns=2, rank=1)],
+    )
+
+    assert query_main(["runs", str(tmp_path), "--job-id", "job-a", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert len(payload) == 1
+    assert payload[0]["run_id"] == "job:job-a"
+    assert payload[0]["session_count"] == 2
+    assert payload[0]["ranks"] == [0, 1]
+
+
+def test_query_attachments_csv_output(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "track.json"
+    _write_json_events(path, [_event_record()])
+
+    assert (
+        query_main(["attachments", str(path), "--kind", "telemetry_file", "--csv"]) == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "run_id,kind,title,storage" in output
+    assert "job:job-a" in output
+    assert "telemetry_file" in output
+
+
+def test_query_attachments_table_filters_source_namespace(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _write_attachment_sidecar(tmp_path / "stormlog_attachments.json")
+
+    assert (
+        query_main(
+            [
+                "attachments",
+                str(tmp_path),
+                "--run-id",
+                "run-sidecar",
+                "--source-namespace",
+                "wandb",
+                "--source-ref",
+                "example/project/run-a",
+            ]
+        )
+        == 0
+    )
+
+    output = capsys.readouterr().out
+    assert "Run Id" in output
+    assert "W&B run" in output
+    assert "wandb" in output
 
 
 def test_query_events_table_and_limit(

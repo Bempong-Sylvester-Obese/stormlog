@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import stormlog.query as query_api
+import stormlog.run_catalog as run_catalog_api
 from stormlog.session import (
     SESSION_STATUS_COMPLETED,
     SESSION_STATUS_INCOMPLETE,
@@ -15,6 +16,21 @@ from stormlog.session import (
     session_summary_to_dict,
 )
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
+
+
+def test_query_is_canonical_export_surface_for_public_run_contracts() -> None:
+    public_types = {
+        "CatalogRunEnvelope",
+        "RunAttachmentFilter",
+        "RunAttachmentRow",
+        "RunFilter",
+        "RunRow",
+    }
+
+    assert public_types <= set(query_api.__all__)
+    assert public_types.isdisjoint(run_catalog_api.__all__)
+    for name in public_types:
+        assert getattr(run_catalog_api, name) is getattr(query_api, name)
 
 
 def _event_record(
@@ -177,6 +193,73 @@ def _write_attachment_sidecar(
         encoding="utf-8",
     )
     return sidecar
+
+
+def _write_run_envelope(
+    root: Path,
+    *,
+    run_id: str,
+    session_id: str,
+    job_id: str | None = "job-a",
+    rank: int = 0,
+    start_ns: int = 100,
+    end_ns: int = 200,
+) -> Path:
+    trace_path = root / "rank0.trace"
+    trace_path.write_text("trace", encoding="utf-8")
+    envelope = root / "stormlog_run.json"
+    envelope.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.run_envelope",
+                "run_id": run_id,
+                "title": "Training run",
+                "description": "Run envelope fixture",
+                "job_id": job_id,
+                "started_at_ns": start_ns,
+                "ended_at_ns": end_ns,
+                "source_namespace": "wandb",
+                "source_ref": "entity/project/run-a",
+                "tags": ["training"],
+                "sessions": [
+                    {
+                        "session_id": session_id,
+                        "job_id": job_id,
+                        "rank": rank,
+                        "local_rank": rank,
+                        "world_size": 2,
+                        "role": "rank",
+                        "source_namespace": "stormlog",
+                        "source_ref": f"rank-{rank}",
+                        "metadata": {},
+                    }
+                ],
+                "attachments": [
+                    {
+                        "attachment_id": "rank0-trace",
+                        "title": "Rank 0 trace",
+                        "kind": "profiler_trace",
+                        "storage": "reference",
+                        "path": trace_path.name,
+                        "session_id": session_id,
+                        "job_id": job_id,
+                        "rank": rank,
+                        "local_rank": rank,
+                        "world_size": 2,
+                        "start_ns": start_ns,
+                        "end_ns": end_ns,
+                        "source_namespace": "nsys",
+                        "source_ref": "rank0",
+                        "metadata": {"tool": "nsys"},
+                    }
+                ],
+                "metadata": {"owner": "training"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return envelope
 
 
 def test_list_sessions_uses_sink_manifest_without_loading_events(
@@ -443,6 +526,456 @@ def test_attachment_sidecar_discovery_resolves_paths_and_reports_warnings(
     )
 
 
+def test_list_runs_uses_explicit_run_envelope_and_indexes_attachments(
+    tmp_path: Path,
+) -> None:
+    session_id = "session-explicit-run"
+    track_path = tmp_path / "track.json"
+    _write_json_events(
+        track_path,
+        [_event_record(session_id=session_id, timestamp_ns=100)],
+    )
+    envelope = _write_run_envelope(
+        tmp_path,
+        run_id="run-explicit",
+        session_id=session_id,
+        start_ns=100,
+        end_ns=200,
+    )
+
+    store = query_api.open([tmp_path])
+    runs = store.list_runs(query_api.RunFilter(run_id="run-explicit"))
+    attachments = store.list_run_attachments(
+        query_api.RunAttachmentFilter(
+            run_id="run-explicit",
+            source_namespace="nsys",
+            source_ref="rank0",
+        )
+    )
+    local_artifacts = store.list_run_attachments(
+        query_api.RunAttachmentFilter(run_id="run-explicit", kind="telemetry_file")
+    )
+
+    assert len(runs) == 1
+    assert runs[0].explicit is True
+    assert runs[0].source_path == str(envelope)
+    assert runs[0].sessions == (session_id,)
+    assert runs[0].source_namespace == "wandb"
+    assert len(attachments) == 1
+    assert attachments[0].path is not None
+    assert attachments[0].path.endswith("rank0.trace")
+    assert attachments[0].storage == "reference"
+    assert len(local_artifacts) == 1
+    assert local_artifacts[0].path == str(track_path)
+
+
+def test_list_runs_includes_implicit_contexts_for_uncovered_mixed_roots(
+    tmp_path: Path,
+) -> None:
+    _write_json_events(
+        tmp_path / "covered_track.json",
+        [_event_record(session_id="session-covered", timestamp_ns=100)],
+    )
+    _write_json_events(
+        tmp_path / "uncovered_track.json",
+        [_event_record(session_id="session-uncovered", timestamp_ns=200)],
+    )
+    _write_run_envelope(
+        tmp_path,
+        run_id="run-covered",
+        session_id="session-covered",
+        start_ns=100,
+        end_ns=150,
+    )
+
+    rows = query_api.open([tmp_path]).list_runs()
+
+    assert {row.run_id for row in rows} == {"run-covered", "job:job-a"}
+    implicit = next(row for row in rows if row.run_id == "job:job-a")
+    assert implicit.explicit is False
+    assert implicit.sessions == ("session-uncovered",)
+
+
+def test_duplicate_run_envelope_ids_reject_every_conflicting_envelope(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    _write_run_envelope(first, run_id="run-duplicate", session_id="session-a")
+    _write_run_envelope(second, run_id="run-duplicate", session_id="session-b")
+    _write_json_events(
+        tmp_path / "session_a_track.json",
+        [_event_record(session_id="session-a", timestamp_ns=100)],
+    )
+    _write_json_events(
+        tmp_path / "session_b_track.json",
+        [_event_record(session_id="session-b", timestamp_ns=200)],
+    )
+
+    store = query_api.open([tmp_path])
+
+    assert store.catalog.run_envelopes == []
+    assert all(row.explicit is False for row in store.list_runs())
+    assert not any(
+        row.source_kind == "run_envelope_attachment"
+        for row in store.list_run_attachments()
+    )
+    duplicate_warnings = [
+        warning
+        for warning in store.catalog.warnings
+        if "duplicate run envelope run_id 'run-duplicate'" in warning.message
+    ]
+    assert {warning.path for warning in duplicate_warnings} == {
+        str(first / "stormlog_run.json"),
+        str(second / "stormlog_run.json"),
+    }
+
+
+def test_list_runs_groups_implicit_distributed_sessions_by_job_id(
+    tmp_path: Path,
+) -> None:
+    _write_json_events(
+        tmp_path / "rank0_track.json",
+        [_event_record(session_id="session-r0", timestamp_ns=100, rank=0)],
+    )
+    _write_json_events(
+        tmp_path / "rank1_track.json",
+        [_event_record(session_id="session-r1", timestamp_ns=105, rank=1)],
+    )
+
+    rows = query_api.open([tmp_path]).list_runs(query_api.RunFilter(job_id="job-a"))
+
+    assert len(rows) == 1
+    assert rows[0].run_id == "job:job-a"
+    assert rows[0].explicit is False
+    assert rows[0].session_count == 2
+    assert set(rows[0].sessions) == {"session-r0", "session-r1"}
+    assert rows[0].ranks == (0, 1)
+
+
+def test_list_runs_keeps_reused_sink_sessions_separate_without_job_id(
+    tmp_path: Path,
+) -> None:
+    first_summary = create_session_summary(
+        source="stormlog.test",
+        status=SESSION_STATUS_COMPLETED,
+        session_id="session-first",
+        started_at_ns=100,
+        host="host-a",
+        pid=123,
+    )
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.start_session(first_summary)
+    sink.append(_event_record(session_id="session-first", timestamp_ns=100))
+    sink.close()
+
+    second_summary = create_session_summary(
+        source="stormlog.test",
+        status=SESSION_STATUS_COMPLETED,
+        session_id="session-second",
+        started_at_ns=200,
+        host="host-a",
+        pid=123,
+    )
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.start_session(second_summary)
+    sink.append(_event_record(session_id="session-second", timestamp_ns=200))
+    sink.close()
+
+    rows = query_api.open([tmp_path]).list_runs()
+
+    assert {row.run_id for row in rows} == {
+        "session:session-first",
+        "session:session-second",
+    }
+    assert all(row.session_count == 1 for row in rows)
+
+
+def test_list_run_attachments_filters_sidecars_by_run_and_namespace(
+    tmp_path: Path,
+) -> None:
+    sidecar = tmp_path / "stormlog_attachments.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.attachments",
+                "attachments": [
+                    {
+                        "attachment_id": "wandb-run",
+                        "title": "W&B run",
+                        "kind": "experiment",
+                        "url": "https://wandb.ai/example/project/runs/run-a",
+                        "run_id": "run-explicit",
+                        "session_id": "session-sidecar",
+                        "job_id": "job-a",
+                        "rank": 0,
+                        "storage": "reference",
+                        "source_namespace": "wandb",
+                        "source_ref": "example/project/run-a",
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    rows = query_api.open([tmp_path]).list_run_attachments(
+        query_api.RunAttachmentFilter(
+            run_id="run-explicit",
+            kind="experiment",
+            source_namespace="wandb",
+            source_ref="example/project/run-a",
+        )
+    )
+
+    assert len(rows) == 1
+    assert rows[0].source_path == "https://wandb.ai/example/project/runs/run-a"
+    assert rows[0].storage == "reference"
+
+
+def test_conflicting_envelope_session_identity_warns_and_omits_ambiguous_sidecar(
+    tmp_path: Path,
+) -> None:
+    session_id = "session-conflict"
+    _write_json_events(
+        tmp_path / "track.json",
+        [_event_record(session_id=session_id, timestamp_ns=100)],
+    )
+    first = tmp_path / "first"
+    first.mkdir()
+    second = tmp_path / "second"
+    second.mkdir()
+    _write_run_envelope(first, run_id="run-a", session_id=session_id)
+    _write_run_envelope(second, run_id="run-b", session_id=session_id)
+    sidecar = tmp_path / "stormlog_attachments.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.attachments",
+                "attachments": [
+                    {
+                        "attachment_id": "ambiguous",
+                        "title": "Ambiguous attachment",
+                        "kind": "experiment",
+                        "url": "https://example.invalid/run",
+                        "session_id": session_id,
+                        "metadata": {},
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = query_api.open([tmp_path])
+    rows = store.list_run_attachments(query_api.RunAttachmentFilter(kind="experiment"))
+
+    assert rows == []
+    assert any(
+        "ambiguous run session_id 'session-conflict'" in warning.message
+        for warning in store.catalog.warnings
+    )
+
+
+def test_oom_run_attachment_keeps_session_rank_identity(tmp_path: Path) -> None:
+    session = create_session_summary(
+        source="stormlog.test",
+        status=SESSION_STATUS_COMPLETED,
+        session_id="session-rank-oom",
+        started_at_ns=100,
+        host="host-a",
+        pid=123,
+        job_id="job-a",
+        rank=1,
+        local_rank=1,
+        world_size=2,
+    )
+    sink = AppendOnlyTelemetrySink(
+        TelemetrySinkConfig(
+            root_dir=tmp_path,
+            flush_every_events=1,
+            flush_every_seconds=1.0,
+        )
+    )
+    sink.start_session(session)
+    sink.append(_event_record(session_id="session-rank-oom", timestamp_ns=100, rank=1))
+    sink.close()
+    _write_oom_bundle(
+        tmp_path,
+        session_id="session-rank-oom",
+        session_status=SESSION_STATUS_COMPLETED,
+    )
+
+    rows = query_api.open([tmp_path]).list_run_attachments(
+        query_api.RunAttachmentFilter(
+            job_id="job-a",
+            rank=1,
+            kind="oom_bundle",
+        )
+    )
+
+    assert len(rows) == 1
+    assert rows[0].job_id == "job-a"
+    assert rows[0].rank == 1
+    assert rows[0].local_rank == 1
+    assert rows[0].world_size == 2
+
+
+def test_malformed_run_envelope_warns_without_blocking_discovery(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "stormlog_run.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.run_envelope",
+                "run_id": "run-bad",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_json_events(
+        tmp_path / "track.json",
+        [_event_record(session_id="session-still-loads", timestamp_ns=100)],
+    )
+
+    store = query_api.open([tmp_path])
+
+    assert store.list_sessions()[0].session_id == "session-still-loads"
+    assert any(
+        "unrecognized run envelope shape" in warning.message
+        for warning in store.catalog.warnings
+    )
+
+
+def test_run_envelope_rejects_null_arrays_and_invalid_entry_metadata(
+    tmp_path: Path,
+) -> None:
+    null_arrays = tmp_path / "null_arrays"
+    null_arrays.mkdir()
+    (null_arrays / "stormlog_run.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.run_envelope",
+                "run_id": "run-null-arrays",
+                "sessions": None,
+                "attachments": None,
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    bad_entry = tmp_path / "bad_entry"
+    bad_entry.mkdir()
+    (bad_entry / "stormlog_run.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "format": "stormlog.run_envelope",
+                "run_id": "run-bad-entry",
+                "sessions": [{"session_id": "session-without-metadata"}],
+                "metadata": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    store = query_api.open([tmp_path])
+
+    assert store.catalog.run_envelopes == []
+    messages = [warning.message for warning in store.catalog.warnings]
+    assert messages.count("unrecognized run envelope shape") == 2
+
+
+def test_run_envelope_runtime_parser_enforces_complete_v1_schema(
+    tmp_path: Path,
+) -> None:
+    invalid_payloads = [
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-invalid-tag",
+            "tags": ["valid", 1],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-duplicate-tag",
+            "tags": ["duplicate", "duplicate"],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-float-time",
+            "started_at_ns": 1.5,
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-negative-rank",
+            "sessions": [{"session_id": "session-a", "rank": -1, "metadata": {}}],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-zero-world-size",
+            "attachments": [
+                {
+                    "title": "Trace",
+                    "kind": "profiler_trace",
+                    "storage": "copy",
+                    "path": "trace.json",
+                    "world_size": 0,
+                    "metadata": {},
+                }
+            ],
+            "metadata": {},
+        },
+        {
+            "schema_version": 1,
+            "format": "stormlog.run_envelope",
+            "run_id": "run-extra-property",
+            "unexpected": True,
+            "metadata": {},
+        },
+    ]
+    for index, payload in enumerate(invalid_payloads):
+        directory = tmp_path / f"invalid_{index}"
+        directory.mkdir()
+        (directory / "stormlog_run.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+    store = query_api.open([tmp_path])
+
+    assert store.catalog.run_envelopes == []
+    messages = [warning.message for warning in store.catalog.warnings]
+    assert messages.count("unrecognized run envelope shape") == len(invalid_payloads)
+
+
 def test_list_sessions_discovers_sink_manifest_file(tmp_path: Path) -> None:
     sink = AppendOnlyTelemetrySink(
         TelemetrySinkConfig(
@@ -517,6 +1050,17 @@ def test_query_events_limit_applies_after_global_sort(tmp_path: Path) -> None:
     assert len(rows) == 1
     assert rows[0].event.session_id == "session-early"
     assert rows[0].event.timestamp_ns == 100
+
+
+def test_query_all_exports_run_contracts() -> None:
+    namespace: dict[str, Any] = {}
+
+    exec("from stormlog.query import *", {}, namespace)
+
+    assert namespace["RunFilter"] is query_api.RunFilter
+    assert namespace["RunAttachmentFilter"] is query_api.RunAttachmentFilter
+    assert namespace["RunRow"] is query_api.RunRow
+    assert namespace["RunAttachmentRow"] is query_api.RunAttachmentRow
 
 
 def test_list_oom_bundles_links_to_sessions(tmp_path: Path) -> None:

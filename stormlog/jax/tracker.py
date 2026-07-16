@@ -18,7 +18,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterator, List, Optional
+from typing import Any, Callable, Dict, Iterator, List, Optional, Union
 
 from stormlog.collector_health import (
     COLLECTOR_HEALTH_HEALTHY,
@@ -50,13 +50,20 @@ from stormlog.telemetry import (
 from stormlog.telemetry_sink import AppendOnlyTelemetrySink, TelemetrySinkConfig
 
 from .jax_env import configure_jax_logging
-from .utils import _device_zero
+from .utils import _device_zero, get_device_memory_capability, resolve_jax_device
 
 configure_jax_logging()
 
-import jax  # noqa: E402
+jax: Any
 
-JAX_AVAILABLE = True
+try:
+    import jax as _jax  # noqa: E402
+
+    jax = _jax
+    JAX_AVAILABLE = True
+except ImportError:
+    JAX_AVAILABLE = False
+    jax = None
 
 try:
     import psutil
@@ -85,6 +92,10 @@ class TrackingResult:
     memory_usage: List[int] = field(default_factory=list)
     timestamps: List[float] = field(default_factory=list)
     device_memory_profile_path: Optional[str] = None
+    device_memory_available: bool = False
+    memory_source: str = "unavailable"
+    device_memory_unavailable_reason: Optional[str] = None
+    process_memory_bytes: Optional[int] = None
 
     history_window_limit: int = 0
     history_retained_samples: int = 0
@@ -132,7 +143,7 @@ class MemoryTracker:
         self,
         sampling_interval: float = 1.0,
         alert_threshold_mb: Optional[float] = None,
-        device_index: int = 0,
+        device_index: Union[int, str] = 0,
         enable_logging: bool = True,
         max_history: int = 10_000,
         job_id: Optional[str] = None,
@@ -182,18 +193,26 @@ class MemoryTracker:
         self._device = None
         self._device_bytes_limit: Optional[int] = None
         self._last_reserved_bytes: Optional[int] = None
+        self._device_memory_available = False
+        self._device_memory_unavailable_reason: Optional[str] = (
+            "No JAX device was selected"
+        )
         try:
-            devices = jax.local_devices()
-            if device_index < len(devices):
+            if isinstance(device_index, int):
+                devices = jax.local_devices()
+                if device_index < 0 or device_index >= len(devices):
+                    raise ValueError(f"JAX device index {device_index} is out of range")
                 self._device = devices[device_index]
-                try:
-                    stats = self._device.memory_stats()
-                    if stats and "bytes_limit" in stats:
-                        self._device_bytes_limit = int(stats["bytes_limit"])
-                except Exception:
-                    pass
+            else:
+                self._device, self.device_index = resolve_jax_device(device_index)
+            capability = get_device_memory_capability(self._device)
+            self._device_memory_available = bool(capability["memory_stats_available"])
+            self._device_memory_unavailable_reason = capability["memory_stats_error"]
+            stats = capability["memory_stats"]
+            if self._device_memory_available and "bytes_limit" in stats:
+                self._device_bytes_limit = int(stats["bytes_limit"])
         except Exception as exc:
-            logger.debug("Could not resolve JAX device %d: %s", device_index, exc)
+            logger.debug("Could not resolve JAX device %s: %s", device_index, exc)
 
         # Cache a scalar sentinel for sync barriers — avoids re-allocating
         # a device array on every sample.
@@ -263,7 +282,7 @@ class MemoryTracker:
 
         if enable_logging:
             logger.info(
-                "JAX Memory Tracker initialized for device index %d", device_index
+                "JAX Memory Tracker initialized for device selector %r", device_index
             )
 
     @staticmethod
@@ -375,15 +394,16 @@ class MemoryTracker:
             return int(psutil.Process().memory_info().rss)
         return 0
 
-    def _get_current_memory_bytes(self) -> int:
-        """Return current memory usage in bytes (no unit conversion)."""
-        if self._device is not None and self._device.platform != "cpu":
-            return self._get_current_device_memory()
-        return self._get_current_cpu_memory()
+    def _get_current_memory_bytes(self) -> Optional[int]:
+        """Return measured device memory, or ``None`` when unsupported."""
+        if not self._device_memory_available:
+            return None
+        return self._get_current_device_memory()
 
     def _get_current_memory(self) -> float:
         """Return current memory usage in MB."""
-        return self._get_current_memory_bytes() / (1024 * 1024)
+        memory_bytes = self._get_current_memory_bytes()
+        return memory_bytes / (1024 * 1024) if memory_bytes is not None else 0.0
 
     def _build_telemetry_event_record(
         self,
@@ -409,6 +429,26 @@ class MemoryTracker:
         session = self._ensure_session_summary()
         health_dict = self._collector_health.to_dict()
         meta = {**metadata, **health_dict} if metadata else health_dict
+        meta.update(
+            {
+                "backend": getattr(self._device, "platform", "unknown"),
+                "sampling_source": (
+                    "jax_device_stats"
+                    if self._device_memory_available
+                    else "unavailable"
+                ),
+                "device_memory_available": self._device_memory_available,
+            }
+        )
+        if not self._device_memory_available:
+            meta["collector_partial_fields"] = [
+                "allocator_allocated_bytes",
+                "allocator_reserved_bytes",
+                "device_used_bytes",
+            ]
+            meta["device_memory_unavailable_reason"] = (
+                self._device_memory_unavailable_reason
+            )
         if is_approximate:
             meta["allocator_reserved_approximate"] = True
         legacy = {
@@ -557,11 +597,26 @@ class MemoryTracker:
         current_time = time.time()
         if not self._retry_collection_due(current_time):
             return
+        if not self._device_memory_available:
+            capability = get_device_memory_capability(self._device)
+            self._device_memory_available = bool(capability["memory_stats_available"])
+            self._device_memory_unavailable_reason = capability["memory_stats_error"]
+            if not self._device_memory_available:
+                self._transition_to_failure(
+                    current_time,
+                    RuntimeError(self._device_memory_unavailable_reason),
+                )
+                return
+            stats = capability["memory_stats"]
+            if "bytes_limit" in stats:
+                self._device_bytes_limit = int(stats["bytes_limit"])
 
         try:
             current_memory = self._get_current_memory_bytes()
         except Exception as exc:
             self._transition_to_failure(current_time, exc)
+            return
+        if current_memory is None:
             return
         self._last_successful_memory_bytes = current_memory
         self._transition_to_success(current_time)
@@ -864,6 +919,14 @@ class MemoryTracker:
                 history_dropped_events=result_data.dropped_events,
                 history_retained_alerts=len(result_data.retained_alerts),
                 history_dropped_alerts=result_data.dropped_alerts,
+                device_memory_available=self._device_memory_available,
+                memory_source=(
+                    "jax_device_stats"
+                    if self._device_memory_available
+                    else "unavailable"
+                ),
+                device_memory_unavailable_reason=self._device_memory_unavailable_reason,
+                process_memory_bytes=self._get_current_cpu_memory(),
             )
 
     def _create_empty_result(self) -> TrackingResult:
@@ -882,6 +945,12 @@ class MemoryTracker:
             alert_count=0,
             session_summary=self._session_summary,
             history_window_limit=self.max_history,
+            device_memory_available=self._device_memory_available,
+            memory_source=(
+                "jax_device_stats" if self._device_memory_available else "unavailable"
+            ),
+            device_memory_unavailable_reason=self._device_memory_unavailable_reason,
+            process_memory_bytes=self._get_current_cpu_memory(),
         )
 
     # -- Telemetry Sink Management -----------------------------------------

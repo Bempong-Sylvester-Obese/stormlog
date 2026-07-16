@@ -1,7 +1,10 @@
-"""JAX Memory Visualization"""
+"""JAX Memory Visualization."""
 
+import csv
+import json
 import logging
-from typing import Any, Dict, Optional, Tuple
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 plt: Any
 try:
@@ -28,7 +31,9 @@ except ImportError:
     jax = None
 
 try:
+    import dash
     import plotly.graph_objects as go
+    from dash import dcc, html
 
     PLOTLY_AVAILABLE = True
 except ImportError:
@@ -55,8 +60,13 @@ class MemoryVisualizer:
     ) -> None:
         """Plot device memory usage timeline."""
         if hasattr(results, "snapshots") and results.snapshots:
-            timestamps = [s.timestamp for s in results.snapshots]
-            memory_usage = [s.device_memory_mb for s in results.snapshots]
+            snapshots = [
+                snapshot
+                for snapshot in results.snapshots
+                if getattr(snapshot, "device_memory_available", True)
+            ]
+            timestamps = [s.timestamp for s in snapshots]
+            memory_usage = [s.device_memory_mb for s in snapshots]
         elif hasattr(results, "memory_usage") and results.memory_usage:
             # Fallback for simple track results
             memory_usage = [
@@ -138,3 +148,112 @@ class MemoryVisualizer:
                 plt.savefig(save_path, dpi=150, bbox_inches="tight")
             else:
                 plt.show()
+
+    def create_memory_heatmap(
+        self, results: Any, save_path: Optional[str] = None
+    ) -> None:
+        """Create a heatmap from available JAX device-memory samples."""
+        if not MATPLOTLIB_AVAILABLE:
+            logging.error("Matplotlib is required for heatmaps")
+            return
+        if hasattr(results, "snapshots"):
+            samples = [
+                snapshot.device_memory_mb
+                for snapshot in results.snapshots
+                if getattr(snapshot, "device_memory_available", True)
+            ]
+        else:
+            samples = [
+                float(value) / (1024 * 1024)
+                for value in getattr(results, "memory_usage", [])
+            ]
+        if len(samples) < 10:
+            logging.warning("Insufficient device-memory samples for heatmap")
+            return
+        chunks = [samples[index : index + 10] for index in range(0, len(samples), 10)]
+        width = max(len(chunk) for chunk in chunks)
+        padded = [chunk + [0.0] * (width - len(chunk)) for chunk in chunks]
+        plt.figure(figsize=self.figure_size)
+        if sns is not None:
+            sns.heatmap(padded, cmap="viridis", cbar_kws={"label": "Memory (MB)"})
+        else:
+            plt.imshow(padded, cmap="viridis", aspect="auto")
+            plt.colorbar(label="Memory (MB)")
+        plt.title("JAX Device Memory Heatmap")
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        else:
+            plt.show()
+
+    def export_data(self, results: Any, output_path: str, format: str = "csv") -> None:
+        """Export available JAX timeline samples as CSV or JSON."""
+        rows = self._rows(results)
+        if format.lower() == "csv":
+            with open(output_path, "w", newline="", encoding="utf-8") as output:
+                writer = csv.DictWriter(
+                    output, fieldnames=["timestamp", "device_memory_mb"]
+                )
+                writer.writeheader()
+                writer.writerows(rows)
+        elif format.lower() == "json":
+            Path(output_path).write_text(json.dumps(rows, indent=2), encoding="utf-8")
+        else:
+            raise ValueError("format must be csv or json")
+
+    def save_plots(self, results: Any, output_dir: str = "./plots/") -> None:
+        """Save the standard JAX timeline, comparison, and heatmap outputs."""
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        self.plot_memory_timeline(results, save_path=str(output / "timeline.png"))
+        if getattr(results, "function_profiles", None):
+            self.plot_function_comparison(
+                results.function_profiles,
+                save_path=str(output / "function_comparison.png"),
+            )
+        self.create_memory_heatmap(results, save_path=str(output / "heatmap.png"))
+
+    def create_interactive_dashboard(self, results: Any, port: int = 8050) -> None:
+        """Serve an interactive JAX device-memory timeline when Dash is installed."""
+        if not PLOTLY_AVAILABLE:
+            logging.error("Plotly and Dash are required for the dashboard")
+            return
+        rows = self._rows(results)
+        figure = go.Figure(
+            data=[
+                go.Scatter(
+                    x=[row["timestamp"] for row in rows],
+                    y=[row["device_memory_mb"] for row in rows],
+                    mode="lines+markers",
+                    name="Device Memory",
+                )
+            ]
+        )
+        figure.update_layout(title="JAX Device Memory Timeline")
+        app = dash.Dash(__name__)
+        app.layout = html.Div(
+            [html.H1("JAX Stormlog Dashboard"), dcc.Graph(figure=figure)]
+        )
+        run_dashboard = getattr(app, "run", None)
+        if run_dashboard is None:
+            run_dashboard = app.run_server
+        run_dashboard(debug=False, port=port, host="127.0.0.1")
+
+    @staticmethod
+    def _rows(results: Any) -> List[Dict[str, float]]:
+        if hasattr(results, "snapshots"):
+            return [
+                {
+                    "timestamp": snapshot.timestamp,
+                    "device_memory_mb": snapshot.device_memory_mb,
+                }
+                for snapshot in results.snapshots
+                if getattr(snapshot, "device_memory_available", True)
+            ]
+        return [
+            {"timestamp": timestamp, "device_memory_mb": float(memory) / (1024 * 1024)}
+            for timestamp, memory in zip(
+                getattr(results, "timestamps", []),
+                getattr(results, "memory_usage", []),
+                strict=True,
+            )
+        ]

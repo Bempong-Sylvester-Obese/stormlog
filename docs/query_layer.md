@@ -36,10 +36,12 @@ References:
 `ArtifactCatalog` discovers available artifacts before loading every event row.
 It recognizes:
 
+- explicit `stormlog_run.json` run envelopes
 - append-only telemetry sink directories and JSONL segments
 - flat JSON, JSONL, and CSV telemetry files
 - diagnose bundles with session manifests
 - OOM dump bundles with stable manifests and metadata
+- `stormlog_attachments.json` sidecars
 
 Discovery is manifest-first. Sink manifests provide session rows, segment paths,
 and event counts without parsing all segment records. Diagnose and OOM manifests
@@ -47,8 +49,17 @@ provide bundle/session linkage without loading timelines or OOM event buffers.
 Flat telemetry files are loaded only when a query needs their session or event
 rows because they do not have a separate manifest ledger.
 
+Run discovery is envelope-first. When `stormlog_run.json` exists, Stormlog uses
+that explicit run membership. Otherwise, it synthesizes run rows from session
+metadata: sessions sharing a non-null `job_id` become one distributed run, while
+sessions without `job_id` remain separate even when they share a sink directory.
+
 The row contracts are explicit and automation-friendly:
 
+- `RunRow`: explicit or synthesized run identity, source provenance, grouped
+  session ids, ranks, and attachment count
+- `RunAttachmentRow`: local artifacts, distributed rank artifacts, and external
+  references indexed by run/session/job/rank/kind/source namespace
 - `SessionRow`: session identity, status, rank metadata, source provenance,
   event count when known, warning count, and linked OOM bundle count
 - `EventRow`: canonical `TelemetryEvent` fields plus `source_path`,
@@ -66,6 +77,10 @@ The row contracts are explicit and automation-friendly:
 
 The canonical telemetry schema remains the event contract. Query rows add
 provenance but do not mutate persisted telemetry records.
+
+See [Run Envelopes](run_envelopes.md) for the run/session distinction,
+`stormlog_run.json` schema, attachment storage model, and source namespace
+rules.
 
 `QueryStore.correlate(...)` is the first correlation-oriented query surface. It
 collects telemetry events, derived timeline markers, alerts, OOM bundles,

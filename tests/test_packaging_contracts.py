@@ -1,6 +1,9 @@
 import re
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.version import Version
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -21,19 +24,42 @@ def _optional_dependencies() -> dict[str, list[str]]:
     return extras
 
 
+def _requirement_names(requirements: list[str]) -> set[str]:
+    return {Requirement(requirement).name.lower() for requirement in requirements}
+
+
 def test_all_extra_covers_every_runtime_extra() -> None:
     extras = _optional_dependencies()
-    expected = (
-        set(extras["viz"])
-        | set(extras["torch"])
-        | set(extras["tf"])
-        | set(extras["infer-tokenizers"])
-        | set(extras["tui"])
-        | set(extras["jax"])
-        | set(extras["wandb"])
+    expected_names = _requirement_names(
+        extras["viz"]
+        + extras["torch"]
+        + extras["tf"]
+        + extras["infer-tokenizers"]
+        + extras["tui"]
+        + extras["jax"]
+        + extras["wandb"]
     )
 
-    assert expected.issubset(set(extras["all"])), (
+    assert expected_names.issubset(_requirement_names(extras["all"])), (
         "The all extra must cover every user-facing runtime extra "
         "(viz, torch, tf, infer-tokenizers, tui, jax, wandb)."
+    )
+
+
+def test_all_extra_uses_protobuf_compatible_tensorflow() -> None:
+    extras = _optional_dependencies()
+    requirements = {
+        requirement.name.lower(): requirement
+        for requirement in map(Requirement, extras["all"])
+    }
+
+    assert any(
+        specifier.operator in {">", ">="}
+        and Version(specifier.version) >= Version("2.21.0")
+        for specifier in requirements["tensorflow"].specifier
+    )
+    assert any(
+        specifier.operator in {">", ">="}
+        and Version(specifier.version) >= Version("6.31.1")
+        for specifier in requirements["protobuf"].specifier
     )

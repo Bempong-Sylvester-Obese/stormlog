@@ -201,7 +201,7 @@ class TestGPUMemoryProfiler:
         """Test profiler initialization."""
         assert self.profiler.device.type == "cuda"
         assert self.profiler.results == []
-        assert self.profiler.snapshots == []
+        assert not self.profiler.snapshots
         assert self.profiler._baseline_snapshot is not None
 
     def test_take_snapshot(self) -> None:
@@ -411,6 +411,6 @@ class TestPerformance:
         assert len(profiler.snapshots) > 50  # Should have ~100 snapshots
 
         # Verify snapshots are reasonable
-        for snapshot in profiler.snapshots[:10]:  # Check first 10
+        for snapshot in list(profiler.snapshots)[:10]:  # Check first 10
             assert isinstance(snapshot, MemorySnapshot)
             assert snapshot.allocated_memory >= 0

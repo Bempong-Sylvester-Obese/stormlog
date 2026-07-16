@@ -108,7 +108,7 @@ class MemoryAnalyzer:
 
         # Analysis thresholds
         self.thresholds = {
-            "memory_leak_ratio": 0.1,  # 10% memory growth indicates potential leak
+            "memory_leak_ratio": 0.7,  # Growth in most calls indicates potential leak
             "fragmentation_ratio": 0.3,  # 30% fragmentation is concerning
             "inefficient_allocation_ratio": 0.5,  # 50% waste in allocations
             "slow_function_percentile": 0.9,  # Top 10% slowest functions
@@ -532,7 +532,10 @@ class MemoryAnalyzer:
         for func_name, times in function_times.items():
             if len(times) >= self.thresholds["min_calls_for_analysis"]:
                 # Coefficient of variation
-                cv = statistics.stdev(times) / statistics.mean(times)
+                mean_time = statistics.mean(times)
+                if mean_time <= 0:
+                    continue
+                cv = statistics.stdev(times) / mean_time
                 if cv > 0.5:  # High variance
                     high_variance_functions.append((func_name, cv))
 

@@ -9,10 +9,11 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from ._datetime import datetime_to_ns as _datetime_to_ns
+from ._datetime import parse_datetime as _parse_datetime
 from .correlation import (
     ATTACHMENTS_FILENAME,
     ATTACHMENTS_FORMAT,
@@ -42,6 +43,29 @@ from .phases import (
     PhaseReplayIndex,
     phase_attribution_to_payload,
     summarize_phase_attribution,
+)
+from .run_catalog import (
+    RUN_ENVELOPE_FILENAME,
+    AttachmentStorage,
+    CatalogRunEnvelope,
+    RunAttachmentFilter,
+    RunAttachmentRow,
+    RunContext,
+    RunFilter,
+    RunIdentityIndex,
+    RunRow,
+    attachment_storage_or_default,
+    build_identity_index,
+    build_run_contexts,
+    diagnose_attachment_rows,
+    envelope_attachment_rows,
+    flat_telemetry_attachment_rows,
+    oom_attachment_rows,
+    run_attachment_matches,
+    run_envelope_from_payload,
+    run_matches,
+    sidecar_attachment_rows,
+    sink_attachment_rows,
 )
 from .session import (
     SESSION_STATUS_INTERRUPTED,
@@ -353,10 +377,14 @@ class ArtifactCatalog:
         self.sources: list[CatalogSource] = []
         self.oom_bundles: list[CatalogOOMBundle] = []
         self.attachments: list[ExternalAttachment] = []
+        self.run_envelopes: list[CatalogRunEnvelope] = []
         self.warnings: list[CatalogWarning] = []
         self._source_keys: set[tuple[Path, SourceKind]] = set()
         self._oom_bundle_paths: set[Path] = set()
         self._attachment_sidecar_paths: set[Path] = set()
+        self._run_envelope_paths: set[Path] = set()
+        self._run_envelope_by_id: dict[str, CatalogRunEnvelope] = {}
+        self._duplicate_run_ids: set[str] = set()
         self._covered_event_paths: set[Path] = set()
         self._discover()
 
@@ -366,6 +394,7 @@ class ArtifactCatalog:
             "sources": [source.as_dict() for source in self.sources],
             "oom_bundles": [bundle.as_dict() for bundle in self.oom_bundles],
             "attachments": [attachment.as_dict() for attachment in self.attachments],
+            "run_envelopes": [envelope.as_dict() for envelope in self.run_envelopes],
             "warnings": [warning.as_dict() for warning in self.warnings],
         }
 
@@ -386,6 +415,7 @@ class ArtifactCatalog:
         self._discover_directory(path)
 
     def _discover_directory(self, directory: Path) -> None:
+        self._discover_run_envelope(directory / RUN_ENVELOPE_FILENAME)
         self._discover_attachment_sidecar(directory / ATTACHMENTS_FILENAME)
         manifest_path = directory / MANIFEST_FILENAME
         manifest_payload = _read_json_object(manifest_path)
@@ -445,12 +475,18 @@ class ArtifactCatalog:
         for attachment_sidecar in sorted(directory.rglob(ATTACHMENTS_FILENAME)):
             self._discover_attachment_sidecar(attachment_sidecar)
 
+        for run_envelope in sorted(directory.rglob(RUN_ENVELOPE_FILENAME)):
+            self._discover_run_envelope(run_envelope)
+
         for candidate in self._discover_candidate_files(directory):
             if candidate in self._covered_event_paths:
                 continue
             self._discover_file(candidate)
 
     def _discover_file(self, path: Path) -> None:
+        if path.name == RUN_ENVELOPE_FILENAME:
+            self._discover_run_envelope(path)
+            return
         if path.name == ATTACHMENTS_FILENAME:
             self._discover_attachment_sidecar(path)
             return
@@ -594,6 +630,37 @@ class ArtifactCatalog:
                 continue
             self.attachments.append(attachment)
 
+    def _discover_run_envelope(self, path: Path) -> None:
+        if not path.exists() or not path.is_file():
+            return
+        resolved = path.resolve()
+        if resolved in self._run_envelope_paths:
+            return
+        self._run_envelope_paths.add(resolved)
+        payload = _read_json_object(path)
+        if payload is None:
+            self._warn(path, "run envelope is not a JSON object")
+            return
+        envelope = run_envelope_from_payload(payload, path)
+        if envelope is None:
+            self._warn(path, "unrecognized run envelope shape")
+            return
+        if envelope.run_id in self._duplicate_run_ids:
+            self._warn_duplicate_run_id(path, envelope.run_id)
+            return
+        existing = self._run_envelope_by_id.pop(envelope.run_id, None)
+        if existing is not None:
+            self.run_envelopes.remove(existing)
+            self._duplicate_run_ids.add(envelope.run_id)
+            self._warn_duplicate_run_id(existing.path, envelope.run_id)
+            self._warn_duplicate_run_id(path, envelope.run_id)
+            return
+        self._run_envelope_by_id[envelope.run_id] = envelope
+        self.run_envelopes.append(envelope)
+
+    def _warn_duplicate_run_id(self, path: Path, run_id: str) -> None:
+        self._warn(path, f"duplicate run envelope run_id {run_id!r}")
+
     def _warn(self, path: Path, message: str) -> None:
         self.warnings.append(CatalogWarning(path=str(path), message=message))
 
@@ -606,6 +673,49 @@ class QueryStore:
         self._loaded_sessions_by_source: dict[
             tuple[Path, SourceKind], list[LoadedTelemetrySession]
         ] = {}
+        self._run_identity_warning_keys: set[str] = set()
+
+    def list_runs(self, filters: RunFilter | None = None) -> list[RunRow]:
+        """Return explicit run envelopes or synthesized local run rows."""
+        filters = filters or RunFilter()
+        contexts = self._run_contexts()
+        attachments = self._run_attachment_rows_for_contexts(contexts)
+        attachment_counts: dict[str, int] = defaultdict(int)
+        for attachment in attachments:
+            attachment_counts[attachment.run_id] += 1
+        rows = [
+            context.to_row(attachment_counts.get(context.run_id, 0))
+            for context in contexts.values()
+        ]
+        rows = [row for row in rows if run_matches(row, filters)]
+        rows.sort(
+            key=lambda row: (
+                row.started_at_ns if row.started_at_ns is not None else -1,
+                row.run_id,
+            ),
+            reverse=True,
+        )
+        return rows
+
+    def list_run_attachments(
+        self,
+        filters: RunAttachmentFilter | None = None,
+    ) -> list[RunAttachmentRow]:
+        """Return local, distributed, and external attachments indexed by run."""
+        filters = filters or RunAttachmentFilter()
+        rows = self._run_attachment_rows_for_contexts(self._run_contexts())
+        rows = [row for row in rows if run_attachment_matches(row, filters)]
+        rows.sort(
+            key=lambda row: (
+                row.run_id,
+                row.session_id or "",
+                row.rank if row.rank is not None else -1,
+                row.kind,
+                row.title,
+                row.source_path,
+            )
+        )
+        return rows
 
     def list_sessions(self, filters: SessionFilter | None = None) -> list[SessionRow]:
         """Return session rows from manifest metadata or loaded flat files."""
@@ -822,6 +932,81 @@ class QueryStore:
         if metric == "hidden_memory_gap_growth":
             return _summarize_hidden_memory_gap_growth(events, resolved_group_by)
         raise ValueError(f"unsupported summary metric: {metric}")
+
+    def _run_contexts(self) -> dict[str, RunContext]:
+        return build_run_contexts(
+            self.list_sessions(SessionFilter()),
+            self.catalog.run_envelopes,
+        )
+
+    def _run_attachment_rows_for_contexts(
+        self,
+        contexts: Mapping[str, RunContext],
+    ) -> list[RunAttachmentRow]:
+        identity_index = build_identity_index(contexts)
+        self._record_run_identity_warnings(identity_index)
+        session_by_id = {
+            session.session_id: session
+            for context in contexts.values()
+            for session in context.sessions
+        }
+        rows: list[RunAttachmentRow] = []
+
+        rows.extend(envelope_attachment_rows(self.catalog.run_envelopes, contexts))
+        rows.extend(sidecar_attachment_rows(self.catalog.attachments, identity_index))
+        rows.extend(self._local_source_attachment_rows(contexts, identity_index))
+        rows.extend(
+            oom_attachment_rows(
+                self.catalog.oom_bundles,
+                identity_index,
+                session_by_id,
+            )
+        )
+        return rows
+
+    def _record_run_identity_warnings(
+        self,
+        identity_index: RunIdentityIndex,
+    ) -> None:
+        for conflict in identity_index.conflicts:
+            key = (
+                f"{conflict.identity_kind}:"
+                f"{conflict.identity_value}:"
+                f"{','.join(conflict.run_ids)}"
+            )
+            if key in self._run_identity_warning_keys:
+                continue
+            self._run_identity_warning_keys.add(key)
+            self.catalog.warnings.append(
+                CatalogWarning(path="<run-catalog>", message=conflict.message)
+            )
+
+    def _local_source_attachment_rows(
+        self,
+        contexts: Mapping[str, RunContext],
+        identity_index: RunIdentityIndex,
+    ) -> list[RunAttachmentRow]:
+        rows: list[RunAttachmentRow] = []
+        for source in self.catalog.sources:
+            if source.source_kind == "sink":
+                manifest = read_telemetry_sink_manifest(source.path)
+                if manifest is not None:
+                    rows.extend(sink_attachment_rows(source, manifest, identity_index))
+            elif source.source_kind == "diagnose_bundle":
+                rows.extend(
+                    diagnose_attachment_rows(
+                        source,
+                        _diagnose_session_summary(source.manifest_path),
+                        identity_index,
+                    )
+                )
+            elif source.source_kind in {
+                "telemetry_json",
+                "telemetry_jsonl",
+                "telemetry_csv",
+            }:
+                rows.extend(flat_telemetry_attachment_rows(source, contexts))
+        return rows
 
     def _session_rows_for_source(
         self,
@@ -1279,6 +1464,10 @@ def _attachment_from_payload(
         updated_at_utc=_string_or_none(payload.get("updated_at_utc")),
         metadata=dict(metadata) if isinstance(metadata, Mapping) else {},
         sidecar_path=str(sidecar_path),
+        run_id=_string_or_none(payload.get("run_id")),
+        storage=attachment_storage_or_default(payload.get("storage")),
+        source_namespace=_string_or_none(payload.get("source_namespace")),
+        source_ref=_string_or_none(payload.get("source_ref")),
     )
 
 
@@ -1858,27 +2047,6 @@ def _evidence_id(*parts: object) -> str:
     payload = json.dumps([str(part) for part in parts], sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
     return f"evidence-{digest}"
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _datetime_to_ns(value: datetime | None) -> int | None:
-    if value is None:
-        return None
-    return int(value.timestamp() * 1_000_000_000)
 
 
 def _event_source_path(loaded: LoadedTelemetrySession, source: CatalogSource) -> str:
@@ -2540,8 +2708,10 @@ def _int_or_none(value: object) -> int | None:
 
 
 __all__ = [
+    "AttachmentStorage",
     "AttachmentFilter",
     "ArtifactCatalog",
+    "CatalogRunEnvelope",
     "CatalogOOMBundle",
     "CatalogSource",
     "CatalogWarning",
@@ -2555,6 +2725,10 @@ __all__ = [
     "OOMBundleFilter",
     "OOMBundleRow",
     "QueryStore",
+    "RunAttachmentFilter",
+    "RunAttachmentRow",
+    "RunFilter",
+    "RunRow",
     "SessionFilter",
     "SessionRow",
     "SummaryRow",

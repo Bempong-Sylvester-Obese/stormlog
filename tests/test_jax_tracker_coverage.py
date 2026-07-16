@@ -1,18 +1,20 @@
 """Tests targeting tracker missing lines for coverage."""
 
+import logging
 import time
 from typing import Any
 from unittest import mock
 
 import pytest
 
-pytest.importorskip("jax")
-
 from stormlog.jax.tracker import (
     COLLECTOR_HEALTH_HEALTHY,
     COLLECTOR_HEALTH_UNHEALTHY,
     MemoryTracker,
 )
+from tests.jax_test_helpers import fake_jax_runtime  # noqa: F401
+
+pytestmark = pytest.mark.usefixtures("fake_jax_runtime")
 
 
 def test_transition_to_failure_and_success() -> None:
@@ -36,6 +38,55 @@ def test_run_tracking_iteration_failure() -> None:
     ):
         tracker._run_tracking_iteration()
         assert tracker._collector_health.status == COLLECTOR_HEALTH_UNHEALTHY
+
+
+def test_unavailable_device_memory_does_not_emit_zero_sample() -> None:
+    tracker = MemoryTracker()
+    tracker._device_memory_available = False
+    tracker._device_memory_unavailable_reason = "backend has no allocator stats"
+
+    tracker._run_tracking_iteration()
+
+    result = tracker.get_tracking_results()
+    assert result.memory_usage == []
+    assert result.device_memory_available is False
+    assert result.memory_source == "unavailable"
+
+
+def test_transient_initial_memory_stats_failure_recovers() -> None:
+    device = mock.Mock()
+    device.memory_stats.side_effect = [
+        RuntimeError("runtime warming up"),
+        {"bytes_in_use": 1024, "bytes_limit": 8192},
+        {"bytes_in_use": 2048, "bytes_limit": 8192},
+    ]
+
+    with mock.patch("stormlog.jax.tracker.jax.local_devices", return_value=[device]):
+        tracker = MemoryTracker()
+
+    assert tracker._device_memory_available is False
+
+    tracker._run_tracking_iteration()
+
+    result = tracker.get_tracking_results()
+    assert result.memory_usage == [2048]
+    assert result.device_memory_available is True
+    assert tracker._collector_health.status == COLLECTOR_HEALTH_HEALTHY
+
+
+def test_string_device_resolution_failure_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with (
+        mock.patch(
+            "stormlog.jax.tracker.resolve_jax_device",
+            side_effect=ValueError("backend unavailable"),
+        ),
+        caplog.at_level(logging.DEBUG, logger="stormlog.jax.tracker"),
+    ):
+        MemoryTracker(device_index="gpu")
+
+    assert "Could not resolve JAX device gpu: backend unavailable" in caplog.text
 
 
 def test_tracking_loop_exception() -> None:

@@ -26,19 +26,20 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
         # Test that lazy loading doesn't crash on import
         assert stormlog.jax.__name__ == "stormlog.jax"
 
-        try:
-            _ = stormlog.jax.MemoryTracker
-        except ImportError as exc:
-            assert "stormlog[jax]" in str(exc)
-        else:
-            raise AssertionError("Expected MemoryTracker symbol load to fail lazily without jax")
+        memory_tracker = stormlog.jax.MemoryTracker
+        memory_profiler = stormlog.jax.JAXMemoryProfiler
+        assert callable(memory_tracker)
+        assert callable(memory_profiler)
 
-        try:
-            _ = stormlog.jax.JAXMemoryProfiler
-        except ImportError as exc:
-            assert "stormlog[jax]" in str(exc)
-        else:
-            raise AssertionError("Expected JAXMemoryProfiler symbol load to fail lazily without jax")
+        for runtime_class in (memory_tracker, memory_profiler):
+            try:
+                runtime_class()
+            except ImportError as exc:
+                assert "stormlog[jax]" in str(exc)
+            else:
+                raise AssertionError(
+                    f"Expected {runtime_class.__name__} construction to fail without jax"
+                )
 
         print("ok")
         """
@@ -54,6 +55,101 @@ def test_jax_imports_are_hardened_when_jax_is_missing() -> None:
         )
     except subprocess.TimeoutExpired as exc:
         pytest.fail(f"JAX import hardening subprocess timed out: {exc}")
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
+
+
+def test_pprof_parser_defers_schema_import_and_preserves_failure_cause() -> None:
+    code = textwrap.dedent(
+        """
+        import importlib
+        import importlib.abc
+        import sys
+
+        class BlockProfileSchema(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "stormlog.jax.profile_pb2":
+                    raise ImportError("incompatible protobuf runtime")
+                return None
+
+        sys.meta_path.insert(0, BlockProfileSchema())
+
+        parser = importlib.import_module("stormlog.jax.pprof_parser")
+
+        try:
+            parser.parse_jax_memory_profile("unused.prof")
+        except ImportError as exc:
+            assert "protobuf>=6.31.1" in str(exc)
+            assert isinstance(exc.__cause__, ImportError)
+            assert "incompatible protobuf runtime" in str(exc.__cause__)
+            assert "grpc_tools.protoc" not in str(exc)
+        else:
+            raise AssertionError("Expected the incompatible schema import to fail")
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "ok" in completed.stdout
+
+
+def test_pprof_parser_wraps_protobuf_runtime_version_error() -> None:
+    code = textwrap.dedent(
+        """
+        import importlib
+        import importlib.abc
+        import sys
+        import types
+
+        runtime_version = types.ModuleType("google.protobuf.runtime_version")
+
+        class VersionError(Exception):
+            pass
+
+        VersionError.__module__ = "google.protobuf.runtime_version"
+        runtime_version.VersionError = VersionError
+        sys.modules["google.protobuf.runtime_version"] = runtime_version
+
+        class BlockProfileSchema(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path=None, target=None):
+                if fullname == "stormlog.jax.profile_pb2":
+                    raise VersionError("generated/runtime version mismatch")
+                return None
+
+        sys.meta_path.insert(0, BlockProfileSchema())
+
+        parser = importlib.import_module("stormlog.jax.pprof_parser")
+
+        try:
+            parser.parse_jax_memory_profile("unused.prof")
+        except ImportError as exc:
+            assert "protobuf>=6.31.1" in str(exc)
+            assert isinstance(exc.__cause__, VersionError)
+            assert "generated/runtime version mismatch" in str(exc.__cause__)
+        else:
+            raise AssertionError("Expected a wrapped protobuf VersionError")
+
+        print("ok")
+        """
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
     assert completed.returncode == 0, completed.stderr
     assert "ok" in completed.stdout
