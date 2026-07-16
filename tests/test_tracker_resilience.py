@@ -93,13 +93,14 @@ class _NoOpThread:
 
 
 class _JoinRecordingThread:
-    def __init__(self) -> None:
+    def __init__(self, *, stops_within_timeout: bool = True) -> None:
         self.join_timeout: float | None = -1.0
         self.alive = True
+        self.stops_within_timeout = stops_within_timeout
 
     def join(self, timeout: float | None = None) -> None:
         self.join_timeout = timeout
-        if timeout is None:
+        if self.stops_within_timeout:
             self.alive = False
 
     def is_alive(self) -> bool:
@@ -527,9 +528,28 @@ def test_stop_tracking_waits_for_worker_before_recording_stop(
 
     tracker.stop_tracking()
 
-    assert worker.join_timeout is None
+    assert worker.join_timeout == 5.0
     assert worker.is_alive() is False
     assert tracker.get_events()[-1].event_type == "stop"
+
+
+def test_stop_tracking_does_not_finalize_while_worker_is_alive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    collector = _SequencedCollector(
+        [DeviceMemorySampleResult(sample=_sample(allocated=128, reserved=256))]
+    )
+    tracker = _build_tracker(monkeypatch, collector)
+    worker = _JoinRecordingThread(stops_within_timeout=False)
+    tracker.is_tracking = True
+    tracker._tracking_thread = cast(Any, worker)
+
+    with pytest.raises(TimeoutError, match="did not stop within 5.0 seconds"):
+        tracker.stop_tracking()
+
+    assert worker.join_timeout == 5.0
+    assert tracker.is_tracking is True
+    assert all(event.event_type != "stop" for event in tracker.get_events())
 
 
 def test_memory_tracker_disables_failing_sink_and_keeps_tracking(

@@ -592,11 +592,16 @@ class MemoryTracker:
         if not self.is_tracking:
             return
 
-        self.is_tracking = False
         self._stop_event.set()
 
         if self._tracking_thread:
-            self._tracking_thread.join()
+            self._tracking_thread.join(timeout=5.0)
+            if self._tracking_thread.is_alive():
+                raise TimeoutError(
+                    "Memory tracking thread did not stop within 5.0 seconds"
+                )
+
+        self.is_tracking = False
 
         # Add final event
         self._add_event("stop", 0, "Memory tracking stopped")
