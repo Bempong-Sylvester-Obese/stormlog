@@ -1,6 +1,7 @@
 """Tests for JAX visualizer."""
 
 import json
+from types import SimpleNamespace
 from typing import Any
 from unittest import mock
 
@@ -115,6 +116,15 @@ def test_export_data_omits_unavailable_device_samples(tmp_path: Any) -> None:
         ProfileResult(0, 2, 100, 100, 100, snapshots, {}), str(output), "json"
     )
     assert len(json.loads(output.read_text())) == 1
+
+
+def test_export_data_rejects_mismatched_fallback_timeline_lengths(
+    tmp_path: Any,
+) -> None:
+    results = SimpleNamespace(timestamps=[1.0, 2.0], memory_usage=[1024])
+
+    with pytest.raises(ValueError):
+        MemoryVisualizer().export_data(results, str(tmp_path / "timeline.json"), "json")
 
 
 def test_dashboard_uses_modern_dash_runner() -> None:

@@ -254,5 +254,6 @@ class MemoryVisualizer:
             for timestamp, memory in zip(
                 getattr(results, "timestamps", []),
                 getattr(results, "memory_usage", []),
+                strict=True,
             )
         ]

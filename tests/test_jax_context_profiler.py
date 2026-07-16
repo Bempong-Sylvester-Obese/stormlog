@@ -141,6 +141,31 @@ def test_jax_profiler_training_replays_multi_epoch_generator(
 
 
 @jax_mark
+def test_jax_profiler_training_does_not_preiterate_reiterable_dataset(
+    mock_device: mock.Mock,
+) -> None:
+    class ReiterableDataset:
+        def __init__(self) -> None:
+            self.iter_calls = 0
+
+        def __iter__(self) -> Any:
+            self.iter_calls += 1
+            return iter([1, 2])
+
+    with mock.patch(
+        "stormlog.jax.profiler.jax.local_devices", return_value=[mock_device]
+    ):
+        with mock.patch("stormlog.jax.profiler.jax.numpy.zeros") as mock_zeros:
+            mock_zeros.return_value.block_until_ready.return_value = None
+            profiler = JAXProfiler(device_index=0)
+            dataset = ReiterableDataset()
+
+            profiler.profile_training(lambda batch: None, dataset, epochs=2)
+
+    assert dataset.iter_calls == 2
+
+
+@jax_mark
 def test_jax_profiler_training_caps_generator_replay_snapshot(
     mock_device: mock.Mock,
 ) -> None:

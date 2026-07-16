@@ -14,6 +14,7 @@ from __future__ import annotations
 import functools
 import logging
 import threading
+from collections.abc import Iterator
 from contextlib import contextmanager
 from itertools import islice
 from typing import (
@@ -21,7 +22,6 @@ from typing import (
     Any,
     Callable,
     Dict,
-    Iterator,
     List,
     Optional,
     TypeVar,
@@ -331,13 +331,8 @@ class JAXProfiler:
         # Convert true single-use iterators only when multiple epochs need
         # replay.  Respect steps_per_epoch so large/infinite streams are not
         # drained just to build the replay snapshot.
-        if dataset_factory is None and epochs > 1:
-            dataset_iterator = _iter_training_batches(dataset, "dataset")
-            if dataset_iterator is dataset:
-                dataset = _materialize_replay_batches(
-                    dataset_iterator,
-                    steps_per_epoch,
-                )
+        if dataset_factory is None and epochs > 1 and isinstance(dataset, Iterator):
+            dataset = _materialize_replay_batches(dataset, steps_per_epoch)
 
         with self.profiler.profile_context("training"):
             first_epoch_steps: Optional[int] = None
