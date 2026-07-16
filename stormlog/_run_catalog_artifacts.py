@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ._datetime import datetime_to_ns as _datetime_to_ns
+from ._datetime import parse_datetime as _parse_datetime
 from ._run_catalog_context import build_identity_index, run_id_for_identity
 from ._run_catalog_models import (
     CatalogRunEnvelope,
@@ -407,27 +408,6 @@ def local_attachment_row(
         source_ref=None,
         metadata=metadata,
     )
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _datetime_to_ns(value: datetime | None) -> int | None:
-    if value is None:
-        return None
-    return int(value.timestamp() * 1_000_000_000)
 
 
 __all__ = [

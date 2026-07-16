@@ -9,10 +9,11 @@ import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from ._datetime import datetime_to_ns as _datetime_to_ns
+from ._datetime import parse_datetime as _parse_datetime
 from .correlation import (
     ATTACHMENTS_FILENAME,
     ATTACHMENTS_FORMAT,
@@ -2046,27 +2047,6 @@ def _evidence_id(*parts: object) -> str:
     payload = json.dumps([str(part) for part in parts], sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
     return f"evidence-{digest}"
-
-
-def _parse_datetime(value: str | None) -> datetime | None:
-    if not value:
-        return None
-    text = value.strip()
-    if text.endswith("Z"):
-        text = f"{text[:-1]}+00:00"
-    try:
-        parsed = datetime.fromisoformat(text)
-    except ValueError:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _datetime_to_ns(value: datetime | None) -> int | None:
-    if value is None:
-        return None
-    return int(value.timestamp() * 1_000_000_000)
 
 
 def _event_source_path(loaded: LoadedTelemetrySession, source: CatalogSource) -> str:
