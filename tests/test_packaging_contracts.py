@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 from packaging.requirements import Requirement
+from packaging.version import Version
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -47,6 +48,18 @@ def test_all_extra_covers_every_runtime_extra() -> None:
 
 def test_all_extra_uses_protobuf_compatible_tensorflow() -> None:
     extras = _optional_dependencies()
+    requirements = {
+        requirement.name.lower(): requirement
+        for requirement in map(Requirement, extras["all"])
+    }
 
-    assert "tensorflow>=2.21.0" in extras["all"]
-    assert "protobuf>=6.31.1" in extras["all"]
+    assert any(
+        specifier.operator in {">", ">="}
+        and Version(specifier.version) >= Version("2.21.0")
+        for specifier in requirements["tensorflow"].specifier
+    )
+    assert any(
+        specifier.operator in {">", ">="}
+        and Version(specifier.version) >= Version("6.31.1")
+        for specifier in requirements["protobuf"].specifier
+    )
