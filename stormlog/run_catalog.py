@@ -44,12 +44,12 @@ RunFilter = _models.RunFilter
 RunRow = _models.RunRow
 
 __all__ = [
-    "AttachmentStorage",
-    "CatalogRunAttachment",
-    "CatalogRunSessionRef",
     "RUN_ENVELOPE_FILENAME",
     "RUN_ENVELOPE_FORMAT",
     "RUN_ENVELOPE_SCHEMA_VERSION",
+    "AttachmentStorage",
+    "CatalogRunAttachment",
+    "CatalogRunSessionRef",
     "RunContext",
     "RunIdentityConflict",
     "RunIdentityIndex",
